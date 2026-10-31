@@ -1,0 +1,98 @@
+<template>
+	<view class="placeholder">
+		<app-navbar :title="title" :show-back="true"></app-navbar>
+		<view class="placeholder-body">
+			<text class="placeholder-batch" :style="batchStyle">{{ batchText }}</text>
+			<text class="placeholder-title" :style="titleStyle">{{ title }}</text>
+			<text class="placeholder-note" :style="noteStyle">{{ note }}</text>
+			<view class="placeholder-hint-box">
+				<text class="placeholder-hint" :style="noteStyle">{{ hint }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import { textPrimary, textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 统一占位页。用于「已存在入口、业务归后续批次」的跳转目标：
+ * 卡片进详情（P4）、搜索（P7）、私信（P8）、直播（P9）、番剧（P11）、动态（P6）、媒体库（P5）。
+ * 页面如实写明归属批次，不渲染任何假按钮（真实落点纪律）。
+ */
+const title = ref<string>('功能占位')
+const note = ref<string>('')
+const batch = ref<string>('')
+
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const noteStyle = computed((): string => 'color:' + textSecondary() + ';')
+const batchStyle = computed((): string => 'color:' + themeColor(currentThemeIndex()) + ';')
+const batchText = computed((): string => {
+	if (batch.value.length == 0) {
+		return ''
+	}
+	return batch.value + ' 批次接入'
+})
+const hint = computed((): string => {
+	const target = note.value.length > 0 ? note.value : title.value
+	return '「' + target + '」尚未迁移到当前版本，接入后本页将替换为真实内容。'
+})
+
+onLoad((query) => {
+	if (query != null) {
+		const t = query['title']
+		if (t != null) {
+			title.value = decodeURIComponent(t)
+		}
+		const n = query['note']
+		if (n != null) {
+			note.value = decodeURIComponent(n)
+		}
+		const b = query['batch']
+		if (b != null) {
+			batch.value = decodeURIComponent(b)
+		}
+	}
+})
+</script>
+
+<style>
+	.placeholder {
+		flex: 1;
+		background-color: #F6F7F8;
+	}
+	.placeholder-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 24px;
+		padding-right: 24px;
+		padding-top: 40px;
+	}
+	.placeholder-batch {
+		font-size: 12px;
+	}
+	.placeholder-title {
+		font-size: 20px;
+		font-weight: bold;
+		margin-top: 10px;
+	}
+	.placeholder-note {
+		font-size: 13px;
+		line-height: 20px;
+		margin-top: 8px;
+	}
+	.placeholder-hint-box {
+		margin-top: 24px;
+		padding: 14px;
+		border-radius: 10px;
+		background-color: #FFFFFF;
+	}
+	.placeholder-hint {
+		font-size: 13px;
+		line-height: 20px;
+	}
+</style>

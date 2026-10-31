@@ -1,0 +1,209 @@
+import { API_BASE, REFERER, UA_MOBILE, REQUEST_TIMEOUT, STATUS_WHITELIST } from './constants.uts'
+import { saveSetCookie, cookieDebug, syncFromPlatform } from './cookie.uts'
+import { logWarn } from './logger.uts'
+import { Params } from './params.uts'
+
+function hostOf(url: string): string {
+	const schemeIndex = url.indexOf('://')
+	const start = schemeIndex >= 0 ? schemeIndex + 3 : 0
+	const rest = url.substring(start)
+	const slash = rest.indexOf('/')
+	return slash >= 0 ? rest.substring(0, slash) : rest
+}
+
+function buildQuery(params: Params | null): string {
+	if (params == null || params.size() == 0) {
+		return ''
+	}
+	return '?' + params.toQuery()
+}
+
+function buildHeader(url: string, extraHeaders: Params | null): UTSJSONObject {
+	const header: UTSJSONObject = {}
+	header.set('referer', REFERER)
+	header.set('user-agent', UA_MOBILE)
+	// 不注入 Cookie 头：实测平台自管 cookie（保存 + 自动携带 + 跨进程持久），
+	// 而显式 Cookie 头会让平台不再追加自己的 cookie（实测 /headers 只回显显式值），
+	// 用不完整的镜像 jar 覆盖平台 jar 会丢登录态。详见 utils/cookie.uts 文件头。
+	if (extraHeaders != null) {
+		const keys = extraHeaders.keys()
+		for (let i = 0; i < keys.length; i++) {
+			const value = extraHeaders.get(keys[i])
+			if (value != null) {
+				header.set(keys[i], value)
+			}
+		}
+	}
+	return header
+}
+
+function resolveUrl(path: string): string {
+	if (path.startsWith('http://') || path.startsWith('https://')) {
+		return path
+	}
+	return API_BASE + path
+}
+
+function toJsonObject(data: any | null): UTSJSONObject | null {
+	if (data == null) {
+		return null
+	}
+	if (typeof data == 'object') {
+		return data as UTSJSONObject
+	}
+	const text = data as string
+	if (text.length == 0) {
+		return null
+	}
+	try {
+		return JSON.parse<UTSJSONObject>(text)
+	} catch (e) {
+		return null
+	}
+}
+
+function statusAllowed(statusCode: number): boolean {
+	if (statusCode >= 200 && statusCode < 300) {
+		return true
+	}
+	for (let i = 0; i < STATUS_WHITELIST.length; i++) {
+		if (STATUS_WHITELIST[i] == statusCode) {
+			return true
+		}
+	}
+	return false
+}
+
+function safeHandle(url: string, statusCode: number, rawHeader: UTSJSONObject, data: any | null): UTSJSONObject | null {
+	try {
+		// 响应头对象只能用下标取值：实测 res.header.get()/getString() 运行时抛异常，
+		// 旧写法被 try/catch 吞掉导致 Set-Cookie 从未被解析（见 规范_uts运行时坑.md 第八条）
+		let rawCookie: any | null = null
+		try {
+			rawCookie = rawHeader['set-cookie']
+		} catch (e) {
+			rawCookie = null
+		}
+		if (rawCookie == null) {
+			try {
+				rawCookie = rawHeader['Set-Cookie']
+			} catch (e2) {
+				rawCookie = null
+			}
+		}
+		if (rawCookie != null) {
+			saveSetCookie(rawCookie.toString(), hostOf(url))
+		}
+		if (!statusAllowed(statusCode)) {
+			console.log('[request] status=' + statusCode.toString() + ' url=' + url)
+			logWarn('request', 'HTTP ' + statusCode.toString() + ' ' + url)
+			return null
+		}
+		return toJsonObject(data)
+	} catch (e) {
+		console.log('[request] handler error url=' + url)
+		console.log(e)
+		return null
+	}
+}
+
+export function apiGet(path: string, params: Params | null = null, extraHeaders: Params | null = null): Promise<UTSJSONObject | null> {
+	const url = resolveUrl(path) + buildQuery(params)
+	const header = buildHeader(url, extraHeaders)
+	return new Promise((resolve) => {
+		uni.request({
+			url: url,
+			method: 'GET',
+			header: header,
+			timeout: REQUEST_TIMEOUT,
+			success: (res) => {
+				resolve(safeHandle(url, res.statusCode, res.header, res.data))
+			},
+			fail: (err) => {
+				console.log('[request] fail url=' + url + ' err=' + JSON.stringify(err))
+				logWarn('request', 'fail ' + url + ' ' + JSON.stringify(err))
+				resolve(null)
+			}
+		})
+	})
+}
+
+export function apiPost(path: string, body: UTSJSONObject | null = null, params: Params | null = null, extraHeaders: Params | null = null): Promise<UTSJSONObject | null> {
+	const url = resolveUrl(path) + buildQuery(params)
+	const header = buildHeader(url, extraHeaders)
+	// 写接口按源工程 dio 默认的 form 编码提交：B站只认表单字段里的 csrf 等参数，
+	// JSON 体外加同一份 csrf 会被判「-111 CSRF 校验失败」（真机实测）。
+	// 需要 JSON 体的端点（源显式 Options(contentType: 'application/json')）由调用方经
+	// extraHeaders 传 content-type 覆盖，本默认不生效。
+	if (extraHeaders == null || extraHeaders.get('content-type') == null) {
+		header.set('content-type', 'application/x-www-form-urlencoded')
+	}
+	return new Promise((resolve) => {
+		uni.request({
+			url: url,
+			method: 'POST',
+			header: header,
+			data: body,
+			timeout: REQUEST_TIMEOUT,
+			success: (res) => {
+				resolve(safeHandle(url, res.statusCode, res.header, res.data))
+			},
+			fail: (err) => {
+				console.log('[request] fail url=' + url + ' err=' + JSON.stringify(err))
+				resolve(null)
+			}
+		})
+	})
+}
+
+/**
+ * 取写接口（点赞/投币/收藏/关注/稍后再看）所需的 csrf（即 cookie 里的 bili_jct）。
+ *
+ * 取值来源：本机 cookie **镜像**（cookie.uts 按域持久化的记录）。镜像有两条写入路径：
+ *  1. `uni.request` 响应的 Set-Cookie（请求层发起的登录/会话刷新）；
+ *  2. `syncFromPlatform()` 从平台 jar 回读（web-view 登录只写平台 jar，不经过响应，必须回读）。
+ * 每次取值前先回读一次平台 jar，保证「重新登录 / 换账号」后无需重启即生效。
+ *
+ * 返回空串 = 无凭据（未登录，或 web/小程序端无 jar 读取能力），调用方必须按「凭据缺失」
+ * 明确失败，不得静默把写操作当成成功（见 api/play.uts 的 postWithCsrf）。
+ */
+export function getCsrf(): string {
+	syncFromPlatform()
+	const jar = cookieDebug('bilibili.com')
+	if (jar.length == 0) {
+		return ''
+	}
+	const parts = jar.split(';')
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i].trim()
+		const eq = part.indexOf('=')
+		if (eq <= 0) {
+			continue
+		}
+		const name = part.substring(0, eq).trim()
+		if (name == 'bili_jct') {
+			return part.substring(eq + 1).trim()
+		}
+	}
+	return ''
+}
+
+/** 访问非 API 域名（如 www.bilibili.com、passport 页面），同样走 cookie 管理 */
+export function rawGet(url: string, extraHeaders: Params | null = null): Promise<UTSJSONObject | null> {
+	const header = buildHeader(url, extraHeaders)
+	return new Promise((resolve) => {
+		uni.request({
+			url: url,
+			method: 'GET',
+			header: header,
+			timeout: REQUEST_TIMEOUT,
+			success: (res) => {
+				resolve(safeHandle(url, res.statusCode, res.header, res.data))
+			},
+			fail: (err) => {
+				console.log('[request] fail url=' + url + ' err=' + JSON.stringify(err))
+				resolve(null)
+			}
+		})
+	})
+}

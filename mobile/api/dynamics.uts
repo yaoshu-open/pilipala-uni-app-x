@@ -1,0 +1,363 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { VC_BASE } from '../utils/constants.uts'
+import { objOf, arrOf, numOf, strOf } from '../utils/json.uts'
+import { DynamicItem } from '../models/member.uts'
+import {
+	FollowUpResult, FollowUpPanel, DynamicsFeedResult, DynamicDetailResult,
+	ArticleViewInfoResult, DynamicsActionResult, FollowUpItem
+} from '../models/dynamics.uts'
+import { isBlockedMid } from './video.uts'
+import { userState } from '../stores/user.uts'
+
+/**
+ * 动态域接口层（源头：`lib/http/dynamics.dart` 的 DynamicsHttp）。
+ *
+ * 约定与工程其它 api 文件一致：
+ *  - 内部 `xxxRaw` 负责请求 + 解析，导出函数统一 try/catch 兜底，解析异常落失败结果并打日志，
+ *    不让异常穿透到页面；
+ *  - 失败不伪装成空：message 优先取接口 message；-101（未登录）原样透传 code，页面据此给「去登录」；
+ *  - feed 黑名单过滤：module_author.mid 命中 P3 isBlockedMid（SK.blackMidsList）的条目不进列表
+ *    （与推荐流同职责：黑名单 UP 内容不展示）；
+ *  - 写接口 csrf 前置校验：getCsrf() 空串时明确失败「登录凭据缺失，请重新登录后再试」，
+ *    不发无凭据请求、不假成功（P4/P5 统一口径）。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+// ---------------------------------------------------------------- 动态流（feed/all）
+
+async function fetchFeedRaw(type: string, page: number, offset: string, hostMid: number): Promise<DynamicsFeedResult> {
+	const result = new DynamicsFeedResult()
+	const params = new Params()
+	params.set('type', type)
+	params.setNum('page', page)
+	// 源同款：选定 UP（host_mid）时替代 timezone_offset
+	if (hostMid > 0) {
+		params.setNum('host_mid', hostMid)
+	} else {
+		params.setNum('timezone_offset', -480)
+	}
+	// 源：page==1 时 offset 传空串
+	params.set('offset', page == 1 ? '' : offset)
+	params.set('features', 'itemOpusStyle')
+	const res = await apiGet('/x/polymer/web-dynamic/v1/feed/all', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[dynamics] feed code=' + result.code.toString() + ' type=' + type + ' page=' + page.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	const items = arrOf(data, 'items')
+	for (let i = 0; i < items.length; i++) {
+		const item = DynamicItem.from(items[i])
+		// 黑名单 UP 过滤（P3 isBlockedMid 复用）
+		if (isBlockedMid(item.modules.author.mid)) {
+			continue
+		}
+		result.items.push(item)
+	}
+	result.offset = strOf(data, 'offset')
+	result.hasMore = numOf(data, 'has_more') == 1
+	result.status = true
+	console.log('[dynamics] feed ok type=' + type + ' page=' + page.toString() +
+		' items=' + result.items.length.toString() + ' hasMore=' + result.hasMore.toString())
+	return result
+}
+
+/**
+ * 关注动态流。type：all/video/pgc/article（源 DynamicsType.values）；
+ * 分页：page 从 1 起、offset 传上页返回值；hostMid>0 时为单 UP 过滤流。
+ */
+export async function fetchDynamicFeed(type: string, page: number, offset: string, hostMid: number = 0): Promise<DynamicsFeedResult> {
+	try {
+		return await fetchFeedRaw(type, page, offset, hostMid)
+	} catch (e) {
+		console.log('[dynamics] fetchDynamicFeed error type=' + type + ' page=' + page.toString())
+		console.log(e)
+		const failed = new DynamicsFeedResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 最新关注面板（portal）
+
+async function fetchPortalRaw(): Promise<FollowUpResult> {
+	const result = new FollowUpResult()
+	const res = await apiGet('/x/polymer/web-dynamic/v1/portal', null)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[dynamics] portal code=' + result.code.toString())
+		return result
+	}
+	const panel = FollowUpPanel.from(objOf(res, 'data'))
+	// 源 queryFollowUp 同款：upList 头插「全部动态 / 我」两项
+	if (panel.upList.length > 0) {
+		const all = new FollowUpItem()
+		all.uname = '全部动态'
+		all.mid = -1
+		const mine = new FollowUpItem()
+		mine.uname = '我'
+		mine.mid = panel.myMid
+		mine.face = panel.myFace
+		const merged: Array<FollowUpItem> = [all, mine]
+		for (let i = 0; i < panel.upList.length; i++) {
+			merged.push(panel.upList[i])
+		}
+		panel.upList = merged
+	}
+	result.panel = panel
+	result.status = true
+	console.log('[dynamics] portal ok ups=' + panel.upList.length.toString() + ' lives=' + panel.liveList.length.toString())
+	return result
+}
+
+/** 最新关注面板（登录态接口；未登录由页面拦截，不落到此处） */
+export async function fetchFollowUpPanel(): Promise<FollowUpResult> {
+	try {
+		return await fetchPortalRaw()
+	} catch (e) {
+		console.log('[dynamics] fetchFollowUpPanel error')
+		console.log(e)
+		const failed = new FollowUpResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 动态详情（detail）
+
+async function fetchDetailRaw(id: string): Promise<DynamicDetailResult> {
+	const result = new DynamicDetailResult()
+	if (id.length == 0) {
+		result.message = '缺少动态 id，请从动态列表进入'
+		return result
+	}
+	const params = new Params()
+	params.setNum('timezone_offset', -480)
+	params.set('id', id)
+	params.set('features', 'itemOpusStyle')
+	const res = await apiGet('/x/polymer/web-dynamic/v1/detail', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[dynamics] detail code=' + result.code.toString() + ' id=' + id)
+		return result
+	}
+	const data = objOf(res, 'data')
+	const itemObj = data == null ? null : objOf(data, 'item')
+	if (itemObj == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	result.item = DynamicItem.from(itemObj)
+	result.status = true
+	console.log('[dynamics] detail ok id=' + id + ' type=' + result.item.type)
+	return result
+}
+
+/** 动态详情：按 id 重取单条动态（目标端路由仅可传字符串，详情页不依赖上一页对象） */
+export async function fetchDynamicDetail(id: string): Promise<DynamicDetailResult> {
+	try {
+		return await fetchDetailRaw(id)
+	} catch (e) {
+		console.log('[dynamics] fetchDynamicDetail error id=' + id)
+		console.log(e)
+		const failed = new DynamicDetailResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 图文评论 oid（viewinfo）
+
+async function fetchViewInfoRaw(opusId: string): Promise<ArticleViewInfoResult> {
+	const result = new ArticleViewInfoResult()
+	const params = new Params()
+	params.set('id', opusId)
+	params.set('mobi_app', 'pc')
+	const res = await apiGet('/x/article/viewinfo', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		console.log('[dynamics] viewinfo code=' + code.toString() + ' id=' + opusId)
+		return result
+	}
+	const data = objOf(res, 'data')
+	result.commentId = data == null ? 0 : numOf(data, 'comment_id')
+	if (result.commentId <= 0) {
+		result.message = '评论信息获取失败'
+		return result
+	}
+	result.status = true
+	return result
+}
+
+/**
+ * 图文动态评论 oid 前置：floor=2 且 major 为 MAJOR_TYPE_OPUS 时，
+ * 从 opus jumpUrl 末段取 opusId 再换 comment_id（源 reqHtmlByOpusId 的 viewinfo 等价实现）。
+ */
+export async function fetchArticleViewInfo(opusId: string): Promise<ArticleViewInfoResult> {
+	try {
+		return await fetchViewInfoRaw(opusId)
+	} catch (e) {
+		console.log('[dynamics] fetchArticleViewInfo error id=' + opusId)
+		console.log(e)
+		const failed = new ArticleViewInfoResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 动态点赞（写，需 csrf）
+
+async function likeDynamicRaw(dynamicId: string, up: number): Promise<DynamicsActionResult> {
+	const result = new DynamicsActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[dynamics] like csrf empty id=' + dynamicId)
+		return result
+	}
+	const params = new Params()
+	params.set('dynamic_id', dynamicId)
+	params.setNum('up', up)
+	params.set('csrf', csrf)
+	// 源 Api.likeDynamic 挂在 api.vc.bilibili.com 域
+	const res = await apiPost(VC_BASE + '/dynamic_like/v1/dynamic_like/thumb', params.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[dynamics] like code=' + result.code.toString() + ' id=' + dynamicId)
+		return result
+	}
+	result.status = true
+	return result
+}
+
+/** 动态点赞；up：1 点赞 / 2 取消（源 ActionPanel.onLikeDynamic 同款语义） */
+export async function likeDynamic(dynamicId: string, up: number): Promise<DynamicsActionResult> {
+	try {
+		return await likeDynamicRaw(dynamicId, up)
+	} catch (e) {
+		console.log('[dynamics] likeDynamic error id=' + dynamicId)
+		console.log(e)
+		const failed = new DynamicsActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 转发动态（写，需 csrf）
+
+async function createForwardRaw(dynIdStr: string, rawText: string): Promise<DynamicsActionResult> {
+	const result = new DynamicsActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[dynamics] forward csrf empty id=' + dynIdStr)
+		return result
+	}
+	// 源 dynamicCreate：uploadId = mid_时间戳_4位随机
+	const now = Date.now()
+	const seed = now % 9000 + 1000
+	const uploadId = userState.info.mid.toString() + '_' + Math.floor(now / 1000).toString() + '_' + seed.toString()
+	// 源同构：dyn_req（scene=4 转发）+ web_repost_src.dyn_id_str
+	const contents: Array<UTSJSONObject> = []
+	const seg: UTSJSONObject = {}
+	seg.set('raw_text', rawText)
+	seg.set('type', 1)
+	seg.set('biz_id', '')
+	contents.push(seg)
+	const content: UTSJSONObject = {}
+	content.set('contents', contents)
+	const appMeta: UTSJSONObject = {}
+	appMeta.set('from', 'create.dynamic.web')
+	appMeta.set('mobi_app', 'web')
+	const meta: UTSJSONObject = {}
+	meta.set('app_meta', appMeta)
+	const dynReq: UTSJSONObject = {}
+	dynReq.set('content', content)
+	dynReq.set('scene', 4)
+	// attach_card 源显式传 null；uts 侧 set(null) 行为未实测，省略该键（服务端缺省与 null 等价）
+	dynReq.set('upload_id', uploadId)
+	dynReq.set('meta', meta)
+	const webRepostSrc: UTSJSONObject = {}
+	webRepostSrc.set('dyn_id_str', dynIdStr)
+	const body: UTSJSONObject = {}
+	body.set('dyn_req', dynReq)
+	body.set('web_repost_src', webRepostSrc)
+	const query = new Params()
+	query.set('platform', 'web')
+	query.set('csrf', csrf)
+	// 源本端点显式 Options(contentType: 'application/json')：嵌套动态体不能走表单编码
+	const headers = new Params()
+	headers.set('content-type', 'application/json')
+	const res = await apiPost('/x/dynamic/feed/create/dyn', body, query, headers)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[dynamics] forward code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+/**
+ * 转发动态（scene=4）。源 dynamicForward 的 submit_check 预检端点无 UI 调用方，死代码不迁移
+ * （设计_动态域 §5.3「不迁移项」）。
+ */
+export async function createDynamicForward(dynIdStr: string, rawText: string): Promise<DynamicsActionResult> {
+	try {
+		return await createForwardRaw(dynIdStr, rawText)
+	} catch (e) {
+		console.log('[dynamics] createDynamicForward error id=' + dynIdStr)
+		console.log(e)
+		const failed = new DynamicsActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}

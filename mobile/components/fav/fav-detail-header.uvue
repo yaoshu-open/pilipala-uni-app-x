@@ -1,0 +1,70 @@
+<template>
+	<view class="fdh">
+		<view class="fdh-cover">
+			<network-img :src="cover" width="180px" height="110px" radius="10px"></network-img>
+		</view>
+		<view class="fdh-body">
+			<view class="fdh-gap4"></view>
+			<text class="fdh-title" :style="titleStyle" :max-lines="1">{{ title }}</text>
+			<view class="fdh-gap4"></view>
+			<text class="fdh-upper" :style="secondaryStyle" :max-lines="1">{{ upperName }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 收藏夹详情头部块（源头：`lib/pages/fav_detail/view.dart` SliverAppBar 的 flexibleSpace 内容区）。
+ *
+ * 规格（源码常量）：封面 NetworkImgLayer(180×110) + 14 间距 + 右列
+ *（top 4：夹名 titleMedium(16) bold；间距 4：UP 名 labelSmall(11) 次要色）；
+ * 容器左右内边距 20。订阅详情头部（簇C subscription-detail）同构消费。
+ * 「共N条视频」计数行不在本组件（源在头部块下方独立行，由页面渲染）。
+ */
+const props = defineProps({
+	cover: { type: String, default: '' },
+	title: { type: String, default: '' },
+	upperName: { type: String, default: '' }
+})
+
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+</script>
+
+<style>
+	.fdh {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 10px;
+		padding-bottom: 14px;
+	}
+	.fdh-cover {
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.fdh-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 14px;
+	}
+	.fdh-gap4 {
+		height: 4px;
+	}
+	.fdh-title {
+		font-size: 16px;
+		font-weight: 700;
+		line-height: 22px;
+	}
+	.fdh-upper {
+		font-size: 11px;
+		line-height: 16px;
+	}
+</style>

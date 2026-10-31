@@ -1,0 +1,302 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { arrOf, objOf, numOf } from '../utils/json.uts'
+import {
+	NavUserInfo, NavUserResult, NavStatResult, NavUserStat,
+	SubFolderResult, SubDetailResult
+} from '../models/user-center.uts'
+import { SubFolderItem, SubDetailMedia, FavDetailInfo } from '../models/fav.uts'
+import { ActionResult } from '../models/video-detail.uts'
+
+/**
+ * 用户中心域接口层（源头：lib/http/user.dart 的 userInfo/userStatOwner/userSubFolder/
+ * userSeasonList/userResourceList/cancelSub）。
+ *
+ * 分工（设计 §十一）：本文件承载 nav/navStat + 订阅族（簇C）；
+ * 收藏夹列表（fetchFavFolder）、fav 详情与写操作在 api/fav.uts（簇B 先落地），页面按需混用；
+ * history/later 部分归簇B 追加。
+ *
+ * 约定与 api/video.uts 一致：内部 `xxxRaw` 请求+解析，导出函数 try/catch 兜底，
+ * 解析异常落失败结果，绝不让异常穿透到页面。
+ * 写操作（取消订阅）前置 csrf 校验：取不到凭据即明确失败，不发无凭据请求。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+function numOfStrict(obj: UTSJSONObject, key: string): number {
+	const value = obj.getNumber(key)
+	return value == null ? 0 : value
+}
+
+/** 未登录错误码（订阅页据此把重试按钮改为「去登录」） */
+export const USER_CENTER_CODE_NOT_LOGIN: number = -101
+
+// ---------------------------------------------------------------- nav：用户信息
+
+/** 当前登录用户信息（源 UserHttp.userInfo → /x/web-interface/nav；mine 资料卡消费） */
+async function fetchNavUserRaw(): Promise<NavUserResult> {
+	const result = new NavUserResult()
+	const res = await apiGet('/x/web-interface/nav')
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	result.data = NavUserInfo.from(data)
+	result.status = true
+	return result
+}
+
+export async function fetchNavUser(): Promise<NavUserResult> {
+	try {
+		return await fetchNavUserRaw()
+	} catch (e) {
+		console.log('[user-center] fetchNavUser error')
+		console.log(e)
+		const failed = new NavUserResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- nav：统计
+
+/** 动态/关注/粉丝计数（源 UserHttp.userStatOwner → /x/web-interface/nav/stat） */
+async function fetchNavStatRaw(): Promise<NavStatResult> {
+	const result = new NavStatResult()
+	const res = await apiGet('/x/web-interface/nav/stat')
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	const stat = new NavUserStat()
+	stat.following = numOfStrict(data, 'following')
+	stat.follower = numOfStrict(data, 'follower')
+	stat.dynamicCount = numOfStrict(data, 'dynamic_count')
+	result.stat = stat
+	result.status = true
+	return result
+}
+
+export async function fetchNavStat(): Promise<NavStatResult> {
+	try {
+		return await fetchNavStatRaw()
+	} catch (e) {
+		console.log('[user-center] fetchNavStat error')
+		console.log(e)
+		const failed = new NavStatResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 订阅：列表
+
+/** 我的订阅（源 UserHttp.userSubFolder → /x/v3/fav/folder/collected/list；需登录） */
+async function fetchSubFolderRaw(mid: number, pn: number, ps: number): Promise<SubFolderResult> {
+	const result = new SubFolderResult()
+	const params = new Params()
+	params.setNum('up_mid', mid)
+	params.setNum('ps', ps)
+	params.setNum('pn', pn)
+	params.set('platform', 'web')
+	const res = await apiGet('/x/v3/fav/folder/collected/list', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	result.count = numOfStrict(data, 'count')
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(SubFolderItem.fromSub(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchSubFolder(mid: number, pn: number, ps: number): Promise<SubFolderResult> {
+	try {
+		return await fetchSubFolderRaw(mid, pn, ps)
+	} catch (e) {
+		console.log('[user-center] fetchSubFolder error mid=' + mid.toString())
+		console.log(e)
+		const failed = new SubFolderResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 订阅：详情
+
+/** 订阅详情头部 + 内容条目（两个接口 info/medias 同构，本函数只做解析） */
+function parseSubDetail(res: UTSJSONObject): SubDetailResult {
+	const result = new SubDetailResult()
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	const infoObj = objOf(data, 'info')
+	result.info = FavDetailInfo.from(infoObj)
+	if (infoObj != null) {
+		const cntInfo = objOf(infoObj, 'cnt_info')
+		if (cntInfo != null) {
+			result.play = numOf(cntInfo, 'play')
+		}
+	}
+	const list = arrOf(data, 'medias')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(SubDetailMedia.fromSub(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+/** 订阅详情 type=21（源 UserHttp.userSeasonList → /x/space/fav/season/list） */
+async function fetchSeasonListRaw(seasonId: number, pn: number, ps: number): Promise<SubDetailResult> {
+	const params = new Params()
+	params.setNum('season_id', seasonId)
+	params.setNum('ps', ps)
+	params.setNum('pn', pn)
+	const res = await apiGet('/x/space/fav/season/list', params)
+	if (res == null) {
+		const failed = new SubDetailResult()
+		failed.message = '网络异常，请稍后重试'
+		return failed
+	}
+	return parseSubDetail(res)
+}
+
+export async function fetchSeasonList(seasonId: number, pn: number, ps: number): Promise<SubDetailResult> {
+	try {
+		return await fetchSeasonListRaw(seasonId, pn, ps)
+	} catch (e) {
+		console.log('[user-center] fetchSeasonList error seasonId=' + seasonId.toString())
+		console.log(e)
+		const failed = new SubDetailResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 订阅详情 type≠21（源 UserHttp.userResourceList → /x/v3/fav/resource/list） */
+async function fetchSubResourceRaw(mediaId: number, pn: number, ps: number): Promise<SubDetailResult> {
+	const params = new Params()
+	params.setNum('media_id', mediaId)
+	params.setNum('ps', ps)
+	params.setNum('pn', pn)
+	params.set('keyword', '')
+	params.set('order', 'mtime')
+	params.setNum('type', 0)
+	params.setNum('tid', 0)
+	params.set('platform', 'web')
+	const res = await apiGet('/x/v3/fav/resource/list', params)
+	if (res == null) {
+		const failed = new SubDetailResult()
+		failed.message = '网络异常，请稍后重试'
+		return failed
+	}
+	return parseSubDetail(res)
+}
+
+export async function fetchSubResource(mediaId: number, pn: number, ps: number): Promise<SubDetailResult> {
+	try {
+		return await fetchSubResourceRaw(mediaId, pn, ps)
+	} catch (e) {
+		console.log('[user-center] fetchSubResource error mediaId=' + mediaId.toString())
+		console.log(e)
+		const failed = new SubDetailResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 订阅：写
+
+/**
+ * 取消订阅（源 UserHttp.cancelSub → /x/v3/fav/season/unfav）。
+ * csrf 取不到 → 明确失败（toast 文案「登录凭据缺失，请重新登录后再试」由页面透传）。
+ */
+async function cancelSubRaw(seasonId: number): Promise<ActionResult> {
+	const result = new ActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[user-center] csrf empty cancelSub')
+		return result
+	}
+	const body = new Params()
+	body.set('platform', 'web')
+	body.setNum('season_id', seasonId)
+	body.set('csrf', csrf)
+	const res = await apiPost('/x/v3/fav/season/unfav', body.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[user-center] cancelSub fail code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+export async function cancelSub(seasonId: number): Promise<ActionResult> {
+	try {
+		return await cancelSubRaw(seasonId)
+	} catch (e) {
+		console.log('[user-center] cancelSub error seasonId=' + seasonId.toString())
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '网络异常，请稍后重试'
+		return failed
+	}
+}

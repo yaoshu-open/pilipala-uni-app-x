@@ -1,0 +1,125 @@
+import { strOf, numOf, objOf, arrOf } from '../utils/json.uts'
+
+/** 视频卡片的 UP 主（源头：lib/models/model_owner.dart） */
+export class Owner {
+	mid: number = 0
+	name: string = ''
+	face: string = ''
+
+	static from(obj: UTSJSONObject | null): Owner {
+		const owner = new Owner()
+		if (obj == null) {
+			return owner
+		}
+		owner.mid = numOf(obj, 'mid')
+		owner.name = strOf(obj, 'name')
+		owner.face = strOf(obj, 'face')
+		return owner
+	}
+}
+
+/** 推荐流统计（源头：lib/models/model_rec_video_item.dart，弹幕字段名为 danmu） */
+export class RecStat {
+	view: number = 0
+	danmu: number = 0
+	like: number = 0
+}
+
+/** 推荐流条目（源头：lib/models/model_rec_video_item.dart） */
+export class RecVideoItem {
+	id: number = -1
+	bvid: string = ''
+	cid: number = -1
+	goto: string = ''
+	uri: string = ''
+	pic: string = ''
+	title: string = ''
+	duration: number = -1
+	pubdate: number = -1
+	owner: Owner = new Owner()
+	stat: RecStat = new RecStat()
+	isFollowed: number = 0
+	rcmdReason: string = ''
+
+	static from(obj: UTSJSONObject): RecVideoItem {
+		const item = new RecVideoItem()
+		item.id = numOf(obj, 'id')
+		item.bvid = strOf(obj, 'bvid')
+		item.cid = numOf(obj, 'cid')
+		item.goto = strOf(obj, 'goto')
+		item.uri = strOf(obj, 'uri')
+		item.pic = strOf(obj, 'pic')
+		item.title = strOf(obj, 'title')
+		item.duration = numOf(obj, 'duration')
+		item.pubdate = numOf(obj, 'pubdate')
+		item.owner = Owner.from(objOf(obj, 'owner'))
+		const statObj = objOf(obj, 'stat')
+		if (statObj != null) {
+			item.stat.view = numOf(statObj, 'view')
+			item.stat.danmu = numOf(statObj, 'danmaku')
+			item.stat.like = numOf(statObj, 'like')
+		}
+		// 源 is_followed 缺省为 0
+		const followed = obj.getNumber('is_followed')
+		item.isFollowed = followed == null ? 0 : followed
+		const reason = objOf(obj, 'rcmd_reason')
+		if (reason != null) {
+			item.rcmdReason = strOf(reason, 'content')
+		}
+		return item
+	}
+}
+
+/** 热门/榜单统计（源头：lib/models/model_hot_video_item.dart，弹幕字段名为 danmaku） */
+export class HotStat {
+	view: number = 0
+	danmaku: number = 0
+	like: number = 0
+	reply: number = 0
+	favorite: number = 0
+	coin: number = 0
+}
+
+/** 热门/榜单条目（源头：lib/models/model_hot_video_item.dart） */
+export class HotVideoItem {
+	aid: number = 0
+	cid: number = 0
+	bvid: string = ''
+	pic: string = ''
+	title: string = ''
+	pubdate: number = 0
+	duration: number = 0
+	tname: string = ''
+	owner: Owner = new Owner()
+	stat: HotStat = new HotStat()
+
+	static from(obj: UTSJSONObject): HotVideoItem {
+		const item = new HotVideoItem()
+		item.aid = numOf(obj, 'aid')
+		item.cid = numOf(obj, 'cid')
+		item.bvid = strOf(obj, 'bvid')
+		item.pic = strOf(obj, 'pic')
+		item.title = strOf(obj, 'title')
+		item.pubdate = numOf(obj, 'pubdate')
+		item.duration = numOf(obj, 'duration')
+		item.tname = strOf(obj, 'tname')
+		item.owner = Owner.from(objOf(obj, 'owner'))
+		const statObj = objOf(obj, 'stat')
+		if (statObj != null) {
+			item.stat.view = numOf(statObj, 'view')
+			item.stat.danmaku = numOf(statObj, 'danmaku')
+			item.stat.like = numOf(statObj, 'like')
+			item.stat.reply = numOf(statObj, 'reply')
+			item.stat.favorite = numOf(statObj, 'favorite')
+			item.stat.coin = numOf(statObj, 'coin')
+		}
+		return item
+	}
+}
+
+/** 列表请求结果（对齐源返回结构 {status, data, msg}） */
+export class ListResult<T> {
+	status: boolean = false
+	message: string = ''
+	items: Array<T> = []
+}

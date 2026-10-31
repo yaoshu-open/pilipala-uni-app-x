@@ -1,0 +1,68 @@
+/**
+ * 有序参数容器。
+ * 运行时不提供 UTSJSONObject.keys()（Android 蒸汽模式实测报 “keys is not a function”），
+ * 因此签名与查询串统一走显式有序结构。
+ */
+export class Params {
+	names: string[] = []
+	values: string[] = []
+
+	set(key: string, value: string): Params {
+		for (let i = 0; i < this.names.length; i++) {
+			if (this.names[i] == key) {
+				this.values[i] = value
+				return this
+			}
+		}
+		this.names.push(key)
+		this.values.push(value)
+		return this
+	}
+
+	setNum(key: string, value: number): Params {
+		return this.set(key, value.toString())
+	}
+
+	get(key: string): string | null {
+		for (let i = 0; i < this.names.length; i++) {
+			if (this.names[i] == key) {
+				return this.values[i]
+			}
+		}
+		return null
+	}
+
+	keys(): string[] {
+		return this.names
+	}
+
+	size(): number {
+		return this.names.length
+	}
+
+	clone(): Params {
+		const copy = new Params()
+		for (let i = 0; i < this.names.length; i++) {
+			copy.set(this.names[i], this.values[i])
+		}
+		return copy
+	}
+
+	/** 生成 URL 查询串（不含前导 ?） */
+	toQuery(): string {
+		const parts: string[] = []
+		for (let i = 0; i < this.names.length; i++) {
+			parts.push(encodeURIComponent(this.names[i]) + '=' + encodeURIComponent(this.values[i]))
+		}
+		return parts.join('&')
+	}
+
+	/** 转成请求体对象（POST 用） */
+	toObject(): UTSJSONObject {
+		const obj: UTSJSONObject = {}
+		for (let i = 0; i < this.names.length; i++) {
+			obj.set(this.names[i], this.values[i])
+		}
+		return obj
+	}
+}

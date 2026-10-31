@@ -1,0 +1,240 @@
+<template>
+	<view class="tb" :style="pageStyle">
+		<app-navbar title="Tabbar编辑">
+			<template #right>
+				<view class="tb-save" @click="save">
+					<text class="tb-save-text" :style="saveStyle">保存</text>
+				</view>
+			</template>
+		</app-navbar>
+
+		<scroll-view class="tb-scroll" direction="vertical">
+			<view class="tb-list">
+				<view v-for="(tab, index) in tabs" :key="tab.id" class="tb-row">
+					<!-- 源 CheckboxListTile 的 secondary 位：左侧拖拽把手图标（顺序用行内 ↑↓ 调整，见页面注释） -->
+					<text class="tb-drag" :style="dragStyle">{{ dragGlyph }}</text>
+					<text class="tb-label" :style="labelStyle(tab.checked)">{{ tab.label }}</text>
+					<view class="tb-actions">
+						<view class="tb-move" @click="move(index, -1)">
+							<text class="tb-move-glyph" :style="moveStyle(index, -1)">↑</text>
+						</view>
+						<view class="tb-move" @click="move(index, 1)">
+							<text class="tb-move-glyph" :style="moveStyle(index, 1)">↓</text>
+						</view>
+					</view>
+					<!-- 复选（源 CheckboxListTile：取消勾选=从排序中移除，勾选=追加到末尾） -->
+					<view class="tb-check" :style="checkStyle(tab.checked)" @click="onCheck(tab)">
+						<text v-if="tab.checked" class="tb-check-mark" :style="checkMarkStyle">✓</text>
+					</view>
+				</view>
+			</view>
+			<view class="tb-foot" :style="footStyle"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import { pageBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { SK, getStringArray, setStringArray } from '../../utils/storage.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+
+/**
+ * 首页 tabbar 编辑（源头：lib/pages/setting/pages/home_tabbar_set.dart）。
+ *
+ *  - 数据源：SK.tabbarSort（P3 home.uvue channels computed 已消费——按数组序排布频道、
+ *    不在数组内的频道不显示）；默认 ['live','rcmd','hot','bangumi']。
+ *  - 排序：源 ReorderableListView 拖拽——uts 无等价，取行内上移/下移按钮（设计 §四 允许的兜底方案，
+ *    清单 note 登记「拖拽手势未实现」）；左侧保留源 secondary 位的拖拽把手图标以维持视觉结构。
+ *  - 复选语义照源：勾选=追加到数组末尾、取消=从数组移除；「保存」时按当前行序写键，
+ *    非法集（<2 项）拒绝保存（设计 §四：非法集拒绝保存——源仅 <1 会自然全空，新端按
+ *    设计口径收紧到 <2 拒绝，保证首页至少两个频道可切）。
+ *  - 保存后 toast「保存成功，下次启动时生效」（源逐字；home channels computed 在
+ *    重进/重启时重读生效）。
+ */
+
+type TabRow = {
+	id: string
+	label: string
+	checked: boolean
+}
+
+/** 全量频道（源 tabsConfig：直播/推荐/热门/番剧） */
+const ALL_TABS: string[][] = [
+	['live', '直播'],
+	['rcmd', '推荐'],
+	['hot', '热门'],
+	['bangumi', '番剧']
+]
+
+/** 初始行序：数组序在前（按 tabbarSort 序），未勾选的排后面（源 sort 同款口径） */
+function buildRows(): Array<TabRow> {
+	const sort = getStringArray(SK.tabbarSort, ['live', 'rcmd', 'hot', 'bangumi'])
+	const rows: Array<TabRow> = []
+	for (let i = 0; i < sort.length; i++) {
+		for (let j = 0; j < ALL_TABS.length; j++) {
+			if (ALL_TABS[j][0] == sort[i]) {
+				rows.push({ id: ALL_TABS[j][0], label: ALL_TABS[j][1], checked: true } as TabRow)
+			}
+		}
+	}
+	for (let j = 0; j < ALL_TABS.length; j++) {
+		let found = false
+		for (let i = 0; i < sort.length; i++) {
+			if (sort[i] == ALL_TABS[j][0]) {
+				found = true
+				break
+			}
+		}
+		if (!found) {
+			rows.push({ id: ALL_TABS[j][0], label: ALL_TABS[j][1], checked: false } as TabRow)
+		}
+	}
+	return rows
+}
+
+const tabs = ref<Array<TabRow>>(buildRows())
+
+const primary: string = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+const saveStyle: string = 'color:' + primary + ';'
+const dragGlyph = glyphOf('drag-indicator')
+const dragStyle: string = iconStyle('drag-indicator', 22, textSecondary())
+const checkMarkStyle: string = 'color:' + '#FFFFFF' + ';'
+
+function checkStyle(checked: boolean): string {
+	if (checked) {
+		return 'background-color:' + primary + ';border-color:' + primary + ';'
+	}
+	return 'background-color:transparent;border-color:' + withAlpha(textSecondary(), 0.5) + ';'
+}
+
+function labelStyle(checked: boolean): string {
+	return 'color:' + (checked ? textPrimary() : textSecondary()) + ';'
+}
+
+function moveStyle(index: number, delta: number): string {
+	const target = index + delta
+	if (target < 0 || target >= tabs.value.length) {
+		return 'color:' + withAlpha(textSecondary(), 0.3) + ';'
+	}
+	return 'color:' + textSecondary() + ';'
+}
+
+function onCheck(row: TabRow) {
+	row.checked = !row.checked
+}
+
+function move(index: number, delta: number) {
+	const target = index + delta
+	if (target < 0 || target >= tabs.value.length) {
+		return
+	}
+	const next: Array<TabRow> = []
+	for (let i = 0; i < tabs.value.length; i++) {
+		next.push(tabs.value[i])
+	}
+	const item = next[index]
+	next.splice(index, 1)
+	next.splice(target, 0, item)
+	tabs.value = next
+}
+
+function save() {
+	const list: string[] = []
+	for (let i = 0; i < tabs.value.length; i++) {
+		if (tabs.value[i].checked) {
+			list.push(tabs.value[i].id)
+		}
+	}
+	if (list.length < 2) {
+		uni.showToast({ title: '至少保留两个频道', icon: 'none' })
+		return
+	}
+	setStringArray(SK.tabbarSort, list)
+	uni.showToast({ title: '保存成功，下次启动时生效', icon: 'none' })
+}
+</script>
+
+<style>
+	.tb {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.tb-scroll {
+		flex: 1;
+	}
+	.tb-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.tb-row {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.tb-drag {
+		font-family: MaterialIcons;
+		margin-right: 14px;
+		flex-shrink: 0;
+	}
+	.tb-check {
+		width: 22px;
+		height: 22px;
+		border-radius: 6px;
+		border-width: 2px;
+		border-style: solid;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		margin-left: 4px;
+		flex-shrink: 0;
+	}
+	.tb-check-mark {
+		color: #FFFFFF;
+		font-size: 14px;
+		font-weight: bold;
+	}
+	.tb-label {
+		flex: 1;
+		font-size: 16px;
+	}
+	.tb-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.tb-move {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.tb-move-glyph {
+		font-size: 18px;
+	}
+	.tb-save {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.tb-save-text {
+		font-size: 15px;
+	}
+	.tb-foot {
+		height: 1px;
+	}
+</style>

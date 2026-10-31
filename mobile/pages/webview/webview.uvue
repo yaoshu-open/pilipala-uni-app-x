@@ -1,0 +1,304 @@
+<template>
+	<view class="page">
+		<app-navbar :title="pageTitle" :show-back="true">
+			<template #right>
+				<text v-if="isLoginType" class="nav-action" @click="onRefreshTap">刷新登录状态</text>
+				<!-- 通用分支：右上「浏览器打开」+ ⋮ 菜单 -->
+				<view v-else class="nav-more" @click="onOpenInBrowser">
+					<p-icon name="open-in-browser" :size="20" :color="primary"></p-icon>
+				</view>
+				<view v-if="!isLoginType" class="nav-more" @click="openMenu">
+					<p-icon name="more-vert" :size="22" :color="primary"></p-icon>
+				</view>
+			</template>
+		</app-navbar>
+		<view v-if="isLoginType" class="tip-bar">
+			<text class="tip-text">登录成功未自动跳转？请点击右上角「刷新登录状态」</text>
+		</view>
+		<view class="progress-slot">
+			<view v-if="loading" class="progress-line"></view>
+		</view>
+		<!-- 加载失败态：明确错误 + 重试（不静默停在空白页） -->
+		<view v-if="loadError.length > 0" class="error-bar" @click="onRetryLoad">
+			<text class="error-text">{{ loadError }}</text>
+			<text class="error-retry" :style="retryTextStyle">点击重试</text>
+		</view>
+		<view class="web-body">
+			<web-view class="web-view" :key="webKey" :src="url" @loading="onLoading" @load="onLoaded" @error="onError"></web-view>
+		</view>
+		<!-- ⋮ 菜单弹层（页面级 onBackPress 接管返回，写在组件/子层无效） -->
+		<view v-if="menuVisible" class="menu-mask" @click="closeMenu">
+			<view class="menu-pop" :style="menuStyle">
+				<view class="menu-item" @click.stop="onMenuRefresh">
+					<text class="menu-item-text">刷新</text>
+				</view>
+				<view class="menu-item" @click.stop="onMenuCopyLink">
+					<text class="menu-item-text">复制链接</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import { confirmLogin } from '../../composables/useLogin.uts'
+import { themeColor, currentThemeIndex, textPrimary } from '../../utils/theme.uts'
+import { statusBarHeight } from '../../utils/safeArea.uts'
+
+/**
+ * 内置浏览器（本期只实现登录分支）。视觉出处：`lib/pages/webview/view.dart`
+ *  - 源：AppBar 标题 + 右侧「刷新登录状态」（type=login 时）+ 顶部进度条 + 成功页提示条；
+ *  - 登录成功回跳特征：`passport.bilibili.com/web/sso/exchange_cookie` 或 `m.bilibili.com` 前缀；
+ *    URL 仅作触发时机，登录判定一律以 `/x/web-interface/nav` 的 isLogin 为准（见 composables/useLogin）。
+ *  - P11 通用分支增强（type≠login）：右上 ⋮ 菜单（刷新 / 复制链接）+ 加载失败态 + 重试。
+ *    「外部浏览器打开」：uni-app x 无跨端外开浏览器 API（App 端无 plus/utsAndroidIntent 通道，
+ *    蒸汽模式 utsAndroid 不可用）——降级为「复制链接 + toast 提示粘贴到浏览器」，登记差异。
+ *    `bilibili://` scheme 拦截与 BV 检测跳搜索：web-view 导航拦截能力在 uni-app x 不可用，
+ *    页内导航任由 web-view 自行处理（设计_设置与杂项域 §八 登记差异）。
+ */
+const DEFAULT_LOGIN_URL: string = 'https://passport.bilibili.com/h5-app/passport/login'
+
+const url = ref<string>(DEFAULT_LOGIN_URL)
+const pageTitle = ref<string>('网页')
+const type = ref<string>('url')
+const loading = ref<boolean>(true)
+const confirming = ref<boolean>(false)
+const loadError = ref<string>('')
+const menuVisible = ref<boolean>(false)
+const reloadSeq = ref<number>(0)
+/** 触发重载的 key（web-view 无 reload API：换 key 强制重建） */
+const webKey = computed((): string => 'wv-' + reloadSeq.value.toString())
+const primary = themeColor(currentThemeIndex())
+const retryTextStyle: string = 'color:' + primary + ';'
+/** 菜单弹层贴在右上角 ⋮ 下方（避开状态栏） */
+const menuStyle: string = 'margin-top:' + (statusBarHeight() + 44).toString() + 'px;'
+
+// 必须走 computed：type 由 onLoad 写入，普通 const 在 setup 期取值会永远停在默认值 'url'
+const isLoginType = computed((): boolean => type.value == 'login')
+
+function isSuccessUrl(target: string): boolean {
+	return target.startsWith('https://passport.bilibili.com/web/sso/exchange_cookie') ||
+		target.startsWith('https://m.bilibili.com/')
+}
+
+async function tryConfirm() {
+	if (confirming.value) {
+		return
+	}
+	confirming.value = true
+	const ok = await confirmLogin()
+	confirming.value = false
+	if (ok) {
+		uni.showToast({ title: '登录成功', icon: 'none' })
+		// 返回登录入口页，由其在 onShow 中校正状态并退回来源页
+		uni.navigateBack({ delta: 1 })
+	}
+}
+
+function onRefreshTap() {
+	tryConfirm()
+}
+
+function onLoading(event: UniWebViewLoadingEvent) {
+	loading.value = true
+}
+
+function onLoaded(event: UniWebViewLoadEvent) {
+	loading.value = false
+	loadError.value = ''
+	const loadedUrl = event.detail.url
+	console.log('[WV] loaded ' + loadedUrl)
+	if (isLoginType.value && isSuccessUrl(loadedUrl)) {
+		tryConfirm()
+	}
+}
+
+function onError(event: UniWebViewErrorEvent) {
+	loading.value = false
+	loadError.value = '页面加载失败（网络异常或链接不可用）'
+	console.log('[WV] error ' + event.detail.errMsg + ' url=' + event.detail.url)
+}
+
+// ---------------------------------------------------------------- 通用分支：菜单与失败态
+
+function openMenu() {
+	menuVisible.value = true
+}
+
+function closeMenu() {
+	menuVisible.value = false
+}
+
+/** 刷新：web-view 组件无 reload 上下文，换 :key 重建实例（等价整页重载） */
+function onMenuRefresh() {
+	closeMenu()
+	loadError.value = ''
+	loading.value = true
+	reloadSeq.value = reloadSeq.value + 1
+}
+
+function onRetryLoad() {
+	onMenuRefresh()
+}
+
+function onMenuCopyLink() {
+	closeMenu()
+	uni.setClipboardData({
+		data: url.value,
+		success: (_) => {
+			uni.showToast({ title: '链接已复制，可粘贴到浏览器打开', icon: 'none' })
+		}
+	})
+}
+
+/**
+ * 「浏览器打开」：uni-app x 内置 API 无系统浏览器打开能力（需 openSchema uts 插件；
+ * 源 webview_flutter 的 launchUrl externalApplication 无等价）——降级为复制链接 + 明确提示，
+ * 不假装已打开。差异登记在迁移清单 P11-006.
+ */
+function onOpenInBrowser() {
+	uni.setClipboardData({
+		data: url.value,
+		success: (_) => {
+			uni.showToast({ title: '链接已复制，请粘贴到浏览器打开', icon: 'none' })
+		}
+	})
+}
+
+// 浮层返回接管：菜单开 → 先关菜单；否则默认返回（页面级钩子，写在组件内无效）
+onBackPress(() => {
+	if (menuVisible.value) {
+		closeMenu()
+		return true
+	}
+	return false
+})
+
+onLoad((options) => {
+	const rawUrl = options != null ? options['url'] : null
+	if (rawUrl != null) {
+		const decoded = decodeURIComponent(rawUrl as string)
+		url.value = decoded.startsWith('http') ? decoded : 'https://' + decoded
+	}
+	const rawTitle = options != null ? options['pageTitle'] : null
+	if (rawTitle != null) {
+		pageTitle.value = decodeURIComponent(rawTitle as string)
+	}
+	const rawType = options != null ? options['type'] : null
+	if (rawType != null) {
+		type.value = rawType as string
+	}
+	if (type.value == 'login' && pageTitle.value == '网页') {
+		pageTitle.value = '登录bilibili'
+	}
+	// 通用分支：无标题时用 URL 域名段作标题（基线：导航栏标题即 URL 文本）
+	if (type.value != 'login' && pageTitle.value == '网页' && url.value.length > 0) {
+		const schemeIndex = url.value.indexOf('://')
+		const rest = schemeIndex >= 0 ? url.value.substring(schemeIndex + 3) : url.value
+		const slash = rest.indexOf('/')
+		pageTitle.value = slash >= 0 ? rest.substring(0, slash) : rest
+	}
+})
+</script>
+
+<style>
+	.page {
+		flex: 1;
+		background-color: #FFFFFF;
+	}
+	.nav-action {
+		font-size: 14px;
+		color: #18191C;
+		padding-left: 8px;
+		padding-right: 8px;
+	}
+	.tip-bar {
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 6px;
+		padding-bottom: 6px;
+		background-color: #F3F4F6;
+	}
+	.tip-text {
+		font-size: 12px;
+		color: #5B6270;
+	}
+	.progress-slot {
+		height: 2px;
+	}
+	.progress-line {
+		height: 2px;
+		background-color: #5CB67B;
+	}
+	.web-body {
+		flex: 1;
+	}
+	.web-view {
+		flex: 1;
+	}
+	.nav-more {
+		height: 44px;
+		width: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.nav-more-glyph {
+		font-size: 22px;
+	}
+	.error-bar {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 8px;
+		padding-bottom: 8px;
+		background-color: #FFF4F4;
+	}
+	.error-text {
+		flex: 1;
+		font-size: 12px;
+		color: #C0392B;
+	}
+	.error-retry {
+		font-size: 12px;
+		margin-left: 8px;
+	}
+	.menu-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.25);
+		display: flex;
+		flex-direction: row;
+		justify-content: flex-end;
+	}
+	.menu-pop {
+		width: 140px;
+		margin-right: 12px;
+		background-color: #FFFFFF;
+		border-radius: 10px;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+	.menu-item {
+		height: 46px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+	}
+	.menu-item-text {
+		font-size: 14px;
+		color: #18191C;
+	}
+</style>

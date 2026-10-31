@@ -1,0 +1,279 @@
+<template>
+	<view class="rin" :style="rootStyle">
+		<!-- 表情弹层：复用 pages/emote 同一份面板组件（高度固定，内部滚动） -->
+		<view v-if="showEmote" class="rin-emote" :style="emoteBoxStyle">
+			<emote-panel business="reply" @choose="onEmoteChoose"></emote-panel>
+		</view>
+
+		<!-- 未登录：用按钮形态承载登录引导，不渲染「看着能输入其实点不动」的假输入框 -->
+		<view v-if="!isLogin" class="rin-login" :style="loginStyle" @click="onLoginTap">
+			<text class="rin-login-text" :style="primaryTextStyle">登录后参与评论</text>
+		</view>
+
+		<view v-else class="rin-main">
+			<view v-if="replyToName.length > 0" class="rin-target">
+				<text class="rin-target-text" :style="secondaryTextStyle" :max-lines="1">回复 @{{ replyToName }}</text>
+				<text class="rin-target-cancel" :style="secondaryTextStyle" @click="onCancelReply">取消</text>
+			</view>
+			<view class="rin-row">
+				<input
+					class="rin-input"
+					:style="inputStyle"
+					:value="text"
+					:maxlength="1000"
+					:placeholder="placeholder"
+					placeholder-class="rin-placeholder"
+					confirm-type="send"
+					@input="onInput"
+					@confirm="onConfirm"
+				/>
+				<view class="rin-action" @click="onToggleEmote">
+					<text class="rin-action-text" :style="secondaryTextStyle">{{ showEmote ? '键盘' : '表情' }}</text>
+				</view>
+				<view class="rin-send" :style="sendStyle" @click="onSend">
+					<text class="rin-send-text" :style="sendTextStyle">{{ sending ? '发送中' : '发送' }}</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import EmotePanel from './emote-panel.uvue'
+import { addReply } from '../../api/reply.uts'
+import { ReplyItem } from '../../models/reply.uts'
+import { userState } from '../../stores/user.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import {
+	textPrimary, textSecondary, cardBackground, themeColor, currentThemeIndex, withAlpha, onPrimaryText
+} from '../../utils/theme.uts'
+
+/**
+ * 评论输入条（源头：`lib/pages/video/detail/reply_new/view.dart`）。
+ *
+ * 落点纪律：
+ *  - 未登录时渲染的是「登录后参与评论」按钮（登录引导），不是可聚焦的假输入框；
+ *  - 空内容时发送按钮视觉弱化 + 点击不触发请求；发送 200ms 防重（源 Debouncer 200ms）；
+ *  - 发送成功把接口回传的评论对象交给页面，由页面塞给列表前插（本组件不直接改列表）；
+ *  - 表情以弹层复用 `emote-panel`（同一份实现给 pages/emote 用），选中后追加到正文末尾
+ *    （源是按光标位置插入，目标端 input 不提供光标位置读取，简化为末尾追加）。
+ *
+ * 弹层状态需要页面级 onBackPress 接管：展开/收起时通过 `popup-state` 事件同步给页面，
+ * 页面收到后按需自增 `forceCloseSeq` 强制收起（返回键先关表情再退页面）。
+ */
+const props = defineProps({
+	/** 视频 aid */
+	oid: { type: Number, default: 0 },
+	/** 根评论 rpid：一级评论传空串 */
+	root: { type: String, default: '' },
+	/** 父评论 rpid：一级评论传空串，回复楼中楼时为被回复评论 */
+	parent: { type: String, default: '' },
+	/** 回复对象昵称（非空时显示「回复 @xxx」并可取消） */
+	replyToName: { type: String, default: '' },
+	placeholder: { type: String, default: '发个友善的评论' },
+	/** 页面自增以强制收起表情弹层 */
+	forceCloseSeq: { type: Number, default: 0 }
+})
+
+const emit = defineEmits(['sent', 'need-login', 'popup-state', 'cancel-reply'])
+
+const primary = themeColor(currentThemeIndex())
+const isLogin = computed((): boolean => userState.isLogin)
+
+const text = ref<string>('')
+const sending = ref<boolean>(false)
+const showEmote = ref<boolean>(false)
+
+let lastSendAt: number = 0
+let lastEmoteSeq: number = 0
+
+const canSend = computed((): boolean => text.value.trim().length > 0 && !sending.value)
+
+const rootStyle = computed((): string => {
+	const bottom = safeAreaBottom()
+	return 'background-color:' + cardBackground() + ';padding-bottom:' + (bottom + 8).toString() + 'px;'
+})
+// 高度含 padding-bottom（uni-app x 默认 border-box），安全区在弹层内留白而不是把面板顶出屏幕
+const emoteBoxStyle = computed((): string => {
+	const bottom = safeAreaBottom()
+	return 'height:220px;padding-bottom:' + bottom.toString() + 'px;background-color:' + cardBackground() + ';'
+})
+const loginStyle = computed((): string => {
+	return 'height:44px;border-radius:22px;border-width:1px;border-style:solid;border-color:' +
+		withAlpha(primary, 0.5) + ';'
+})
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const inputStyle = computed((): string => 'color:' + textPrimary() + ';')
+const sendStyle = computed((): string => {
+	const color = canSend.value ? primary : withAlpha(primary, 0.28)
+	return 'background-color:' + color + ';'
+})
+const sendTextStyle = computed((): string => 'color:' + (canSend.value ? onPrimaryText() : '#FFFFFF') + ';')
+
+function onInput(event: UniInputEvent) {
+	text.value = event.detail.value
+}
+
+function onConfirm(event: UniInputConfirmEvent) {
+	onSend()
+}
+
+function onToggleEmote() {
+	showEmote.value = !showEmote.value
+	lastEmoteSeq = props.forceCloseSeq
+	emit('popup-state', showEmote.value)
+	if (showEmote.value) {
+		uni.hideKeyboard()
+	}
+}
+
+function onEmoteChoose(token: string) {
+	if (token.length == 0) {
+		return
+	}
+	text.value = text.value + token
+}
+
+function onLoginTap() {
+	emit('need-login')
+}
+
+function onCancelReply() {
+	emit('cancel-reply')
+}
+
+async function onSend() {
+	if (!isLogin.value || sending.value) {
+		return
+	}
+	const message = text.value.trim()
+	if (message.length == 0) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastSendAt < 200) {
+		return
+	}
+	lastSendAt = now
+	sending.value = true
+	const res = await addReply(props.oid, props.root, props.parent, message)
+	sending.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message.length > 0 ? res.message : '评论失败', icon: 'none' })
+		return
+	}
+	text.value = ''
+	showEmote.value = false
+	emit('popup-state', false)
+	uni.showToast({ title: res.successToast.length > 0 ? res.successToast : '评论成功', icon: 'none' })
+	const item = res.item
+	if (item != null) {
+		emit('sent', item as ReplyItem)
+	}
+}
+
+// 页面按返回键时优先收起表情弹层（页面自增 forceCloseSeq 触发）
+watch(() => props.forceCloseSeq, (next) => {
+	if (next != lastEmoteSeq && showEmote.value) {
+		showEmote.value = false
+		lastEmoteSeq = next
+		emit('popup-state', false)
+	}
+})
+</script>
+
+<style>
+	.rin {
+		display: flex;
+		flex-direction: column;
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(128, 128, 128, 0.18);
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 8px;
+	}
+	.rin-emote {
+		display: flex;
+		flex-direction: column;
+		background-color: #FFFFFF;
+		border-radius: 10px;
+		margin-bottom: 8px;
+		overflow: hidden;
+	}
+	.rin-login {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		margin-bottom: 8px;
+	}
+	.rin-login-text {
+		font-size: 14px;
+	}
+	.rin-main {
+		display: flex;
+		flex-direction: column;
+		margin-bottom: 8px;
+	}
+	.rin-target {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-bottom: 6px;
+	}
+	.rin-target-text {
+		flex: 1;
+		font-size: 12px;
+	}
+	.rin-target-cancel {
+		font-size: 12px;
+		margin-left: 10px;
+	}
+	.rin-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.rin-input {
+		flex: 1;
+		height: 36px;
+		border-radius: 18px;
+		font-size: 14px;
+		padding-left: 12px;
+		padding-right: 12px;
+		background-color: rgba(128, 128, 128, 0.12);
+	}
+	.rin-placeholder {
+		color: #9BA1AC;
+		font-size: 14px;
+	}
+	.rin-action {
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.rin-action-text {
+		font-size: 13px;
+	}
+	.rin-send {
+		height: 32px;
+		border-radius: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.rin-send-text {
+		font-size: 13px;
+		font-weight: 500;
+	}
+</style>

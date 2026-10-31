@@ -1,0 +1,336 @@
+<template>
+	<view class="page">
+		<text class="title">基座探测（开发用）</text>
+		<view class="row">
+			<button class="btn" @click="runAll">重跑</button>
+			<button class="btn" @click="clearLog">清空</button>
+		</view>
+		<scroll-view class="log" direction="vertical">
+			<text class="log-text">{{ logText }}</text>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, onMounted } from 'vue'
+import { md5 } from '../../utils/md5.uts'
+import { apiGet, rawGet } from '../../utils/request.uts'
+import { wbiSign, keyFromUrl } from '../../utils/sign.uts'
+import { cookieDebug, clearCookies, saveSetCookie } from '../../utils/cookie.uts'
+import { Params } from '../../utils/params.uts'
+import { getBool, getNumberArray, setBool, setNumberArray } from '../../utils/storage.uts'
+import { numFormat, timeFormat, durationToSeconds, relativeTime } from '../../utils/format.uts'
+import { themeColor, isDarkMode, pageBackground } from '../../utils/theme.uts'
+
+const logText = ref<string>('')
+
+function append(line: string) {
+	logText.value = logText.value + line + "\n"
+	console.log('[SPIKE] ' + line)
+}
+
+function clearLog() {
+	logText.value = ''
+}
+
+function testStorage() {
+	append('--- storage ---')
+	uni.setStorageSync('spike_key', 'spike_value')
+	append('read=' + uni.getStorageSync('spike_key'))
+}
+
+function testDirectRequest() {
+	append('--- direct request ---')
+	const header: UTSJSONObject = { 'referer': 'https://www.bilibili.com/' }
+	uni.request({
+		url: 'https://api.bilibili.com/x/web-interface/nav',
+		method: 'GET',
+		header: header,
+		success: (res) => {
+			const body = JSON.stringify(res.data)
+			append('status=' + res.statusCode.toString() + ' bodyLen=' + (body != null ? body.length.toString() : '0'))
+		},
+		fail: (err) => {
+			append('FAIL=' + JSON.stringify(err))
+		}
+	})
+}
+
+function testHeaderEcho() {
+	append('--- header echo ---')
+	const h: UTSJSONObject = {}
+	h.set('X-Spike', 'spike-header')
+	h.set('Cookie', 'spike_cookie=1')
+	uni.request({
+		url: 'https://httpbin.org/headers',
+		method: 'GET',
+		header: h,
+		success: (res) => {
+			append('echo=' + JSON.stringify(res.data))
+		},
+		fail: (err) => {
+			append('echo FAIL=' + JSON.stringify(err))
+		}
+	})
+}
+
+function testMd5() {
+	append('--- md5 ---')
+	const cases: string[] = ['123456', '', '中文', 'PiliPala']
+	const expects: string[] = [
+		'e10adc3949ba59abbe56e057f20f883e',
+		'd41d8cd98f00b204e9800998ecf8427e',
+		'a7bac2239fcdcb3a067903d8077c4a07',
+		'01af5016452e3b87a2232c17130f93a5'
+	]
+	for (let i = 0; i < cases.length; i++) {
+		const got = md5(cases[i])
+		append('md5(' + cases[i] + ')=' + got + (got == expects[i] ? ' PASS' : ' FAIL'))
+	}
+}
+
+function testSign() {
+	append('--- sign ---')
+	try {
+		const p = new Params()
+		p.set('foo', 'bar')
+		p.setNum('page', 1)
+		const s = wbiSign(p, '7cd084941338484aae1ad9425b84077c', '4932caff0ff746eab6f01bf08b70ac45')
+		append('wts=' + (s.get('wts') ?? '') + ' rid=' + (s.get('w_rid') ?? ''))
+	} catch (e) {
+		append('sign EX')
+		console.log(e)
+	}
+}
+
+function testUtils() {
+	append('--- utils ---')
+	setBool('spike_bool', true)
+	append('bool=' + getBool('spike_bool', false).toString())
+	setNumberArray('spike_arr', [1, 2, 3])
+	append('arr=' + getNumberArray('spike_arr', []).join(','))
+	append('num=' + numFormat(12345) + ' time=' + timeFormat(3725) + ' dur=' + durationToSeconds('1:02:03').toString())
+	append('theme=' + themeColor(1) + ' dark=' + isDarkMode().toString() + ' bg=' + pageBackground())
+}
+
+async function testWbiRequest() {
+	append('--- wbi request ---')
+	try {
+		const nav = await apiGet('/x/web-interface/nav')
+		if (nav == null) {
+			append('nav null')
+			return
+		}
+		const navData = nav.getJSON('data')
+		if (navData == null) {
+			append('nav data null')
+			return
+		}
+		const wbi = navData.getJSON('wbi_img')
+		if (wbi == null) {
+			append('wbi_img null')
+			return
+		}
+		const imgUrl = wbi.getString('img_url')
+		const subUrl = wbi.getString('sub_url')
+		if (imgUrl == null || subUrl == null) {
+			append('wbi url null')
+			return
+		}
+		const params = new Params()
+		params.set('search_type', 'video')
+		params.set('keyword', '原神')
+		params.setNum('page', 1)
+		const signed = wbiSign(params, keyFromUrl(imgUrl), keyFromUrl(subUrl))
+		const res = await apiGet('/x/web-interface/wbi/search/type', signed)
+		if (res == null) {
+			append('search null')
+			return
+		}
+		const code = res.getNumber('code')
+		append('search code=' + (code != null ? code.toString() : '?') + ' msg=' + (res.getString('message') ?? ''))
+	} catch (e) {
+		append('wbi EX')
+		console.log(e)
+	}
+}
+
+/** 存储原文（判定 cookie 存储键实形） */
+function storageText(key: string): string {
+	try {
+		const raw = uni.getStorageSync(key)
+		if (raw == null) {
+			return '<null>'
+		}
+		return raw.toString()
+	} catch (e) {
+		return '<ERR>'
+	}
+}
+
+/** 打印 cookie jar 的全部实际键值（索引 + 每个 cookie::<domain>） */
+function dumpCookieJar(tag: string) {
+	append('[jar:' + tag + '] index=' + storageText('cookie_domains'))
+	const rawIndex = uni.getStorageSync('cookie_domains') as string | null
+	if (rawIndex == null || rawIndex.length == 0) {
+		return
+	}
+	const domains = rawIndex.split(',')
+	for (let i = 0; i < domains.length; i++) {
+		const domain = domains[i]
+		append('[jar:' + tag + '] cookie::' + domain + ' = ' + storageText('cookie::' + domain))
+	}
+}
+
+async function testCookie() {
+	append('--- cookie ---')
+	try {
+		clearCookies()
+		dumpCookieJar('cleared')
+		await rawGet('https://httpbin.org/response-headers?Set-Cookie=spike%3Dbar%3B%20Path%3D%2F')
+		dumpCookieJar('after-set')
+		const jar = cookieDebug('httpbin.org')
+		append('cookieDebug(httpbin.org) len=' + jar.length.toString() + ' value=' + jar)
+		append('ASSERT jar contains spike=bar: ' + (jar.indexOf('spike=bar') >= 0 ? 'PASS' : 'FAIL'))
+		const echo = await rawGet('https://httpbin.org/cookies')
+		if (echo == null) {
+			append('echo null')
+			return
+		}
+		const cookies = echo.getJSON('cookies')
+		append('echo=' + (cookies != null ? JSON.stringify(cookies) : 'null'))
+	} catch (e) {
+		append('cookie EX')
+		console.log(e)
+	}
+}
+
+/** 多值合并串解析断言（平台把多个 Set-Cookie 序列化成 "[a=1; path=/, b=2; expires=...]"） */
+function testMultiCookieParse() {
+	append('--- cookie 多值合并串解析 ---')
+	clearCookies()
+	saveSetCookie('[a=1; path=/, b=2; expires=Sun, 22 Jul 2029 00:00:00 GMT]', 'multi.test')
+	const jar = cookieDebug('multi.test')
+	append('multi jar=' + jar)
+	const ok = jar.indexOf('a=1') >= 0 && jar.indexOf('b=2') >= 0
+	append('ASSERT 解析出 a=1 且 b=2: ' + (ok ? 'PASS' : 'FAIL'))
+}
+
+/** 域名规范化与后缀匹配断言 */
+function testDomainMatch() {
+	append('--- cookie 域名规范化 / 后缀匹配 ---')
+	clearCookies()
+	saveSetCookie('parent=1; Domain=.bilibili.com; Path=/', 'api.bilibili.com')
+	saveSetCookie('child=1; Path=/', 'api.bilibili.com')
+	append('keys=' + storageText('cookie_domains'))
+	append('debug(api.bilibili.com)=' + cookieDebug('api.bilibili.com'))
+	append('ASSERT URL+大小写+端口形式归一命中: ' + (cookieDebug('https://API.Bilibili.com:443/x').indexOf('parent=1') >= 0 ? 'PASS' : 'FAIL'))
+	append('ASSERT 父域 cookie 对子域可见: ' + (cookieDebug('www.bilibili.com').indexOf('parent=1') >= 0 ? 'PASS' : 'FAIL'))
+	append('ASSERT 非同域不误命中: ' + (cookieDebug('notbilibili.com').length == 0 ? 'PASS' : 'FAIL'))
+	append('ASSERT 前导点写法等价: ' + (cookieDebug('.bilibili.com').indexOf('parent=1') >= 0 ? 'PASS' : 'FAIL'))
+}
+
+/** 判定响应头里是否能看到 set-cookie（决定自研 jar 能否工作） */
+function testSetCookieHeader() {
+	append('--- set-cookie header visibility ---')
+	const h: UTSJSONObject = {}
+	uni.request({
+		url: 'https://httpbin.org/response-headers?Set-Cookie=probe%3D1%3B%20Path%3D%2F',
+		method: 'GET',
+		header: h,
+		success: (res) => {
+			append('hdr status=' + res.statusCode.toString() + ' header=' + JSON.stringify(res.header))
+		},
+		fail: (err) => {
+			append('hdr FAIL=' + JSON.stringify(err))
+		}
+	})
+}
+
+/** 判定平台是否自管 cookie：设完 cookie 后清空我方 jar，再看回显 */
+async function testPlatformAutoCookie() {
+	append('--- platform auto cookie probe ---')
+	try {
+		await rawGet('https://httpbin.org/response-headers?Set-Cookie=plat%3D1%3B%20Path%3D%2F')
+		clearCookies()
+		dumpCookieJar('purged')
+		const echo = await rawGet('https://httpbin.org/cookies')
+		if (echo == null) {
+			append('probe echo null')
+			return
+		}
+		const cookies = echo.getJSON('cookies')
+		append('probe echo(空 jar)=' + (cookies != null ? JSON.stringify(cookies) : 'null'))
+	} catch (e) {
+		append('probe EX')
+		console.log(e)
+	}
+}
+
+/** 平台 cookie 持久性检查：必须在任何设置动作之前执行（只读探测） */
+async function testJarPersistence() {
+	append('--- platform jar persistence (read-only) ---')
+	const echo = await rawGet('https://httpbin.org/cookies')
+	if (echo == null) {
+		append('persist echo null')
+		return
+	}
+	const cookies = echo.getJSON('cookies')
+	append('persist echo=' + (cookies != null ? JSON.stringify(cookies) : 'null'))
+}
+
+function runAll() {
+	testJarPersistence()
+	testStorage()
+	testDirectRequest()
+	testHeaderEcho()
+	testMd5()
+	testSign()
+	testUtils()
+	testWbiRequest()
+	testSetCookieHeader()
+	testCookie()
+	testMultiCookieParse()
+	testDomainMatch()
+	testPlatformAutoCookie()
+}
+
+onMounted(() => {
+	runAll()
+})
+</script>
+
+<style>
+	.page {
+		flex: 1;
+		padding: 24rpx;
+		background-color: #F6F7F8;
+	}
+	.title {
+		font-size: 32rpx;
+		font-weight: bold;
+		color: #18191C;
+	}
+	.row {
+		display: flex;
+		flex-direction: row;
+		margin-top: 16rpx;
+	}
+	.btn {
+		flex: 1;
+		margin-right: 12rpx;
+		font-size: 26rpx;
+	}
+	.log {
+		margin-top: 16rpx;
+		flex: 1;
+		background-color: #FFFFFF;
+		border-radius: 12rpx;
+		padding: 16rpx;
+	}
+	.log-text {
+		font-size: 22rpx;
+		color: #303540;
+		line-height: 34rpx;
+	}
+</style>

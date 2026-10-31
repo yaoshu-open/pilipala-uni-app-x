@@ -1,0 +1,515 @@
+<template>
+	<view v-if="hasItem" class="ri" :style="rootStyle">
+		<!-- 作者行：头像 + 昵称 + 等级 + UP 标 + 时间 / IP 属地 -->
+		<view class="ri-head">
+			<view class="ri-avatar" @click="onUserTap">
+				<network-img :src="avatar" width="30px" height="30px" radius="15px"></network-img>
+			</view>
+			<view class="ri-head-body">
+				<view class="ri-name-row">
+					<text class="ri-name" :style="nameStyle" :max-lines="1">{{ uname }}</text>
+					<view v-if="level > 0" class="ri-level" :style="levelStyle">
+						<text class="ri-level-text" :style="levelTextStyle">LV{{ level }}</text>
+					</view>
+					<view v-if="isUp" class="ri-up" :style="upBadgeStyle">
+						<text class="ri-up-text" :style="upTextStyle">UP</text>
+					</view>
+					<view v-if="isTop" class="ri-top" :style="topBadgeStyle">
+						<text class="ri-top-text" :style="topTextStyle">置顶</text>
+					</view>
+				</view>
+				<text class="ri-meta" :style="metaStyle" :max-lines="1">{{ metaText }}</text>
+			</view>
+		</view>
+
+		<!-- 正文：一级评论最多 3 行，二级/楼中楼全文 -->
+		<view class="ri-content">
+			<reply-rich-text
+				:content="content"
+				:font-size="14"
+				:line-height="20"
+				:max-lines="collapsed ? 3 : 0"
+				@seek="onSeek"
+				@open-user="onOpenUser"
+				@open-link="onOpenLink"
+			></reply-rich-text>
+		</view>
+
+		<!-- 操作行：点赞 / 回复 / UP主觉得很赞 / 热评 -->
+		<view class="ri-actions">
+			<view class="ri-act" @click="onLikeTap">
+				<text class="ri-act-icon" :style="likeIconStyle">{{ likeGlyph }}</text>
+				<text class="ri-act-text" :style="likeTextStyle">{{ likeCountText }}</text>
+			</view>
+			<view class="ri-act" @click="onReplyTap">
+				<text class="ri-act-text" :style="actionTextStyle">回复</text>
+			</view>
+			<text v-if="upLiked" class="ri-tag" :style="primaryTextStyle">UP主觉得很赞</text>
+			<text v-if="isHot" class="ri-tag" :style="primaryTextStyle">热评</text>
+			<view class="ri-spacer"></view>
+			<text v-if="invisible" class="ri-tag" :style="dangerTextStyle">已隐藏</text>
+		</view>
+
+		<!-- 二级预览：最多 2 条 + 「共 N 条回复」入口 -->
+		<view v-if="showSub" class="ri-sub" :style="subStyle">
+			<view v-for="(reply, index) in previewReplies" :key="reply.rpid" class="ri-sub-row" @click="onOpenReplies">
+				<text class="ri-sub-name" :style="subNameStyle">{{ reply.member.uname }}</text>
+				<view class="ri-sub-body">
+					<reply-rich-text
+						:content="reply.content"
+						:font-size="12"
+						:line-height="17"
+						:max-lines="2"
+					></reply-rich-text>
+				</view>
+			</view>
+			<view class="ri-sub-more" @click="onOpenReplies">
+				<text class="ri-sub-more-text" :style="primaryTextStyle">{{ moreText }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import ReplyRichText from './reply-rich-text.uvue'
+import { ReplyItem, ReplyContent } from '../../models/reply.uts'
+import { likeReply } from '../../api/reply.uts'
+import { userState } from '../../stores/user.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+import { textSecondary, themeColor, currentThemeIndex, withAlpha, isDarkMode } from '../../utils/theme.uts'
+
+/**
+ * 单条评论（源头：`lib/pages/video/detail/reply/widgets/reply_item.dart` 的 ReplyItem + ReplyItemRow）。
+ *
+ * 视觉（设计_视频详情域 §七）：头像 30、昵称 12、正文 14/行高 20、操作行 11、二级预览底色 5%。
+ * 行为差异（与源一致）：整个条目不再挂「点开评论详情」的点击——目标端无嵌套点击冒泡豁免，
+ * 挂在容器上会导致点「点赞」同时开面板；改为头像/昵称进占位页、二级预览与「共 N 条回复」开面板。
+ *
+ * 点赞状态本地镜像：list-item 在蒸汽模式下会复用组件实例，props 变化时用 watch 重同步，
+ * 避免滑出屏幕再滑回来时点赞态错位（源同为 StatefulWidget + setState）。
+ */
+const props = defineProps({
+	item: { type: Object, default: null },
+	/** '1' 一级评论（正文 3 行截断）/ '2' 楼中楼（全文） */
+	level: { type: String, default: '1' },
+	showReplyRow: { type: Boolean, default: true },
+	showDivider: { type: Boolean, default: true }
+})
+
+const emit = defineEmits(['open-reply', 'reply', 'need-login', 'seek', 'open-user', 'open-link'])
+
+const primary = themeColor(currentThemeIndex())
+const likeGlyph = glyphOf('thumb-up')
+
+const current = ref<ReplyItem | null>(null)
+const liked = ref<boolean>(false)
+const likeCount = ref<number>(0)
+const liking = ref<boolean>(false)
+
+function syncFromProps() {
+	const raw = props.item
+	if (raw == null) {
+		current.value = null
+		liked.value = false
+		likeCount.value = 0
+		return
+	}
+	const item = raw as ReplyItem
+	current.value = item
+	liked.value = item.action == 1
+	likeCount.value = item.like
+}
+
+watch(() => props.item, () => {
+	syncFromProps()
+}, { immediate: true })
+
+const hasItem = computed((): boolean => current.value != null)
+
+const uname = computed((): string => {
+	const item = current.value
+	return item == null ? '' : item.member.uname
+})
+
+const avatar = computed((): string => {
+	const item = current.value
+	return item == null ? '' : item.member.avatar
+})
+
+const level = computed((): number => {
+	const item = current.value
+	return item == null ? 0 : item.member.level
+})
+
+const isUp = computed((): boolean => {
+	const item = current.value
+	return item == null ? false : item.isUp
+})
+
+const isTop = computed((): boolean => {
+	const item = current.value
+	return item == null ? false : item.isTop
+})
+
+const invisible = computed((): boolean => {
+	const item = current.value
+	return item == null ? false : item.invisible
+})
+
+const content = computed((): ReplyContent | null => {
+	const item = current.value
+	return item == null ? null : item.content
+})
+
+const collapsed = computed((): boolean => props.level == '1')
+
+const metaText = computed((): string => {
+	const item = current.value
+	if (item == null) {
+		return ''
+	}
+	let text = dateFormat(item.ctime, 'list')
+	const control = item.replyControl
+	if (control != null && control.location.length > 0) {
+		text = text + ' · ' + control.location
+	}
+	return text
+})
+
+const upLiked = computed((): boolean => {
+	const item = current.value
+	return item == null ? false : item.upActionLike
+})
+
+const isHot = computed((): boolean => {
+	const item = current.value
+	if (item == null) {
+		return false
+	}
+	for (let i = 0; i < item.cardLabels.length; i++) {
+		if (item.cardLabels[i] == '热评') {
+			return true
+		}
+	}
+	return false
+})
+
+const likeCountText = computed((): string => {
+	const count = likeCount.value
+	if (count <= 0) {
+		return '赞'
+	}
+	if (count >= 10000) {
+		return (count / 10000).toFixed(1) + '万'
+	}
+	return count.toString()
+})
+
+const previewReplies = computed((): Array<ReplyItem> => {
+	const item = current.value
+	if (item == null || item.replies.length == 0) {
+		return [] as Array<ReplyItem>
+	}
+	return item.replies.length > 2 ? item.replies.slice(0, 2) : item.replies
+})
+
+const replyTotal = computed((): number => {
+	const item = current.value
+	if (item == null) {
+		return 0
+	}
+	if (item.count > 0) {
+		return item.count
+	}
+	return item.replies.length
+})
+
+const showSub = computed((): boolean => {
+	if (props.level != '1' || !props.showReplyRow) {
+		return false
+	}
+	return previewReplies.value.length > 0 || replyTotal.value > 0
+})
+
+const moreText = computed((): string => {
+	const total = replyTotal.value
+	if (total <= 0) {
+		return '查看回复'
+	}
+	return '共 ' + total.toString() + ' 条回复'
+})
+
+const nameStyle = computed((): string => {
+	const item = current.value
+	if (item != null && item.member.vipStatus > 0) {
+		// 源：大会员昵称用粉色（vipStatus > 0）
+		return 'color:#FB64A3;'
+	}
+	return 'color:' + textSecondary() + ';'
+})
+
+const metaStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const dangerTextStyle = computed((): string => 'color:#D64545;')
+const actionTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const levelTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const upTextStyle = computed((): string => 'color:' + primary + ';')
+const topTextStyle = computed((): string => 'color:#FFFFFF;')
+const subNameStyle = computed((): string => 'color:' + primary + ';')
+const likeTextStyle = computed((): string => 'color:' + (liked.value ? primary : textSecondary()) + ';')
+const likeIconStyle = computed((): string => iconStyle('thumb-up', 14, liked.value ? primary : textSecondary()))
+
+const levelStyle = computed((): string => {
+	return 'background-color:' + withAlpha(textSecondary(), 0.12) + ';'
+})
+
+const upBadgeStyle = computed((): string => {
+	return 'border-width:1px;border-style:solid;border-color:' + withAlpha(primary, 0.6) + ';'
+})
+
+const topBadgeStyle = computed((): string => 'background-color:' + primary + ';')
+
+const subStyle = computed((): string => {
+	const base = isDarkMode() ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'
+	return 'background-color:' + base + ';'
+})
+
+const rootStyle = computed((): string => {
+	if (!props.showDivider) {
+		return ''
+	}
+	const line = withAlpha(textSecondary(), 0.18)
+	return 'border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:' + line + ';'
+})
+
+function onUserTap() {
+	const item = current.value
+	if (item == null || item.member.mid.length == 0) {
+		return
+	}
+	emit('open-user', item.member.mid)
+}
+
+async function onLikeTap() {
+	const item = current.value
+	if (item == null || liking.value) {
+		return
+	}
+	if (!userState.isLogin) {
+		emit('need-login')
+		return
+	}
+	liking.value = true
+	const nextAction = item.action == 0 ? 1 : 0
+	const res = await likeReply(item.oid, item.rpid, nextAction)
+	liking.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	// 本地镜像 + 回写条目（列表/面板复用同一对象，保持一致）
+	if (nextAction == 1) {
+		item.like = item.like + 1
+		item.action = 1
+		uni.showToast({ title: '点赞成功', icon: 'none' })
+	} else {
+		item.like = item.like > 0 ? item.like - 1 : 0
+		item.action = 0
+		uni.showToast({ title: '已取消赞', icon: 'none' })
+	}
+	liked.value = item.action == 1
+	likeCount.value = item.like
+}
+
+function onReplyTap() {
+	const item = current.value
+	if (item == null) {
+		return
+	}
+	if (!userState.isLogin) {
+		emit('need-login')
+		return
+	}
+	emit('reply', item)
+}
+
+function onOpenReplies() {
+	const item = current.value
+	if (item == null) {
+		return
+	}
+	emit('open-reply', item)
+}
+
+function onSeek(text: string, seconds: number) {
+	emit('seek', text, seconds)
+}
+
+function onOpenUser(mid: string) {
+	emit('open-user', mid)
+}
+
+function onOpenLink(text: string) {
+	emit('open-link', text)
+}
+</script>
+
+<style>
+	.ri {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 8px;
+		padding-top: 14px;
+		padding-bottom: 10px;
+	}
+	.ri-head {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+	}
+	.ri-avatar {
+		width: 30px;
+		height: 30px;
+	}
+	.ri-head-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+	}
+	.ri-name-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.ri-name {
+		font-size: 12px;
+		max-width: 150px;
+	}
+	.ri-level {
+		height: 14px;
+		padding-left: 4px;
+		padding-right: 4px;
+		border-radius: 3px;
+		margin-left: 4px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.ri-level-text {
+		font-size: 9px;
+		line-height: 11px;
+	}
+	.ri-up {
+		height: 14px;
+		padding-left: 4px;
+		padding-right: 4px;
+		border-radius: 3px;
+		margin-left: 4px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.ri-up-text {
+		font-size: 9px;
+		line-height: 11px;
+		font-weight: bold;
+	}
+	.ri-top {
+		height: 14px;
+		padding-left: 4px;
+		padding-right: 4px;
+		border-radius: 3px;
+		margin-left: 4px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.ri-top-text {
+		font-size: 9px;
+		line-height: 11px;
+	}
+	.ri-meta {
+		font-size: 11px;
+		line-height: 15px;
+		margin-top: 3px;
+	}
+	.ri-content {
+		display: flex;
+		flex-direction: column;
+		margin-top: 8px;
+		padding-left: 40px;
+	}
+	.ri-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		height: 30px;
+		padding-left: 40px;
+		margin-top: 4px;
+	}
+	.ri-act {
+		height: 26px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-right: 16px;
+	}
+	.ri-act-icon {
+		font-family: MaterialIcons;
+	}
+	.ri-act-text {
+		font-size: 11px;
+		margin-left: 4px;
+	}
+	.ri-tag {
+		font-size: 11px;
+		margin-right: 10px;
+	}
+	.ri-spacer {
+		flex: 1;
+	}
+	.ri-sub {
+		display: flex;
+		flex-direction: column;
+		margin-left: 40px;
+		margin-right: 4px;
+		margin-top: 6px;
+		margin-bottom: 4px;
+		border-radius: 6px;
+		padding-left: 8px;
+		padding-right: 8px;
+		padding-top: 6px;
+		padding-bottom: 6px;
+	}
+	.ri-sub-row {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		padding-top: 3px;
+		padding-bottom: 3px;
+	}
+	.ri-sub-name {
+		font-size: 12px;
+		line-height: 17px;
+		margin-right: 6px;
+	}
+	.ri-sub-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.ri-sub-more {
+		display: flex;
+		flex-direction: row;
+		padding-top: 4px;
+		padding-bottom: 2px;
+	}
+	.ri-sub-more-text {
+		font-size: 11px;
+	}
+</style>

@@ -1,0 +1,629 @@
+<template>
+	<view class="sp" :style="rootStyle">
+		<view class="sp-bar" :style="barStyle">
+			<view class="sp-bar-row">
+				<view class="sp-back" @click="onBackTap">
+					<text class="sp-back-icon" :style="iconTextStyle">←</text>
+				</view>
+				<view class="sp-field">
+					<input
+						class="sp-input"
+						:style="inputStyle"
+						:value="keyword"
+						:focus="focusReq"
+						:placeholder="placeholder"
+						placeholder-class="sp-placeholder"
+						confirm-type="search"
+						@input="onInput"
+						@confirm="onSubmit"
+						@focus="onFocus"
+						@blur="onBlur"
+					/>
+					<view v-if="keyword.length > 0" class="sp-clear" @click="onClearTap">
+						<p-icon name="clear-outlined" :size="22" :color="iconColor"></p-icon>
+					</view>
+				</view>
+				<view class="sp-search" @click="onSubmit">
+					<p-icon name="search" :size="22" :color="iconColor"></p-icon>
+				</view>
+			</view>
+		</view>
+
+		<scroll-view class="sp-body" direction="vertical" :show-scrollbar="false">
+			<view class="sp-suggest" v-if="suggests.length > 0 && keyword.length > 0">
+				<view
+					v-for="(item, idx) in suggests"
+					:key="item.value + '-' + idx.toString()"
+					class="sp-suggest-row"
+					@click="onSuggestTap(item)"
+				>
+					<view class="sp-suggest-text">
+						<template v-for="(seg, si) in item.nameSegs" :key="si">
+							<text v-if="seg.type == 'em'" class="sp-suggest-seg" :style="segEmStyle">{{ seg.text }}</text>
+							<text v-else class="sp-suggest-seg" :style="segTextStyle">{{ seg.text }}</text>
+						</template>
+					</view>
+				</view>
+			</view>
+
+			<view class="sp-hot" v-if="enableHotKey">
+				<view class="sp-hot-title-row">
+					<text class="sp-hot-title" :style="titleStyle">大家都在搜</text>
+					<view class="sp-refresh" @click="loadHot">
+						<text class="sp-refresh-glyph" :style="refreshGlyphStyle">{{ REFRESH_GLYPH }}</text>
+						<text class="sp-refresh-text" :style="refreshTextStyle">刷新</text>
+					</view>
+				</view>
+
+				<view v-if="hotState == 'loading' && hotItems.length == 0" class="sp-hot-skeleton">
+					<skeleton>
+						<view v-for="n in 5" :key="'sk' + n.toString()" class="sp-hot-sk-row">
+							<skeleton-block :width="skWidth" height="16px"></skeleton-block>
+							<skeleton-block :width="skWidth" height="16px"></skeleton-block>
+						</view>
+					</skeleton>
+				</view>
+
+				<view v-else-if="hotState == 'error'" class="sp-hot-error">
+					<p-http-error :message="hotError" @retry="loadHot"></p-http-error>
+				</view>
+
+				<view v-else class="sp-hot-rows">
+					<view v-for="(row, ri) in hotRows" :key="'hr' + ri.toString()" class="sp-hot-row">
+						<view
+							v-for="(cell, ci) in row"
+							:key="'hc' + ri.toString() + '-' + ci.toString()"
+							class="sp-hot-cell"
+							:style="cellStyle(ci)"
+							@click="onHotTap(cell)"
+						>
+							<text class="sp-hot-word" :style="wordStyle" :max-lines="1">{{ cell.keyword }}</text>
+							<view v-if="cell.icon.length > 0" class="sp-hot-icon-box">
+								<image class="sp-hot-icon" :src="cell.icon" mode="heightFix"></image>
+							</view>
+						</view>
+						<view v-if="row.length == 1" class="sp-hot-cell-holder" :style="cellStyle(0)"></view>
+					</view>
+				</view>
+			</view>
+
+			<view class="sp-history" v-if="historyWords.length > 0">
+				<view class="sp-history-title-row">
+					<text class="sp-history-title" :style="titleStyle">搜索历史</text>
+					<view class="sp-history-clear" @click="onClearHistoryTap">
+						<text class="sp-history-clear-text" :style="refreshTextStyle">清空</text>
+					</view>
+				</view>
+				<view class="sp-chips">
+					<view
+						v-for="word in historyWords"
+						:key="word"
+						class="sp-chip"
+						:style="chipStyle"
+						@click="onHistoryTap(word)"
+						@longpress="onHistoryLongPress(word)"
+					>
+						<text class="sp-chip-text" :style="chipTextStyle">{{ word }}</text>
+					</view>
+				</view>
+			</view>
+
+			<view class="sp-body-bottom"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow, onBackPress } from '@dcloudio/uni-app'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import Skeleton from '../../components/skeleton/skeleton.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import { fetchHotSearch, fetchSuggest } from '../../api/search.uts'
+import { HotSearchItem, SuggestItem } from '../../models/search.uts'
+import { CK, SK, getBool, getStringArray, setStringArray } from '../../utils/storage.uts'
+import {
+	textPrimary,
+	textSecondary,
+	themeColor,
+	currentThemeIndex,
+	cardBackground,
+	pageBackground,
+	isDarkMode
+} from '../../utils/theme.uts'
+import { statusBarPaddingTop } from '../../utils/safeArea.uts'
+
+/**
+ * 搜索页（源头：lib/pages/search/{view,controller}.dart + widgets/{hot_keyword,search_text}.dart）。
+ *
+ *  - 顶栏自绘（AppBar+TextField 结构：返回箭头 + 无边框输入框 autofocus + 行尾清除[有词清词/无词返回]
+ *    + 搜索钮）；输入框真可输入（focus 进入即弹键盘，confirm-type=search）；
+ *  - 建议列表：输入变更 200ms 防抖（源 Debouncer 同款），命中段主色加粗（name 的 suggest_high_light
+ *    标记 → 段数组）；建议区插在热搜上方（源 view.dart Column 顺序，基线 search_panel 同构）；
+ *  - 热搜：s.search/main/hotword 两列 Wrap（源列宽 = 卡宽/2−4，词条 14 单行省略 + icon 角标图高 15），
+ *    刷新钮重取；设置键 enableHotKey 控制显隐；失败区块内 p-http-error + 重试；
+ *  - 历史：storage:historyWord 域 cacheList 键（与 P5 搜索四页共享同一存储域）；提交去重置顶、
+ *    长按删单条、清空钮整表清（源均无确认弹层）；
+ *  - onShow 重聚焦（源 didPopNext）；onBackPress：有焦点先收键盘（页面级钩子）。
+ */
+const HISTORY_KEY: string = CK.historyWord + ':cacheList'
+/** refresh 码点（工程字体=Flutter SDK 3.3.10 icons.dart 旧码点体系：refresh=e514；p-icon 未含，本地 glyph） */
+const REFRESH_GLYPH: string = '\ue514'
+const SUGGEST_DEBOUNCE: number = 200
+
+const primary: string = themeColor(currentThemeIndex())
+
+const keyword = ref<string>('')
+/** 源 searchKeyWord：hintText 深链时与输入框文本分离（框为空也可提交占位词） */
+const searchKeyValue = ref<string>('')
+const placeholder = ref<string>('搜索')
+const suggests = ref<Array<SuggestItem>>([])
+const hotItems = ref<Array<HotSearchItem>>([])
+const hotState = ref<string>('loading')
+const hotError = ref<string>('')
+const historyWords = ref<Array<string>>([])
+const focusReq = ref<boolean>(true)
+const inputFocused = ref<boolean>(false)
+const enableHotKey: boolean = getBool(SK.enableHotKey, true)
+
+let suggestTimer: number = -1
+let hasShownOnce: boolean = false
+
+const rootStyle: string = 'background-color:' + pageBackground() + ';'
+const barStyle: string = 'background-color:' + cardBackground() + ';border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:' +
+	(isDarkMode() ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)') + ';' + statusBarPaddingTop(0)
+const inputStyle: string = 'color:' + textPrimary() + ';'
+const iconTextStyle: string = 'color:' + textPrimary() + ';'
+const iconColor: string = textPrimary()
+const titleStyle: string = 'color:' + textPrimary() + ';'
+const wordStyle: string = 'color:' + textPrimary() + ';'
+const segTextStyle: string = 'color:' + textPrimary() + ';'
+const segEmStyle: string = 'color:' + primary + ';font-weight:bold;'
+const refreshGlyphStyle: string = 'font-family:MaterialIcons;font-size:18px;line-height:18px;color:' + primary + ';'
+const refreshTextStyle: string = 'color:' + primary + ';'
+const chipStyle: string = 'background-color:' + (isDarkMode() ? '#26272B' : '#F1F2F3') + ';'
+const chipTextStyle: string = 'color:' + textSecondary() + ';'
+
+/** 热搜列宽（源：容器内容宽/2 − 4；容器 padding 左 10 右 4） */
+function hotCellWidth(): number {
+	let windowWidth = 375
+	try {
+		const info = uni.getWindowInfo()
+		windowWidth = info.windowWidth
+	} catch (e) {
+		windowWidth = 375
+	}
+	return Math.floor((windowWidth - 14) / 2 - 4)
+}
+/** 热搜格样式（源：列宽 = 容器内容宽/2 − 4；奇数列右侧内边距 10 让文字避开屏幕边缘） */
+function cellStyle(ci: number): string {
+	let style = 'width:' + hotCellWidth().toString() + 'px;'
+	if (ci == 1) {
+		style += 'padding-right:10px;'
+	}
+	return style
+}
+const skWidth: string = (hotCellWidth() - 24).toString() + 'px'
+
+/** 热搜两列分块（源 Wrap + width/2-4 的等价手写行容器） */
+const hotRows = computed((): Array<Array<HotSearchItem>> => {
+	const rows: Array<Array<HotSearchItem>> = []
+	const items = hotItems.value
+	for (let i = 0; i < items.length; i += 2) {
+		const row: Array<HotSearchItem> = []
+		row.push(items[i])
+		if (i + 1 < items.length) {
+			row.push(items[i + 1])
+		}
+		rows.push(row)
+	}
+	return rows
+})
+
+onLoad((query) => {
+	historyWords.value = getStringArray(HISTORY_KEY, [])
+	// 源 initState：无论是否带参进入都拉取热搜（深链直达结果页后返回时热搜已就绪）
+	loadHot()
+	if (query != null) {
+		const rawKeyword = query['keyword']
+		if (rawKeyword != null && (rawKeyword as string).length > 0) {
+			// 进入即搜（源 onClickKeyword：填词 + 直接提交）
+			const word = decodeURIComponent(rawKeyword as string)
+			keyword.value = word
+			searchKeyValue.value = word
+			submit()
+			return
+		}
+		const rawHint = query['hintText']
+		if (rawHint != null && (rawHint as string).length > 0) {
+			placeholder.value = decodeURIComponent(rawHint as string)
+			// 源同款：hintText 同步进 searchKeyWord（框内为空也可直接提交该词）
+			searchKeyValue.value = placeholder.value
+		}
+	}
+})
+
+onShow(() => {
+	if (hasShownOnce) {
+		// 源 didPopNext：从结果页返回重新获焦
+		refocusInput()
+	}
+	hasShownOnce = true
+})
+
+/** 返回键：输入框有焦点先收键盘（源返回行为），再按才退页 */
+onBackPress(() : boolean => {
+	if (inputFocused.value) {
+		focusReq.value = false
+		return true
+	}
+	return false
+})
+
+function refocusInput() {
+	focusReq.value = false
+	setTimeout(() => {
+		focusReq.value = true
+	}, 60)
+}
+
+function onFocus(_event: UniInputFocusEvent) {
+	inputFocused.value = true
+}
+
+function onBlur(_event: UniInputBlurEvent) {
+	inputFocused.value = false
+}
+
+function onInput(event: UniInputEvent) {
+	const value = event.detail.value
+	keyword.value = value
+	searchKeyValue.value = value
+	if (value.length == 0) {
+		suggests.value = []
+		if (suggestTimer != -1) {
+			clearTimeout(suggestTimer)
+			suggestTimer = -1
+		}
+		return
+	}
+	if (suggestTimer != -1) {
+		clearTimeout(suggestTimer)
+	}
+	suggestTimer = setTimeout(() => {
+		querySuggest(value)
+	}, SUGGEST_DEBOUNCE)
+}
+
+async function querySuggest(term: string) {
+	const result = await fetchSuggest(term)
+	// 迟到响应丢弃（输入已变）
+	if (keyword.value != term) {
+		return
+	}
+	if (result.status) {
+		suggests.value = result.items
+	}
+}
+
+function onSubmit(_event: UniInputConfirmEvent) {
+	submit()
+}
+
+/** 提交搜索：历史去重置顶持久化 → 跳结果页（源 submit 同款） */
+function submit() {
+	const word = searchKeyValue.value
+	if (word.length == 0) {
+		return
+	}
+	const arr: Array<string> = []
+	for (let i = 0; i < historyWords.value.length; i++) {
+		if (historyWords.value[i] != word) {
+			arr.push(historyWords.value[i])
+		}
+	}
+	arr.unshift(word)
+	historyWords.value = arr
+	setStringArray(HISTORY_KEY, arr)
+	focusReq.value = false
+	suggests.value = []
+	uni.navigateTo({ url: '/pages/search-result/search-result?keyword=' + encodeURIComponent(word) })
+}
+
+function onClearTap() {
+	if (keyword.value.length > 0) {
+		keyword.value = ''
+		searchKeyValue.value = ''
+		suggests.value = []
+	} else {
+		onBackTap()
+	}
+}
+
+function onSuggestTap(item: SuggestItem) {
+	const word = item.term.length > 0 ? item.term : item.value
+	keyword.value = word
+	searchKeyValue.value = word
+	submit()
+}
+
+function onHotTap(cell: HotSearchItem) {
+	// 源同款：先收焦，150ms 后填词提交
+	focusReq.value = false
+	setTimeout(() => {
+		keyword.value = cell.keyword
+		searchKeyValue.value = cell.keyword
+		submit()
+	}, 150)
+}
+
+async function loadHot() {
+	if (hotItems.value.length == 0) {
+		hotState.value = 'loading'
+	}
+	const result = await fetchHotSearch()
+	if (result.status) {
+		hotItems.value = result.items
+		hotState.value = 'done'
+	} else {
+		hotError.value = result.message
+		hotState.value = 'error'
+	}
+}
+
+function onHistoryTap(word: string) {
+	keyword.value = word
+	searchKeyValue.value = word
+	submit()
+}
+
+function onHistoryLongPress(word: string) {
+	const arr: Array<string> = []
+	for (let i = 0; i < historyWords.value.length; i++) {
+		if (historyWords.value[i] != word) {
+			arr.push(historyWords.value[i])
+		}
+	}
+	historyWords.value = arr
+	setStringArray(HISTORY_KEY, arr)
+}
+
+function onClearHistoryTap() {
+	historyWords.value = []
+	setStringArray(HISTORY_KEY, [])
+}
+
+function onBackTap() {
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+</script>
+
+<style>
+	.sp {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.sp-bar {
+		display: flex;
+		flex-direction: column;
+	}
+	.sp-bar-row {
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-right: 10px;
+	}
+	.sp-back {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sp-back-icon {
+		font-size: 24px;
+		line-height: 24px;
+	}
+	.sp-field {
+		flex: 1;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.sp-input {
+		flex: 1;
+		height: 40px;
+		font-size: 16px;
+	}
+	.sp-placeholder {
+		color: #9A9CA5;
+		font-size: 16px;
+	}
+	.sp-clear {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sp-search {
+		width: 44px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sp-body {
+		flex: 1;
+	}
+	.sp-suggest {
+		display: flex;
+		flex-direction: column;
+		margin-top: 12px;
+	}
+	.sp-suggest-row {
+		padding-left: 20px;
+		padding-top: 9px;
+		padding-bottom: 9px;
+	}
+	.sp-suggest-text {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+	.sp-suggest-seg {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.sp-hot {
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-right: 4px;
+		padding-top: 14px;
+	}
+	.sp-hot-title-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding-left: 6px;
+		padding-right: 6px;
+		padding-bottom: 6px;
+	}
+	.sp-hot-title {
+		font-size: 16px;
+		font-weight: bold;
+	}
+	.sp-refresh {
+		height: 34px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.sp-refresh-glyph {
+		font-family: MaterialIcons;
+	}
+	.sp-refresh-text {
+		font-size: 14px;
+		margin-left: 4px;
+	}
+	.sp-hot-skeleton {
+		padding-left: 6px;
+		padding-right: 6px;
+		padding-top: 4px;
+	}
+	.sp-hot-sk-row {
+		display: flex;
+		flex-direction: row;
+		justify-content: space-between;
+		margin-bottom: 14px;
+	}
+	.sp-hot-error {
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.sp-hot-rows {
+		display: flex;
+		flex-direction: column;
+	}
+	.sp-hot-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.sp-hot-cell {
+		height: 32px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 2px;
+		padding-right: 2px;
+		border-radius: 3px;
+	}
+	.sp-hot-cell-holder {
+		height: 32px;
+	}
+	.sp-hot-word {
+		flex: 1;
+		font-size: 14px;
+	}
+	.sp-hot-icon-box {
+		height: 15px;
+		margin-left: 4px;
+		margin-right: 4px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		flex-shrink: 0;
+	}
+	.sp-hot-icon {
+		height: 15px;
+	}
+	.sp-history {
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-right: 6px;
+		padding-top: 25px;
+	}
+	.sp-history-title-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding-left: 6px;
+		padding-bottom: 2px;
+	}
+	.sp-history-title {
+		font-size: 16px;
+		font-weight: bold;
+	}
+	.sp-history-clear {
+		height: 34px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.sp-history-clear-text {
+		font-size: 14px;
+	}
+	.sp-chips {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		padding-top: 6px;
+	}
+	.sp-chip {
+		padding-left: 11px;
+		padding-right: 11px;
+		padding-top: 5px;
+		padding-bottom: 5px;
+		border-radius: 6px;
+		margin-right: 8px;
+		margin-bottom: 8px;
+	}
+	.sp-chip-text {
+		font-size: 13px;
+	}
+	.sp-body-bottom {
+		height: 30px;
+	}
+</style>

@@ -1,0 +1,154 @@
+<template>
+	<!--
+		二维码渲染组件（纯 view 网格，不依赖 canvas）。
+		文件名沿用 qr-canvas：调用处（pages/login/login.uvue）无需改动。
+		实现：外层容器尺寸 = props.size（白底即静区），内部按矩阵逐行把连续暗块
+		合并成 run，每个 run 一个绝对定位的深色 view，静态渲染无重绘开销。
+		为何不用 canvas：App（蒸汽）端 canvas 背面尺寸不可写，dpr 换算退化为 1x，
+		二维码被画成画布左上角的 1/dpr 大小且不居中（真机实测 172px / 应 ~586px）。
+	-->
+	<view class="qc" :style="wrapStyle">
+		<view v-for="run in runs" :key="run.key" class="qc-run" :style="run.style"></view>
+		<view v-if="!hasMatrix" class="qc-placeholder">
+			<text class="qc-placeholder-text">{{ placeholderText }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed, watch } from 'vue'
+
+/**
+ * 通用二维码渲染器。只负责「把矩阵画出来」，不生成、不请求：
+ * matrix 由父级用 utils/qrcode.uts 编码后整体替换传入（新数组引用触发重算）。
+ *
+ * 几何：模块边长 cell = size / (模块数 + 2 × 4 模块静区)；
+ * 输出坐标按「网格边界统一取整」——第 k 条边界恒为 round(k × cell)，
+ * 同一列的上下行、同一行相邻 run 共用同一条边界，故相邻色块严丝合缝，
+ * 不会因逐块取整产生白缝（代价是模块宽在 4/5px 间跳动，视觉上仍成规矩栅格）。
+ */
+
+/** 静区宽度（模块数），QR 规范要求 ≥4 */
+const QUIET_MODULES: number = 4
+
+/** 一条暗块 run：key 供 v-for 稳定复用，style 为绝对定位 + 填充色 */
+type QrRun = {
+	key: string
+	style: string
+}
+
+const props = defineProps({
+	/** 编码矩阵 [row][col]，true=暗；null/空数组渲染占位框 */
+	matrix: { type: Array, default: null },
+	/** 组件正方形边长（CSS px） */
+	size: { type: Number, default: 224 },
+	darkColor: { type: String, default: '#18191C' },
+	lightColor: { type: String, default: '#FFFFFF' },
+	/** 占位文案 */
+	placeholderText: { type: String, default: '二维码生成中…' }
+})
+
+const wrapStyle = computed((): string => {
+	return 'width:' + props.size.toString() + 'px;height:' + props.size.toString() + 'px;background-color:' + props.lightColor + ';'
+})
+
+const hasMatrix = computed((): boolean => {
+	const mods = props.matrix as boolean[][] | null
+	return mods != null && mods.length > 0
+})
+
+function px(value: number): string {
+	return value.toString() + 'px;'
+}
+
+/**
+ * 矩阵 → 暗块 run 列表。
+ * 每个 run 覆盖一行内的一段连续暗模块：left/top 取网格边界，width/height 取边界差。
+ */
+const runs = computed((): QrRun[] => {
+	const out: QrRun[] = []
+	const mods = props.matrix as boolean[][] | null
+	if (mods == null || mods.length == 0) {
+		return out
+	}
+	const n = mods.length
+	const total = n + QUIET_MODULES * 2
+	const cell = props.size / total
+	const fill = 'background-color:' + props.darkColor + ';'
+	for (let y = 0; y < n; y++) {
+		const row = mods[y]
+		// 行边界与列边界同规则取整：上下行共用同一条水平边界，纵向无缝
+		const top = Math.round((QUIET_MODULES + y) * cell)
+		const height = Math.round((QUIET_MODULES + y + 1) * cell) - top
+		if (height <= 0) {
+			continue
+		}
+		let x = 0
+		while (x < n) {
+			if (!row[x]) {
+				x++
+				continue
+			}
+			// 合并连续暗块为一条 run
+			let end = x + 1
+			while (end < n && row[end]) {
+				end++
+			}
+			const left = Math.round((QUIET_MODULES + x) * cell)
+			const width = Math.round((QUIET_MODULES + end) * cell) - left
+			if (width > 0) {
+				const run : QrRun = {
+					key: y.toString() + '-' + x.toString(),
+					style: 'position:absolute;left:' + px(left) + 'top:' + px(top) + 'width:' + px(width) + 'height:' + px(height) + fill
+				}
+				out.push(run)
+			}
+			x = end
+		}
+	}
+	return out
+})
+
+// 渲染规模日志：真机验证时用于确认矩阵已到、run 合并生效（每行日志一行，不刷屏）
+watch((): boolean[][] | null => props.matrix as boolean[][] | null, (mods: boolean[][] | null) => {
+	if (mods == null || mods.length == 0) {
+		console.log('[qr-canvas] 矩阵为空，渲染占位框')
+		return
+	}
+	const n = mods.length
+	const total = n + QUIET_MODULES * 2
+	const cell = props.size / total
+	console.log('[qr-canvas] 网格渲染 模块=' + n.toString() + ' size=' + props.size.toString()
+		+ ' cell=' + cell.toFixed(2) + ' runs=' + runs.value.length.toString())
+})
+</script>
+
+<style>
+	.qc {
+		position: relative;
+		overflow: hidden;
+	}
+	.qc-run {
+		position: absolute;
+	}
+	.qc-placeholder {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		background-color: #F6F7F8;
+		border-width: 1px;
+		border-style: solid;
+		border-color: #E3E6EA;
+		border-radius: 8px;
+	}
+	.qc-placeholder-text {
+		font-size: 13px;
+		color: #A7ADB8;
+	}
+</style>

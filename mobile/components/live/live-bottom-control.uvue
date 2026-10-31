@@ -1,0 +1,178 @@
+<template>
+	<view class="lbc">
+		<!-- 画质菜单（源 PopupMenuButton：点当前画质文案弹菜单，选档回调 changeQn） -->
+		<view v-if="menuOpen" class="lbc-menu-wrap">
+			<view class="lbc-menu">
+				<view v-for="code in qnList" :key="code.toString()" class="lbc-menu-item" @click="onPick(code)">
+					<text class="lbc-menu-text" :style="menuTextStyle(code)">{{ qnDescOf(code) }}</text>
+				</view>
+			</view>
+		</view>
+		<view class="lbc-bar">
+			<view class="lbc-btn" @click="onRefresh">
+				<text class="lbc-icon" :style="refreshIconStyle">{{ refreshGlyph }}</text>
+			</view>
+			<view class="lbc-fill"></view>
+			<view class="lbc-qn" @click="toggleMenu">
+				<text class="lbc-qn-text">{{ qnDesc }}</text>
+			</view>
+			<view class="lbc-gap"></view>
+			<view class="lbc-btn" @click="onFullscreen">
+				<text class="lbc-icon" :style="fullscreenIconStyle">{{ fullscreenGlyph }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref } from 'vue'
+import { liveQnDesc } from '../../models/live.uts'
+import { liveGlyphOf, liveIconStyle } from '../../utils/iconsLive.uts'
+
+/**
+ * 直播间播放器底部控制条（源头：`lib/pages/live_room/widgets/bottom_control.dart`）。
+ *
+ * 结构：透明 AppBar（高 56、左右内边距 14）：刷新（18 号图标）→ 弹性空白 → 当前画质文案（13 号）
+ * → 画质菜单 → 全屏（20 号图标）。
+ * PiP 按钮：源仅 Android 显示，D4 决策 PiP 随播放器插件后置，本端不渲染（已登记差异）。
+ * 画质菜单：点文案弹出，列出服务端 accept_qn 档位；选中回调页面重拉流（页面按 current_qn 校验）。
+ */
+const props = defineProps({
+	/** 当前画质描述（服务端 current_qn 映射） */
+	qnDesc: { type: String, default: '原画' },
+	/** 可切换档位（服务端 accept_qn 码值） */
+	qnList: {
+		type: Array,
+		default() {
+			return [] as Array<number>
+		}
+	},
+	/** 当前画质码值（菜单高亮用） */
+	currentQn: { type: Number, default: 0 }
+})
+
+const emit = defineEmits(['refresh', 'quality', 'fullscreen'])
+
+const menuOpen = ref<boolean>(false)
+
+const refreshGlyph = liveGlyphOf('refresh-outlined')
+const fullscreenGlyph = liveGlyphOf('fullscreen')
+const refreshIconStyle = liveIconStyle('refresh-outlined', 18, '#FFFFFF')
+const fullscreenIconStyle = liveIconStyle('fullscreen', 20, '#FFFFFF')
+
+function qnDescOf(code: number): string {
+	return liveQnDesc(code)
+}
+
+function menuTextStyle(code: number): string {
+	// 选中档位用主色高亮（源菜单默认高亮当前项）
+	return code == props.currentQn ? 'color:#5CB67B;' : 'color:#FFFFFF;'
+}
+
+function toggleMenu() {
+	if (props.qnList.length == 0) {
+		uni.showToast({ title: '暂无可切换画质', icon: 'none' })
+		return
+	}
+	menuOpen.value = !menuOpen.value
+}
+
+function onPick(code: number) {
+	menuOpen.value = false
+	emit('quality', code)
+}
+
+function onRefresh() {
+	menuOpen.value = false
+	emit('refresh')
+}
+
+function onFullscreen() {
+	menuOpen.value = false
+	emit('fullscreen')
+}
+</script>
+
+<style>
+	.lbc {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.lbc-menu-wrap {
+		display: flex;
+		flex-direction: row;
+		justify-content: flex-end;
+		padding-right: 48px;
+		margin-bottom: 4px;
+	}
+
+	.lbc-menu {
+		width: 120px;
+		border-radius: 8px;
+		background-color: rgba(20, 20, 22, 0.92);
+		padding-top: 4px;
+		padding-bottom: 4px;
+	}
+
+	.lbc-menu-item {
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lbc-menu-text {
+		font-size: 13px;
+	}
+
+	.lbc-bar {
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 14px;
+		padding-right: 14px;
+		background-color: rgba(0, 0, 0, 0.18);
+	}
+
+	.lbc-btn {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lbc-icon {
+		font-family: MaterialIcons;
+	}
+
+	.lbc-fill {
+		flex: 1;
+	}
+
+	.lbc-qn {
+		min-width: 30px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lbc-qn-text {
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+
+	.lbc-gap {
+		width: 10px;
+	}
+</style>

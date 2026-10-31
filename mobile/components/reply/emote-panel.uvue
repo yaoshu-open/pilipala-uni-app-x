@@ -1,0 +1,216 @@
+<template>
+	<view class="ep">
+		<view v-if="state == 'loading'" class="ep-state">
+			<text class="ep-state-text" :style="secondaryTextStyle">表情加载中…</text>
+		</view>
+		<view v-else-if="state == 'error'" class="ep-state" @click="load">
+			<text class="ep-state-text" :style="secondaryTextStyle">{{ errorText }}</text>
+			<text class="ep-state-retry" :style="primaryTextStyle">点击重试</text>
+		</view>
+		<view v-else-if="state == 'empty'" class="ep-state">
+			<text class="ep-state-text" :style="secondaryTextStyle">暂无可用表情</text>
+		</view>
+		<view v-else class="ep-content">
+			<scroll-view class="ep-grid-scroll">
+				<view class="ep-grid">
+					<view
+						v-for="(emote, index) in currentEmotes"
+						:key="'ep-' + index.toString()"
+						class="ep-item"
+						@click="onChoose(emote.text)"
+					>
+						<image
+							v-if="!textPack"
+							class="ep-img"
+							:src="emote.url"
+							:style="emoteStyle(emote.size)"
+							mode="aspectFit"
+						></image>
+						<text v-else class="ep-text" :style="tokenTextStyle">{{ emote.text }}</text>
+					</view>
+				</view>
+			</scroll-view>
+			<scroll-view v-if="packages.length > 1" class="ep-tabs" direction="horizontal" :show-scrollbar="false">
+				<view
+					v-for="(pack, index) in packages"
+					:key="'ep-pack-' + index.toString()"
+					class="ep-tab"
+					@click="onSelectPack(index)"
+				>
+					<text class="ep-tab-text" :style="tabTextStyle(index)">{{ pack.text }}</text>
+					<view v-if="index == currentPack" class="ep-tab-bar" :style="tabBarStyle"></view>
+				</view>
+			</scroll-view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { fetchEmoteList } from '../../api/reply.uts'
+import { EmoteItem, EmotePackage } from '../../models/reply.uts'
+import { textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 表情面板（源头：`lib/pages/emote/view.dart` 的 EmotePanel + controller.dart）。
+ *
+ * 面板本体做成组件，两处复用同一份实现：
+ *  - 评论输入条内的弹层（reply-input.uvue）；
+ *  - 独立页面 `pages/emote/emote.uvue`（design 里登记的 pages/emote 路由，可被深链/后续弹幕输入调用）。
+ * 只负责取数、分组、网格展示与回传 token，插入文本的落点由调用方决定。
+ *
+ * `type == 4` 的表情包是颜文字，没有图片 url，直接显示 text（源同款判定）。
+ */
+const props = defineProps({
+	business: { type: String, default: 'reply' }
+})
+
+const emit = defineEmits(['choose'])
+
+const primary = themeColor(currentThemeIndex())
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const packages = ref<Array<EmotePackage>>([])
+const currentPack = ref<number>(0)
+
+const currentEmotes = computed((): Array<EmoteItem> => {
+	if (currentPack.value < 0 || currentPack.value >= packages.value.length) {
+		return [] as Array<EmoteItem>
+	}
+	return packages.value[currentPack.value].emotes
+})
+
+const textPack = computed((): boolean => {
+	if (currentPack.value < 0 || currentPack.value >= packages.value.length) {
+		return false
+	}
+	return packages.value[currentPack.value].type == 4
+})
+
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const tokenTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const tabBarStyle = computed((): string => 'background-color:' + primary + ';')
+
+function tabTextStyle(index: number): string {
+	return 'color:' + (index == currentPack.value ? primary : textSecondary()) + ';'
+}
+
+function emoteStyle(size: number): string {
+	const side = (size > 1 ? 40 : 30).toString()
+	return 'width:' + side + 'px;height:' + side + 'px;'
+}
+
+function onSelectPack(index: number) {
+	if (index == currentPack.value) {
+		return
+	}
+	currentPack.value = index
+}
+
+function onChoose(token: string) {
+	if (token.length == 0) {
+		return
+	}
+	emit('choose', token)
+}
+
+async function load() {
+	state.value = 'loading'
+	errorText.value = ''
+	const res = await fetchEmoteList(props.business)
+	if (!res.status) {
+		state.value = 'error'
+		errorText.value = res.message.length > 0 ? res.message : '表情加载失败'
+		return
+	}
+	packages.value = res.packages
+	currentPack.value = 0
+	state.value = res.packages.length > 0 ? 'ready' : 'empty'
+}
+
+load()
+</script>
+
+<style>
+	.ep {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.ep-state {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding-top: 20px;
+		padding-bottom: 20px;
+	}
+	.ep-state-text {
+		font-size: 12px;
+	}
+	.ep-state-retry {
+		font-size: 12px;
+		margin-top: 6px;
+	}
+	.ep-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.ep-grid-scroll {
+		flex: 1;
+	}
+	.ep-grid {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		padding-left: 10px;
+		padding-right: 10px;
+		padding-top: 6px;
+	}
+	.ep-item {
+		width: 56px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.ep-img {
+		width: 30px;
+		height: 30px;
+	}
+	.ep-text {
+		font-size: 11px;
+		line-height: 14px;
+		text-align: center;
+	}
+	.ep-tabs {
+		height: 38px;
+		flex-direction: row;
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(128, 128, 128, 0.2);
+	}
+	.ep-tab {
+		flex-shrink: 0;
+		height: 38px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding-left: 14px;
+		padding-right: 14px;
+	}
+	.ep-tab-text {
+		font-size: 12px;
+	}
+	.ep-tab-bar {
+		width: 14px;
+		height: 2px;
+		border-radius: 1px;
+		margin-top: 3px;
+	}
+</style>

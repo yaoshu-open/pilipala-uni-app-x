@@ -1,0 +1,174 @@
+<template>
+	<view class="rni" @click="onTap">
+		<view class="rni-avatar" @click.stop="onUserTap">
+			<network-img :src="avatar" width="42px" height="42px" radius="21px"></network-img>
+		</view>
+		<view class="rni-main">
+			<view class="rni-title">
+				<text class="rni-name" :style="nameStyle" :max-lines="1">{{ nickname }}</text>
+				<text class="rni-action" :style="secondaryStyle" :max-lines="1"> {{ actionText }}</text>
+			</view>
+			<view class="rni-content">
+				<notice-rich-text
+					:content="sourceContent"
+					:at-details="atDetails"
+					:font-size="14"
+					:line-height="20"
+					:max-lines="2"
+					@open-user="onOpenUser"
+				></notice-rich-text>
+			</view>
+			<text
+				v-if="targetReplyContent.length > 0"
+				class="rni-target"
+				:style="secondaryStyle"
+				:max-lines="2"
+			>{{ targetReplyContent }}</text>
+			<text class="rni-time" :style="secondaryStyle">{{ timeText }}</text>
+		</view>
+		<!-- 右侧缩略：video=封面 60×60；reply=根评论文本框 60×80（源常量） -->
+		<view v-if="isVideo" class="rni-thumb">
+			<network-img :src="image" width="60px" height="60px" radius="4px"></network-img>
+		</view>
+		<view v-else-if="isReply" class="rni-root">
+			<text class="rni-root-text" :style="secondaryStyle" :max-lines="4">{{ rootReplyContent }}</text>
+		</view>
+		<!-- 其余来源类型（动态等）：接口给了封面就出封面，无封面不留空占位 -->
+		<view v-else-if="image.length > 0" class="rni-thumb">
+			<network-img :src="image" width="60px" height="60px" radius="4px"></network-img>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import NoticeRichText from './notice-rich-text.uvue'
+import { ReplyNoticeItem, ReplyNoticeContent, NoticeUser } from '../../models/message.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 回复我的条目（源头：`lib/pages/message/reply/view.dart` ReplyItem）。
+ *
+ * 布局照源常量：外层 padding 14、头像 42 圆、头像与正文间距 10、右侧缩略距正文 25；
+ * 正文三行结构 = 顶部「昵称 + 动作（对我的视频发表了评论 / 回复了我的评论）」
+ * → 评论内容（@人高亮，最多 2 行）→ 被回复内容摘要（targetReplyContent）→ 时间。
+ * 右侧缩略按 type 分支：video 出封面 60×60；reply 出根评论文本框 60×80（源 Container）。
+ *
+ * 点击：整条跳视频详情（页面解析 uri 换 bvid → ab2c 取 cid）、头像跳 member。
+ * 富文本内的 @人点击由 notice-rich-text 冒 stop 后回调 open-user，不会触发整条跳转。
+ */
+const props = defineProps({
+	item: { type: Object, default: null }
+})
+
+const emit = defineEmits(['tap', 'open-user'])
+
+const notice = computed((): ReplyNoticeItem => props.item as ReplyNoticeItem)
+const content = computed((): ReplyNoticeContent => notice.value.item)
+const user = computed((): NoticeUser => notice.value.user)
+
+const nickname = computed((): string => user.value.nickname)
+const avatar = computed((): string => user.value.avatar)
+const userId = computed((): number => user.value.mid)
+const sourceContent = computed((): string => content.value.sourceContent)
+const atDetails = computed((): Array<NoticeUser> => content.value.atDetails)
+const targetReplyContent = computed((): string => content.value.targetReplyContent)
+const rootReplyContent = computed((): string => content.value.rootReplyContent)
+const image = computed((): string => content.value.image)
+const isVideo = computed((): boolean => content.value.type == 'video')
+const isReply = computed((): boolean => content.value.type == 'reply')
+const actionText = computed((): string => {
+	return content.value.type == 'reply' ? '回复了我的评论' : '对我的视频发表了评论'
+})
+const timeText = computed((): string => dateFormat(notice.value.replyTime, 'detail'))
+
+const nameStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+function onTap() {
+	emit('tap')
+}
+
+function onUserTap() {
+	if (userId.value <= 0) {
+		return
+	}
+	emit('open-user', userId.value.toString())
+}
+
+function onOpenUser(mid: string) {
+	emit('open-user', mid)
+}
+</script>
+
+<style>
+	.rni {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		padding: 14px;
+	}
+	.rni-avatar {
+		width: 42px;
+		height: 42px;
+		flex-shrink: 0;
+	}
+	.rni-main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 10px;
+	}
+	.rni-title {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+	.rni-name {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.rni-action {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.rni-content {
+		display: flex;
+		flex-direction: column;
+		margin-top: 6px;
+	}
+	/* 被回复摘要与时间：源 Text 无字号覆盖 → bodyMedium 14sp（基线/源码一致口径） */
+	.rni-target {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 2px;
+	}
+	.rni-time {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 4px;
+	}
+	.rni-thumb {
+		width: 60px;
+		height: 60px;
+		margin-left: 25px;
+		flex-shrink: 0;
+	}
+	/* 根评论文本框：源 Container(width 60, height 80, padding 4) 无水色底 */
+	.rni-root {
+		width: 60px;
+		height: 80px;
+		padding: 4px;
+		margin-left: 25px;
+		flex-shrink: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.rni-root-text {
+		font-size: 12px;
+		line-height: 16px;
+	}
+</style>

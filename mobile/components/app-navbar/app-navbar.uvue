@@ -1,0 +1,98 @@
+<template>
+	<view class="app-navbar" :style="rootStyle">
+		<view class="app-navbar-bar">
+			<view class="app-navbar-leading" @click="onBack">
+				<p-icon v-if="showBack" name="arrow-back" :size="24" :color="textPrimary()"></p-icon>
+			</view>
+			<text class="app-navbar-title" :style="titleStyle" :max-lines="1">{{ title }}</text>
+			<view class="app-navbar-actions">
+				<slot name="right"></slot>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import PIcon from '../p-icon/p-icon.uvue'
+import { cardBackground, textPrimary, scaledFont } from '../../utils/theme.uts'
+import { statusBarPaddingTop } from '../../utils/safeArea.uts'
+
+/**
+ * 自定义导航栏。
+ *
+ * 视觉出处（源工程）：
+ *  - 结构：`lib/common/widgets/appbar.dart`（AppBarWidget：对 AppBar 做上下滑动显隐，curve easeInOutBack）；
+ *  - 栏体：Material `AppBar` 默认值 —— 高度 kToolbarHeight=56dp、leading 区 56dp、图标 24dp；
+ *    业务页覆盖 `titleSpacing: 0`（标题贴 leading 起始）、`centerTitle: false`（标题左对齐），
+ *    见 lib/pages/history/view.dart:69、about/index.dart:42 等全量页面统一写法；
+ *  - 标题字号字重：`Theme.of(context).textTheme.titleMedium` = Material3 默认 16sp / w500；
+ *  - 背景色：`colorScheme.surface`（Material3 动态配色）。
+ *
+ * 目标端等价说明：
+ *  - 动态配色 scheme 无 token 等价 → 背景取 cardBackground()、文字取 textPrimary()；
+ *  - 返回图标用 MaterialIcons 字体 `arrow-back`（码点 0xe092，与源同一字体族，P8 起替换原先的
+ *    Unicode「←」字符——字符箭头笔画与源矢量不同，属可见差异）；
+ *  - 标题字号默认 16（源显式 titleMedium 的页面）；源仅写 `AppBar(title:)` 的页面取 AppBar 默认
+ *    titleLarge 22，由使用页传 `title-size="22"`（消息域）；
+ *  - 滑动显隐动画属页面滚动联动，由使用页接入（本组件只提供静态栏体）。
+ */
+const props = defineProps({
+	title: { type: String, default: '' },
+	showBack: { type: Boolean, default: true },
+	// 标题字号：源页面显式写 textTheme.titleMedium（16sp）的取默认；仅写 AppBar(title:) 的取 AppBar
+	// 默认 titleLarge（22sp）——消息域四页属后者，按基线实测（标题墨迹 20.9dp/字）取 22
+	titleSize: { type: Number, default: 16 },
+	/** 标题透明度（图文/专栏页：滚动 > 100 后淡入，源 AppBar AnimatedOpacity 同款） */
+	titleOpacity: { type: Number, default: 1 }
+})
+
+// 状态栏避让统一走 utils/safeArea.uts（全线页面/组件同一取值来源，禁止各自实现）
+// computed：主题切换后导航栏底色要跟着变（themeTick 驱动），不能停在 setup 时的取值
+const rootStyle = computed((): string => 'background-color:' + cardBackground() + ';' + statusBarPaddingTop(0))
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';font-size:' + scaledFont(props.titleSize) + ';opacity:' + props.titleOpacity.toString() + ';')
+
+function onBack() {
+	if (!props.showBack) {
+		return
+	}
+	// 栈内返回；根页无上一页时回首页（对应源 Navigator.pop 的边界）
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+</script>
+
+<style>
+	.app-navbar {
+		background-color: #FFFFFF;
+	}
+	.app-navbar-bar {
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.app-navbar-leading {
+		width: 56px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.app-navbar-title {
+		flex: 1;
+		font-weight: 500;
+		text-align: left;
+	}
+	.app-navbar-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-right: 6px;
+	}
+</style>

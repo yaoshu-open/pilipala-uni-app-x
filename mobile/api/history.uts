@@ -1,0 +1,298 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { objOf, numOf } from '../utils/json.uts'
+import { HotVideoItem, ListResult } from '../models/video.uts'
+import { HisListItem, HisCursor, HistoryResult, HistoryShadowResult } from '../models/history.uts'
+
+/**
+ * 观看历史 / 稍后再看接口层（源头：`lib/http/user.dart` 的 history/toview 条目）。
+ *
+ * 落点说明：设计 §十二 将本组接口归 `api/user-center.uts`；本期三簇并行为避免
+ * 簇B/簇C 同文件写冲突，按父任务清单独立为 `api/history.uts`（集成阶段可合并）。
+ *
+ * 约定与既有接口层一致：内部 `xxxRaw` 请求 + 解析，导出函数 try/catch 兜底；
+ * 写操作统一 `postWithCsrf` 前置校验，凭据缺失明确失败不发请求（设计 §4.3）。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+/** 写操作结果（历史删除/清空/暂停、稍后再看增删清） */
+export class HistoryActionResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	/** 成功 toast 文案（源逐字，如「yeah！成功移除」「已删除」） */
+	successToast: string = ''
+}
+
+/** 带 csrf 的写请求（凭据缺失时明确失败） */
+async function postWithCsrf(path: string, params: Params, successToast: string): Promise<HistoryActionResult> {
+	const body = params.toObject()
+	return postBodyWithCsrf(path, body, successToast)
+}
+
+/** body 直传版（含 boolean 值的接口用：switch/viewed 必须是真布尔，走 Params 会被字符串化） */
+async function postBodyWithCsrf(path: string, body: UTSJSONObject, successToast: string): Promise<HistoryActionResult> {
+	const result = new HistoryActionResult()
+	result.successToast = successToast
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[history] csrf empty path=' + path)
+		return result
+	}
+	body.set('csrf', csrf)
+	const res = await apiPost(path, body)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[history] post fail path=' + path + ' code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+// ---------------------------------------------------------------- 读：观看历史
+
+/** 历史流游标分页（源 UserHttp.historyList：/x/web-interface/history/cursor，ps=20） */
+async function fetchHistoryRaw(max: number, viewAt: number): Promise<HistoryResult> {
+	const result = new HistoryResult()
+	const params = new Params()
+	params.set('type', 'all')
+	params.setNum('ps', 20)
+	params.setNum('max', max)
+	params.setNum('view_at', viewAt)
+	const res = await apiGet('/x/web-interface/history/cursor', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	result.cursor = HisCursor.from(objOf(data, 'cursor'))
+	const list = data.getArray('list')
+	if (list != null) {
+		for (let i = 0; i < list.length; i++) {
+			const raw = list[i]
+			if (raw != null) {
+				result.items.push(HisListItem.from(raw as UTSJSONObject))
+			}
+		}
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchHistory(max: number, viewAt: number): Promise<HistoryResult> {
+	try {
+		return await fetchHistoryRaw(max, viewAt)
+	} catch (e) {
+		console.log('[history] fetchHistory error')
+		console.log(e)
+		const failed = new HistoryResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 搜索历史（源 UserHttp.searchHistory：/x/web-goblin/history/search，pn 分页） */
+async function searchHistoryRaw(pn: number, keyword: string): Promise<HistoryResult> {
+	const result = new HistoryResult()
+	const params = new Params()
+	params.setNum('pn', pn)
+	params.set('keyword', keyword)
+	params.set('business', 'all')
+	const res = await apiGet('/x/web-goblin/history/search', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	const page = objOf(data, 'page')
+	result.total = page == null ? 0 : numOf(page, 'total')
+	const list = data.getArray('list')
+	if (list != null) {
+		for (let i = 0; i < list.length; i++) {
+			const raw = list[i]
+			if (raw != null) {
+				result.items.push(HisListItem.from(raw as UTSJSONObject))
+			}
+		}
+	}
+	result.status = true
+	return result
+}
+
+export async function searchHistory(pn: number, keyword: string): Promise<HistoryResult> {
+	try {
+		return await searchHistoryRaw(pn, keyword)
+	} catch (e) {
+		console.log('[history] searchHistory error')
+		console.log(e)
+		const failed = new HistoryResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 历史暂停状态（源 UserHttp.historyStatus：/x/v2/history/shadow?jsonp=jsonp，data 为 bool） */
+export async function fetchHistoryShadow(): Promise<HistoryShadowResult> {
+	const result = new HistoryShadowResult()
+	const params = new Params()
+	params.set('jsonp', 'jsonp')
+	try {
+		const res = await apiGet('/x/v2/history/shadow', params)
+		if (res == null) {
+			result.message = '网络异常，请稍后重试'
+			return result
+		}
+		if (codeOf(res) != 0) {
+			result.message = messageOf(res)
+			return result
+		}
+		const data = objOf(res, 'data')
+		const paused = data == null ? null : data.getBoolean('data')
+		result.paused = paused == null ? false : paused
+		result.status = true
+	} catch (e) {
+		console.log('[history] fetchHistoryShadow error')
+		console.log(e)
+		result.message = '数据解析异常，请稍后重试'
+	}
+	return result
+}
+
+// ---------------------------------------------------------------- 读：稍后再看
+
+/** 稍后再看列表（源 UserHttp.seeYouLater：/x/v2/history/toview，一次全量） */
+async function fetchLaterRaw(): Promise<ListResult<HotVideoItem>> {
+	const result = new ListResult<HotVideoItem>()
+	const res = await apiGet('/x/v2/history/toview', null)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	const list = data.getArray('list')
+	if (list != null) {
+		for (let i = 0; i < list.length; i++) {
+			const raw = list[i]
+			if (raw != null) {
+				result.items.push(HotVideoItem.from(raw as UTSJSONObject))
+			}
+		}
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchLater(): Promise<ListResult<HotVideoItem>> {
+	try {
+		return await fetchLaterRaw()
+	} catch (e) {
+		console.log('[history] fetchLater error')
+		console.log(e)
+		const failed = new ListResult<HotVideoItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 写：观看历史
+
+/** 暂停/恢复历史（源 UserHttp.pauseHistory：/x/v2/history/shadow/set） */
+export async function historyPauseSet(paused: boolean): Promise<HistoryActionResult> {
+	const body: UTSJSONObject = {}
+	body.set('switch', paused)
+	body.set('jsonp', 'jsonp')
+	return postBodyWithCsrf('/x/v2/history/shadow/set', body, paused ? '暂停观看历史' : '恢复观看历史')
+}
+
+/** 清空历史（源 UserHttp.clearHistory：/x/v2/history/clear） */
+export async function historyClear(): Promise<HistoryActionResult> {
+	const params = new Params()
+	params.set('jsonp', 'jsonp')
+	return postWithCsrf('/x/v2/history/clear', params, '清空观看历史')
+}
+
+/** 删除单条历史（源 UserHttp.delHistory：kid 为 `archive_/live_/article_` + kid 拼接，页面走 models/history.uts#historyKidOf） */
+export async function historyDelete(kid: string): Promise<HistoryActionResult> {
+	const params = new Params()
+	params.set('kid', kid)
+	params.set('jsonp', 'jsonp')
+	return postWithCsrf('/x/v2/history/delete', params, '已删除')
+}
+
+// ---------------------------------------------------------------- 写：稍后再看
+
+/** 加入稍后再看（源 UserHttp.toViewLater：bvid；history 条目菜单用） */
+export async function laterAdd(bvid: string): Promise<HistoryActionResult> {
+	const params = new Params()
+	params.set('bvid', bvid)
+	return postWithCsrf('/x/v2/history/toview/add', params, 'yeah！稍后再看')
+}
+
+/**
+ * 移除稍后再看（源 UserHttp.toViewDel）：
+ *  - aid 非空：移除单条；
+ *  - aid 为空：移除全部已观看（viewed=true，即顶栏「移除已看」）。
+ */
+export async function laterDel(aid: number): Promise<HistoryActionResult> {
+	const body: UTSJSONObject = {}
+	body.set('jsonp', 'jsonp')
+	if (aid > 0) {
+		body.set('aid', aid)
+	} else {
+		body.set('viewed', true)
+	}
+	return postBodyWithCsrf('/x/v2/history/toview/del', body, 'yeah！成功移除')
+}
+
+/** 清空稍后再看（源 UserHttp.toViewClear：/x/v2/history/toview/clear） */
+export async function laterClear(): Promise<HistoryActionResult> {
+	const params = new Params()
+	params.set('jsonp', 'jsonp')
+	return postWithCsrf('/x/v2/history/toview/clear', params, '操作完成')
+}

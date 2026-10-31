@@ -1,0 +1,93 @@
+<template>
+	<text class="p-icon" :style="iconStyle">{{ glyph }}</text>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+
+/**
+ * Material Icons 字体图标。
+ *
+ * 源头：Flutter 内置 Material Icons（源工程所有图标均来自该字体）。
+ * 码点逐项取自 Flutter SDK `lib/src/material/icons.dart` 的 IconData 定义，不凭记忆填写；
+ * 字体文件 `static/fonts/MaterialIcons-Regular.otf`，@font-face 在 App.uvue 全局注册。
+ * App 端不支持伪元素，图标以模板插值直显 unicode。
+ */
+const props = defineProps({
+	name: { type: String, default: '' },
+	size: { type: Number, default: 24 },
+	color: { type: String, default: '#18191C' }
+})
+
+function glyphOf(name: string): string {
+	if (name == 'home') { return '\ue318' }
+	if (name == 'home-outlined') { return '\uf107' }
+	if (name == 'trending-up') { return '\ue67f' }
+	if (name == 'trending-up-outlined') { return '\uf462' }
+	if (name == 'motion-photos-on') { return '\ue407' }
+	if (name == 'motion-photos-on-outlined') { return '\uf1ed' }
+	if (name == 'video-collection') { return '\ue6a5' }
+	if (name == 'video-collection-outlined') { return '\uf488' }
+	if (name == 'search') { return '\ue567' }
+	if (name == 'search-outlined') { return '\uf34b' }
+	if (name == 'notifications-none') { return '\ue451' }
+	if (name == 'play-circle') { return '\ue4cc' }
+	if (name == 'play-circle-outlined') { return '\uf2b1' }
+	if (name == 'subtitles-outlined') { return '\uf3fd' }
+	if (name == 'more-vert') { return '\ue404' }
+	if (name == 'person') { return '\ue491' }
+	if (name == 'block') { return '\ue0e1' }
+	if (name == 'watch-later-outlined') { return '\uf4b1' }
+	if (name == 'photo-outlined') { return '\uf29e' }
+	if (name == 'clear-outlined') { return '\uef58' }
+	if (name == 'arrow-back') { return '\ue092' }
+	if (name == 'live-tv-outlined') { return '\uf16f' }
+	if (name == 'thumb-up-off-alt-outlined') { return '\uf43f' }
+	if (name == 'whatshot-outlined') { return '\uf4c4' }
+	if (name == 'close') { return '\ue16a' }
+	if (name == 'add-outlined') { return '\uee47' }
+	if (name == 'lock') { return '\ue3ae' }
+	if (name == 'lock-open') { return '\ue3b0' }
+	if (name == 'clear-all-outlined') { return '\uef57' }
+	if (name == 'playlist-play') { return '\ue4d4' }
+	if (name == 'done-all-outlined') { return '\uefe5' }
+	// 消息域（P8）：码点取自 Flutter 3.3.10 SDK icons.dart（与本机 MaterialIcons 字体同版本）
+	if (name == 'message-outlined') { return '\uf1c6' }
+	if (name == 'alternate-email') { return '\ue081' }
+	if (name == 'thumb-up-outlined') { return '\uf440' }
+	if (name == 'notifications-none-outlined') { return '\uf235' }
+	if (name == 'arrow-back-ios') { return '\ue093' }
+	if (name == 'more-vert-outlined') { return '\uf1ea' }
+	if (name == 'emoji-emotions-outlined') { return '\uf019' }
+	if (name == 'send') { return '\ue571' }
+	// 番剧域（P11）：码点取自 Flutter 3.3.10 SDK icons.dart（与本机 MaterialIcons 字体同版本）
+	if (name == 'thumb-up') { return '\ue65b' }
+	if (name == 'thumb-up-alt-outlined') { return '\uf43e' }
+	if (name == 'monetization-on-outlined') { return '\uf1dd' }
+	if (name == 'star-outline') { return '\ue5fd' }
+	if (name == 'star') { return '\ue5f9' }
+	if (name == 'chat-bubble-outline') { return '\ue155' }
+	if (name == 'share-outlined') { return '\uf378' }
+	if (name == 'visibility') { return '\ue6bd' }
+	if (name == 'refresh') { return '\ue514' }
+	if (name == 'sort') { return '\ue5d2' }
+	if (name == 'reply') { return '\ue528' }
+	if (name == 'open-in-browser') { return '\ue45a' }
+	if (name == 'favorite') { return '\ue25b' }
+	if (name == 'favorite-border') { return '\ue25c' }
+	return ''
+}
+
+const glyph = computed((): string => glyphOf(props.name))
+
+const iconStyle = computed((): string => {
+	const px = props.size.toString()
+	return 'font-family:MaterialIcons;font-size:' + px + 'px;line-height:' + px + 'px;color:' + props.color + ';'
+})
+</script>
+
+<style>
+	.p-icon {
+		font-family: MaterialIcons;
+	}
+</style>

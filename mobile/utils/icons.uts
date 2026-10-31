@@ -1,0 +1,36 @@
+/**
+ * 视频详情域图标码点。
+ *
+ * 来源：Flutter SDK `packages/flutter/lib/src/material/icons.dart`（与 P3 `components/p-icon` 同源同字体）。
+ * 本表只收视频详情用到的图标，**不回填 P3 的 p-icon**——P3 页面组件已收口，避免为新增图标改动已完成模块；
+ * 图标表按使用域分开维护，后续若多域共用再统一合并。
+ */
+export function glyphOf(name: string): string {
+	if (name == 'thumb-up') { return '\ue65b' }
+	if (name == 'thumb-up-off') { return '\ue65d' }
+	if (name == 'coin') { return '\ue3f7' }
+	if (name == 'star') { return '\ue5f9' }
+	if (name == 'star-border') { return '\ue5fa' }
+	if (name == 'share') { return '\ue593' }
+	if (name == 'watch-later') { return '\ue6cf' }
+	if (name == 'play-arrow') { return '\ue4cb' }
+	if (name == 'pause') { return '\ue47c' }
+	if (name == 'arrow-back') { return '\ue092' }
+	if (name == 'expand-more') { return '\ue246' }
+	if (name == 'expand-less') { return '\ue245' }
+	if (name == 'visibility') { return '\ue6bd' }
+	// P10 设置域（码点查 Flutter SDK 3.3.10 icons.dart，与本工程字体同源）
+	if (name == 'more-vert') { return '\ue404' }
+	if (name == 'content-copy') { return '\ue190' }
+	if (name == 'drag-indicator') { return '\ue207' }
+	if (name == 'check') { return '\ue156' }
+	if (name == 'speed') { return '\ue5e0' }
+	if (name == 'delete-outline') { return '\ue1bb' }
+	return ''
+}
+
+/** MaterialIcons 图标样式（App 端字体已由 App.uvue 全局注册） */
+export function iconStyle(name: string, size: number, color: string): string {
+	const px = size.toString()
+	return 'font-family:MaterialIcons;font-size:' + px + 'px;line-height:' + px + 'px;color:' + color + ';'
+}

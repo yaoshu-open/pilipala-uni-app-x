@@ -1,0 +1,243 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { strOf, objOf, arrOf, numOf } from '../utils/json.uts'
+import { BangumiInfoResult, BangumiFollowResult, BangumiInfo, BangumiListResult, BangumiListData, BangumiListItem } from '../models/bangumi.uts'
+
+/**
+ * 番剧域接口层（源头：`lib/http/search.dart#bangumiInfo` + `lib/http/video.dart#bangumiAdd/Del`）。
+ *
+ * 约定与 api/play.uts 一致：内部 xxxRaw 负责请求 + 解析，导出函数统一 try/catch 兜底，
+ * 解析异常落失败结果并打日志，绝不让异常穿透到页面。
+ *
+ * 端点与源码对齐：
+ *  - 详情 GET `/pgc/view/web/season`（season_id 与 ep_id 二选一，源同款）；**响应体在 result 字段**（非 data）。
+ *  - 追番 POST `/pgc/web/follow/add`、取消 POST `/pgc/web/follow/del`，body { season_id, csrf }；
+ *    成功/失败文案都在 result.toast（源 bangumiAdd 同款，失败也带 toast）。
+ *
+ * 分集播放地址**不在此新增取流函数**：源码番剧详情与视频详情共用 VideoDetailController.queryVideoUrl
+ * （`lib/pages/bangumi/introduction/controller.dart#changeSeasonOrbangu`），同一 `/x/player/wbi/playurl`
+ * bvid+cid 取流——新端直接复用 api/play.uts 的 fetchPlayUrl（P11 结论，见设计_设置与杂项域 §七）。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+// ---------------------------------------------------------------- 番剧详情
+
+async function fetchBangumiInfoRaw(seasonId: number, epId: number): Promise<BangumiInfoResult> {
+	const result = new BangumiInfoResult()
+	const params = new Params()
+	// 源同款：season_id 优先，仅 season_id 缺失时才带 ep_id
+	if (seasonId > 0) {
+		params.setNum('season_id', seasonId)
+	} else if (epId > 0) {
+		params.setNum('ep_id', epId)
+	} else {
+		result.message = '缺少番剧参数（season_id / ep_id）'
+		return result
+	}
+	const res = await apiGet('/pgc/view/web/season', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[bangumi] season code=' + result.code.toString() + ' sid=' + seasonId.toString() + ' ep=' + epId.toString())
+		return result
+	}
+	// pgc 域响应体在 result 字段（源 SearchHttp.bangumiInfo 取 res.data['result']）
+	const body = objOf(res, 'result')
+	if (body == null) {
+		result.message = '数据解析异常，请稍后重试'
+		console.log('[bangumi] season result null sid=' + seasonId.toString())
+		return result
+	}
+	const info = BangumiInfo.from(body)
+	if (info.seasonId <= 0) {
+		result.message = '数据解析异常，请稍后重试'
+		console.log('[bangumi] season bad payload sid=' + seasonId.toString())
+		return result
+	}
+	result.data = info
+	result.status = true
+	console.log('[bangumi] season ok sid=' + info.seasonId.toString() + ' eps=' + info.episodes.length.toString() +
+		' score=' + info.ratingScore.toString() + ' follow=' + info.followed.toString())
+	return result
+}
+
+/** 番剧详情（seasonId 优先；epId 兜底，源 SearchHttp.bangumiInfo 同款二选一） */
+export async function fetchBangumiInfo(seasonId: number, epId: number): Promise<BangumiInfoResult> {
+	try {
+		return await fetchBangumiInfoRaw(seasonId, epId)
+	} catch (e) {
+		console.log('[bangumi] fetchBangumiInfo error sid=' + seasonId.toString() + ' ep=' + epId.toString())
+		console.log(e)
+		const failed = new BangumiInfoResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 追番 / 取消追番（写，需 csrf）
+
+async function bangumiFollowModRaw(path: string, seasonId: number): Promise<BangumiFollowResult> {
+	const result = new BangumiFollowResult()
+	// csrf 前置：取不到直接明确失败，不静默当成功（口径同 api/play.uts#postWithCsrf）
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[bangumi] follow csrf empty path=' + path)
+		return result
+	}
+	const body = new Params()
+	body.setNum('season_id', seasonId)
+	body.set('csrf', csrf)
+	const res = await apiPost(path, body.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	// 源 bangumiAdd/Del：成功与失败的提示文案都在 result.toast（失败也常带 toast）
+	const payload = objOf(res, 'result')
+	if (payload != null) {
+		result.toast = strOf(payload, 'toast')
+	}
+	if (result.code != 0) {
+		result.message = result.toast.length > 0 ? result.toast : messageOf(res)
+		console.log('[bangumi] follow fail path=' + path + ' code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	if (result.toast.length == 0) {
+		result.toast = path.indexOf('/del') >= 0 ? '已取消追番' : '追番成功'
+	}
+	return result
+}
+
+/** 追番（POST /pgc/web/follow/add） */
+export async function bangumiFollowAdd(seasonId: number): Promise<BangumiFollowResult> {
+	try {
+		return await bangumiFollowModRaw('/pgc/web/follow/add', seasonId)
+	} catch (e) {
+		console.log('[bangumi] followAdd error sid=' + seasonId.toString())
+		console.log(e)
+		const failed = new BangumiFollowResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 取消追番（POST /pgc/web/follow/del） */
+export async function bangumiFollowDel(seasonId: number): Promise<BangumiFollowResult> {
+	try {
+		return await bangumiFollowModRaw('/pgc/web/follow/del', seasonId)
+	} catch (e) {
+		console.log('[bangumi] followDel error sid=' + seasonId.toString())
+		console.log(e)
+		const failed = new BangumiFollowResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 列表（推荐 / 最近追番）
+
+/** 推荐列表端点（源 `lib/http/api.dart#bangumiList`，st/order/… 等筛选参数为 URL 常量，原样照搬） */
+const BANGUMI_LIST_PATH: string = '/pgc/season/index/result?st=1&order=3&season_version=-1&spoken_language_type=-1&area=-1&is_finish=-1&copyright=-1&season_status=-1&season_month=-1&year=-1&style_id=-1&sort=0&season_type=1&pagesize=20&type=1'
+
+function parseListBody(res: UTSJSONObject): BangumiListResult {
+	const result = new BangumiListResult()
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	const listData = new BangumiListData()
+	listData.hasNext = numOf(data, 'has_next')
+	listData.total = numOf(data, 'total')
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		listData.list.push(BangumiListItem.from(list[i]))
+	}
+	result.data = listData
+	result.status = true
+	return result
+}
+
+async function fetchBangumiListRaw(page: number): Promise<BangumiListResult> {
+	// 端点已带固定查询串：分页参数直接拼在 path 内（apiGet 的 buildQuery 只加 '?'，二次追加会变 '?page='）
+	const res = await apiGet(BANGUMI_LIST_PATH + '&page=' + page.toString(), null)
+	if (res == null) {
+		const failed = new BangumiListResult()
+		failed.message = '网络异常，请稍后重试'
+		return failed
+	}
+	const result = parseListBody(res)
+	const listData = result.data
+	if (result.status && listData != null) {
+		console.log('[bangumi] list ok page=' + page.toString() + ' n=' + listData.list.length.toString() +
+			' hasNext=' + listData.hasNext.toString())
+	}
+	return result
+}
+
+/** 番剧推荐列表（分页；源 BangumiHttp.bangumiList） */
+export async function fetchBangumiList(page: number): Promise<BangumiListResult> {
+	try {
+		return await fetchBangumiListRaw(page)
+	} catch (e) {
+		console.log('[bangumi] fetchBangumiList error page=' + page.toString())
+		console.log(e)
+		const failed = new BangumiListResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function fetchBangumiFollowRaw(mid: number): Promise<BangumiListResult> {
+	// 同上：端点为整串查询，vmid/ts 直接拼入（ts 破坏端上缓存，源常量 1691544359969 同用途）
+	const res = await apiGet('/x/space/bangumi/follow/list?type=1&follow_status=0&pn=1&ps=15&vmid=' +
+		mid.toString() + '&ts=' + Date.now().toString(), null)
+	if (res == null) {
+		const failed = new BangumiListResult()
+		failed.message = '网络异常，请稍后重试'
+		return failed
+	}
+	const result = parseListBody(res)
+	const listData = result.data
+	if (result.status && listData != null) {
+		console.log('[bangumi] follow ok mid=' + mid.toString() + ' n=' + listData.list.length.toString())
+	}
+	return result
+}
+
+/** 最近追番（登录态；源 BangumiHttp.bangumiFollow） */
+export async function fetchBangumiFollow(mid: number): Promise<BangumiListResult> {
+	try {
+		return await fetchBangumiFollowRaw(mid)
+	} catch (e) {
+		console.log('[bangumi] fetchBangumiFollow error mid=' + mid.toString())
+		console.log(e)
+		const failed = new BangumiListResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}

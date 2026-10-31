@@ -1,0 +1,396 @@
+<template>
+	<view class="rs" :style="pageStyle">
+		<app-navbar title="推荐设置"></app-navbar>
+
+		<scroll-view class="rs-scroll" direction="vertical">
+			<view class="rs-list">
+				<setting-cell
+					title="首页推荐类型"
+					:sub-title="'当前使用「' + rcmdTypeLabel + '端」推荐¹'"
+					mode="value"
+					:value="rcmdTypeLabel"
+					@tap="openRcmdType"
+				></setting-cell>
+				<setting-cell
+					title="推荐动态"
+					sub-title="是否在推荐内容中展示动态(仅app端)"
+					mode="switch"
+					:on="rcmdDynamic"
+					:switch-key="SK.enableRcmdDynamic"
+					@toggle="onSwitch"
+				></setting-cell>
+				<setting-cell
+					title="首页推荐刷新"
+					sub-title="下拉刷新时保留上次内容"
+					mode="switch"
+					:on="saveLastData"
+					:switch-key="SK.enableSaveLastData"
+					@toggle="onSwitch"
+				></setting-cell>
+				<view class="rs-divider" :style="dividerStyle"></view>
+				<setting-cell
+					title="点赞率过滤"
+					:sub-title="'过滤掉点赞数/播放量「小于' + likeRatio.toString() + '%」的推荐视频(仅web端)'"
+					mode="value"
+					:value="likeRatio.toString() + '%'"
+					@tap="openLikeRatio"
+				></setting-cell>
+				<setting-cell
+					title="视频时长过滤"
+					:sub-title="'过滤掉时长「小于' + minDuration.toString() + '秒」的推荐视频'"
+					mode="value"
+					:value="minDuration.toString() + ' 秒'"
+					@tap="openDuration"
+				></setting-cell>
+				<setting-cell
+					title="已关注Up豁免推荐过滤"
+					sub-title="推荐中已关注用户发布的内容不会被过滤"
+					mode="switch"
+					:on="exemptFollowed"
+					:switch-key="SK.exemptFilterForFollowed"
+					@toggle="onSwitch"
+				></setting-cell>
+				<setting-cell
+					title="过滤器也应用于相关视频"
+					sub-title="视频详情页的相关视频也进行过滤²"
+					mode="switch"
+					:on="applyRelated"
+					:switch-key="SK.applyFilterToRelatedVideos"
+					@toggle="onSwitch"
+				></setting-cell>
+			</view>
+
+			<!-- 脚注说明块（源逐字） -->
+			<view class="rs-note">
+				<text class="rs-note-text" :style="noteStyle">{{ NOTE_TEXT }}</text>
+			</view>
+			<view class="rs-foot" :style="footStyle"></view>
+		</scroll-view>
+
+		<!-- 单选弹层（共用组件；页面级 onBackPress 接管） -->
+		<setting-select-sheet
+			:visible="sheetVisible"
+			:title="sheetTitle"
+			:options="sheetOptions"
+			@select="onSheetSelect"
+			@close="closeSheet"
+		></setting-select-sheet>
+
+		<!-- app 端推荐风控确认层（源 recommend_setting.dart 原文照搬：提示 / 取消 / 确定 → cookieToKey） -->
+		<view v-if="riskVisible" class="rs-mask" @click="closeRisk">
+			<view class="rs-dialog" :style="dialogStyle" @click.stop="noop">
+				<text class="rs-dialog-title" :style="titleStyle">提示</text>
+				<text class="rs-dialog-content" :style="secondaryStyle">使用app端推荐需获取access_key，有小概率触发风控导致账号退出（在官方版本app重新登录即可解除），是否继续？</text>
+				<view class="rs-dialog-actions">
+					<view class="rs-dialog-btn" @click.stop="closeRisk">
+						<text class="rs-dialog-cancel" :style="secondaryStyle">取消</text>
+					</view>
+					<view class="rs-dialog-btn" @click.stop="confirmRisk">
+						<text class="rs-dialog-ok" :style="okStyle">确定</text>
+					</view>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import SettingCell from '../../components/setting/setting-cell.uvue'
+import SettingSelectSheet, { SelectOption } from '../../components/setting/setting-select-sheet.uvue'
+import { pageBackground, cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { SK, getBool, getNumber, getString, setBool, setNumber, setString } from '../../utils/storage.uts'
+import { userState } from '../../stores/user.uts'
+import { getAccessKeyValue } from '../../utils/storage.uts'
+import { cookieToKey } from '../../api/accesskey.uts'
+import { ensureLoginState } from '../../composables/useLogin.uts'
+
+/**
+ * 推荐设置（源头：lib/pages/setting/recommend_setting.dart）。
+ *
+ * 过滤链消费方：P3 api/video.uts 的 shouldFilterVideo（minDurationForRcmd /
+ * minLikeRatioForRecommend / exemptFilterForFollowed / applyFilterToRelatedVideos
+ * 已在读这四个键，本页写键后推荐流下次拉取即生效——读取点即时取值，无需事件）。
+ *
+ * 黑名单过滤（isBlockedMid 读 SK.blackMidsList）与 P5 黑名单页联动，不在本页——
+ * 入口在隐私设置（源同款）。
+ *
+ * 首页推荐类型：源选 app 时弹风控确认层后走 cookieToKey——该网络链未落地，
+ * 本页如实选择落键 + toast「下次启动时生效」（消费方为 rcmd 页分流，P10 报告登记接线点）。
+ */
+
+/** 脚注（源 recommend_setting.dart 尾部 ListTile 逐字） */
+const NOTE_TEXT: string = '¹ 若默认web端推荐不太符合预期，可尝试切换至app端。\n¹ 选择“模拟未登录(notLogin)”，将以空的key请求推荐接口，但播放页仍会携带用户信息，保证账号能正常记录进度、点赞投币等。\n\n² 由于接口未提供关注信息，无法豁免相关视频中的已关注Up。\n\n* 其它（如热门视频、手动搜索、链接跳转等）均不受过滤器影响。\n* 设定较严苛的条件可导致推荐项数锐减或多次请求，请酌情选择。\n* 后续可能会增加更多过滤条件，敬请期待。'
+
+const rcmdType = ref<string>(getString(SK.defaultRcmdType, 'web'))
+const rcmdDynamic = ref<boolean>(getBool(SK.enableRcmdDynamic, true))
+const saveLastData = ref<boolean>(getBool(SK.enableSaveLastData, false))
+const likeRatio = ref<number>(getNumber(SK.minLikeRatioForRecommend, 0))
+const minDuration = ref<number>(getNumber(SK.minDurationForRcmd, 0))
+const exemptFollowed = ref<boolean>(getBool(SK.exemptFilterForFollowed, true))
+const applyRelated = ref<boolean>(getBool(SK.applyFilterToRelatedVideos, true))
+
+const sheetVisible = ref<boolean>(false)
+const sheetTitle = ref<string>('')
+const sheetKind = ref<string>('')
+const sheetOptions = ref<Array<SelectOption>>([])
+/** app 端推荐风控确认层可见态 */
+const riskVisible = ref<boolean>(false)
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const dividerStyle = computed((): string => 'background-color:' + withAlpha(textSecondary(), 0.15) + ';')
+const noteStyle = computed((): string => 'color:' + withAlpha(textSecondary(), 0.85) + ';')
+const dialogStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const okStyle: string = 'color:' + themeColor(currentThemeIndex()) + ';'
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+
+/** 副标题与右值都用原始值（源 '当前使用「$defaultRcmdType端」推荐¹'：web/app/notLogin） */
+const rcmdTypeLabel = computed((): string => {
+	if (rcmdType.value == 'app') {
+		return 'app'
+	}
+	if (rcmdType.value == 'notLogin') {
+		return 'notLogin'
+	}
+	return 'web'
+})
+
+function rcmdTypeOptions(): Array<SelectOption> {
+	const list: Array<SelectOption> = []
+	// 源 RcmdType.labels：web端 / app端 / 游客模式
+	const entries = [['web', 'web端'], ['app', 'app端'], ['notLogin', '游客模式']]
+	for (let i = 0; i < entries.length; i++) {
+		list.push({
+			value: entries[i][0],
+			label: entries[i][1],
+			checked: rcmdType.value == entries[i][0]
+		} as SelectOption)
+	}
+	return list
+}
+
+function numberOptions(values: number[], unit: string, current: number): Array<SelectOption> {
+	const list: Array<SelectOption> = []
+	for (let i = 0; i < values.length; i++) {
+		list.push({
+			value: values[i].toString(),
+			label: values[i].toString() + ' ' + unit,
+			checked: current == values[i]
+		} as SelectOption)
+	}
+	return list
+}
+
+function openRcmdType() {
+	sheetKind.value = 'rcmdType'
+	sheetTitle.value = '推荐类型'
+	sheetOptions.value = rcmdTypeOptions()
+	sheetVisible.value = true
+}
+
+function openLikeRatio() {
+	sheetKind.value = 'likeRatio'
+	sheetTitle.value = '选择点赞率（0即不过滤）'
+	sheetOptions.value = numberOptions([0, 1, 2, 3, 4], '%', likeRatio.value)
+	sheetVisible.value = true
+}
+
+function openDuration() {
+	sheetKind.value = 'duration'
+	sheetTitle.value = '选择时长（0即不过滤）'
+	sheetOptions.value = numberOptions([0, 30, 60, 90, 120], '秒', minDuration.value)
+	sheetVisible.value = true
+}
+
+function closeSheet() {
+	sheetVisible.value = false
+}
+
+function onSheetSelect(value: string) {
+	if (sheetKind.value == 'rcmdType') {
+		applyRcmdType(value)
+	} else if (sheetKind.value == 'likeRatio') {
+		likeRatio.value = parseInt(value)
+		setNumber(SK.minLikeRatioForRecommend, likeRatio.value)
+	} else if (sheetKind.value == 'duration') {
+		minDuration.value = parseInt(value)
+		setNumber(SK.minDurationForRcmd, minDuration.value)
+	}
+}
+
+/** 待确认的推荐类型（风控确认层「确定」后消费） */
+let pendingRcmdType: string = ''
+
+/**
+ * 推荐类型切换（源 recommend_setting.dart 同序）：
+ *  选 app 且本地还没有 access_key → 未登录先 toast「请先登录」（不写键）；
+ *  已登录 → 弹风控确认层；确认后走 cookieToKey 换 key，换到才写键。
+ *  其余情况（web / notLogin / 已有 access_key）直接写键。
+ */
+async function applyRcmdType(value: string) {
+	if (value == 'app' && getAccessKeyValue().length == 0) {
+		const logged = await ensureLoginState()
+		if (!logged) {
+			uni.showToast({ title: '请先登录', icon: 'none' })
+			return
+		}
+		pendingRcmdType = value
+		riskVisible.value = true
+		return
+	}
+	commitRcmdType(value)
+}
+
+/** 落键 + 源同款提示（推荐流在下次进入首页时按新类型取流） */
+function commitRcmdType(value: string) {
+	rcmdType.value = value
+	setString(SK.defaultRcmdType, value)
+	uni.showToast({ title: '下次启动时生效', icon: 'none' })
+}
+
+function closeRisk() {
+	riskVisible.value = false
+	pendingRcmdType = ''
+}
+
+/**
+ * 风控确认层「确定」：真实换取 access_key。
+ * 源在换取失败时仍会写入 app 档；本端改为「换不到就不切档 + 如实提示」——
+ * 否则界面显示 app 端推荐、实际拿空 key 请求，等于静默降级成游客模式。
+ */
+async function confirmRisk() {
+	riskVisible.value = false
+	const value = pendingRcmdType
+	pendingRcmdType = ''
+	if (value.length == 0) {
+		return
+	}
+	uni.showLoading({ title: '正在获取…' })
+	const res = await cookieToKey(userState.info.mid)
+	uni.hideLoading()
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	commitRcmdType(value)
+}
+
+/** 开关分发（setting-cell 回传 value + switchKey 两参） */
+function onSwitch(value: boolean, key: string) {
+	setBool(key, value)
+	if (key == SK.enableRcmdDynamic) {
+		rcmdDynamic.value = value
+	} else if (key == SK.enableSaveLastData) {
+		saveLastData.value = value
+	} else if (key == SK.exemptFilterForFollowed) {
+		exemptFollowed.value = value
+	} else if (key == SK.applyFilterToRelatedVideos) {
+		applyRelated.value = value
+	}
+}
+
+// 浮层返回接管（页面级钩子：选择弹层与风控确认层都要关）
+onBackPress(() => {
+	if (riskVisible.value) {
+		closeRisk()
+		return true
+	}
+	if (sheetVisible.value) {
+		closeSheet()
+		return true
+	}
+	return false
+})
+</script>
+
+<style>
+	.rs {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.rs-scroll {
+		flex: 1;
+	}
+	.rs-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.rs-divider {
+		height: 1px;
+		margin-left: 16px;
+		margin-right: 16px;
+	}
+	.rs-note {
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 12px;
+	}
+	.rs-note-text {
+		font-size: 11px;
+		line-height: 18px;
+	}
+	.rs-foot {
+		height: 1px;
+	}
+	/* 风控确认层（源 AlertDialog：居中卡片 + 取消/确定） */
+	.rs-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.rs-dialog {
+		width: 300px;
+		border-radius: 14px;
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 20px;
+		padding-bottom: 10px;
+		display: flex;
+		flex-direction: column;
+	}
+	.rs-dialog-title {
+		font-size: 17px;
+		font-weight: bold;
+	}
+	.rs-dialog-content {
+		font-size: 14px;
+		margin-top: 12px;
+		margin-bottom: 8px;
+		line-height: 22px;
+	}
+	.rs-dialog-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+	}
+	.rs-dialog-btn {
+		min-height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 14px;
+	}
+	.rs-dialog-cancel {
+		font-size: 14px;
+	}
+	.rs-dialog-ok {
+		font-size: 14px;
+		font-weight: bold;
+	}
+</style>

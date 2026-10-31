@@ -1,0 +1,81 @@
+<script>
+	import { loadCachedUser, refreshLoginState } from './composables/useLogin.uts'
+	import { userState } from './stores/user.uts'
+	import { logInfo, logWarn, logError } from './utils/logger.uts'
+
+	/**
+	 * 冷启动登录态恢复：
+	 *  1) 先读本地缓存（storage:userInfo），让首屏直接呈现已登录形态，避免头像/入口抖动；
+	 *  2) 再静默校正 nav —— 失败保留缓存（不降级为未登录），成功则覆盖缓存并拉未读数。
+	 *
+	 * 冷启动首个 nav 请求可能赶在网络/运行时就绪之前失败（真机实测：code=0 isLogin=true 的
+	 * 正常响应在 onLaunch 那次仍可能拿不到结果），因此补两处重试：启动后延时一次、回前台一次。
+	 * 判定仍以 nav 的 isLogin 为唯一依据，不靠「缓存里像已登录」推断。
+	 */
+	async function syncLoginState() {
+		try {
+			await refreshLoginState()
+		} catch (e) {
+			logWarn('app', 'syncLoginState failed: ' + e.toString())
+			console.log('[app] syncLoginState failed')
+		}
+	}
+
+	export default {
+		onLaunch: function() {
+			logInfo('app', 'launch')
+			loadCachedUser()
+			syncLoginState()
+			setTimeout(() => {
+				if (!userState.isLogin) {
+					syncLoginState()
+				}
+			}, 1500)
+		},
+		onShow: function() {
+			// 回前台：首次可见时补一次（登录态可能在后台过期，或被冷启动首包时序错过）
+			if (!userState.isLogin) {
+				syncLoginState()
+			}
+		},
+		onHide: function() {},
+		/**
+		 * 全局错误钩子（日志页消费，源 catcher 的等价入口）。
+		 * 只记录不吞掉：uniapp 自身仍会向控制台输出错误。
+		 */
+		onError: function(error: any) {
+			let text = 'unknown'
+			try {
+				text = error.toString()
+			} catch (e) {
+				text = 'unstringifiable error'
+			}
+			logError('app', 'onError: ' + text)
+		},
+		onUnhandledRejection: function() {
+			logError('app', 'onUnhandledRejection（Promise 未捕获拒绝，详见系统日志）')
+		}
+	}
+</script>
+
+<style>
+	/* 全局样式：迁移期间按源工程主题逐项补齐（App 端仅支持 class 选择器，禁止标签选择器） */
+
+	/*
+	 * Material Icons 字体（源头：Flutter 内置 Material Icons）。
+	 * App 端不支持伪元素，图标以 unicode 直显（见 P3 设计 §5.1 码点表）。
+	 * Android 仅支持 ttf/otf；本文件取自 Flutter SDK material_fonts 同名 OTF。
+	 */
+	@font-face {
+		font-family: 'MaterialIcons';
+		src: url('/static/fonts/MaterialIcons-Regular.otf');
+	}
+
+	/*
+	 * Jura-Bold（源头：assets/fonts/Jura-Bold.ttf，源仅 mine 页 AppBar 标题「PLPL」使用）。
+	 */
+	@font-face {
+		font-family: 'Jura-Bold';
+		src: url('/static/fonts/Jura-Bold.ttf');
+	}
+</style>

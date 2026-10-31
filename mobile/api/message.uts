@@ -1,0 +1,726 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { wbiGet } from '../utils/wbi.uts'
+import { Params } from '../utils/params.uts'
+import { VC_BASE, MESSAGE_BASE } from '../utils/constants.uts'
+import { strOf, numOf, objOf, arrOf } from '../utils/json.uts'
+import {
+	SessionItem, ChatMsg, EmoteInfo, AccountCard,
+	parseSessionData, parseSessionMsgData, parseEmoteInfos,
+	NoticeCursor, ReplyNoticeItem, LikeNoticeItem, SystemNoticeItem
+} from '../models/message.uts'
+
+/**
+ * 私信接口层（源头：`lib/http/msg.dart` MsgHttp + `lib/pages/whisper/controller.dart` 组装逻辑）。
+ *
+ * 域名分流（与源一致）：
+ *  - api.vc.bilibili.com（VC_BASE）走 WBI 签名（wbiGet）：sessionList / sessionMsg / ack / removeSession
+ *  - send_msg 为 POST 不签名
+ *  - 未读数接口（unread）已建在 composables/useLogin.uts#fetchUnread，页面直接复用，此处不重建
+ *
+ * 写接口凭据口径（与 P4/P5 postWithCsrf 同链路）：csrf 缺失 → 统一失败
+ * 「登录凭据缺失，请重新登录后再试」，不静默、不假成功。
+ *
+ * 结果类约定：内部 xxxRaw 请求+解析，导出函数统一 try/catch 兜底，解析异常落失败结果，
+ * 绝不让异常穿透到页面（api/reply.uts 同款）。
+ */
+
+class MsgActionResult {
+	status: boolean = false
+	code: number = 0
+	message: string = ''
+}
+
+class MsgSessionResult {
+	status: boolean = false
+	code: number = 0
+	message: string = ''
+	items: Array<SessionItem> = []
+	hasMore: number = 0
+}
+
+class MsgDetailResult {
+	status: boolean = false
+	code: number = 0
+	message: string = ''
+	messages: Array<ChatMsg> = []
+	eInfos: Array<EmoteInfo> = []
+}
+
+class MsgSendResult {
+	status: boolean = false
+	code: number = 0
+	message: string = ''
+	msgKey: number = 0
+	/** 接口回传的 msg_content（JSON 字符串里的 content 字段），成功后本地回显用 */
+	content: string = ''
+}
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+/** UP 主小助手官方账号（源 whisper/controller.dart:58 照搬，硬编码头像） */
+const UP_HELPER_TALKER_ID: number = 844424930131966
+const UP_HELPER_FACE: string = 'https://message.biliimg.com/bfs/im/489a63efadfb202366c2f88853d2217b5ddc7a13.png'
+
+// ---------------------------------------------------------------- 会话列表
+
+/**
+ * 会话列表（源 MsgHttp.sessionList + controller.querySessionList/queryAccountList 组装）。
+ * endTs 为 null 拉首页，传末条 sessionTs 拉下一页。
+ */
+async function fetchSessionListRaw(endTs: number | null): Promise<MsgSessionResult> {
+	const result = new MsgSessionResult()
+	const params = new Params()
+	params.setNum('session_type', 1)
+	params.setNum('group_fold', 1)
+	params.setNum('unfollow_fold', 0)
+	params.setNum('sort_rule', 2)
+	params.setNum('build', 0)
+	params.set('mobi_app', 'web')
+	if (endTs != null) {
+		params.setNum('end_ts', endTs)
+	}
+	const res = await wbiGet(VC_BASE + '/session_svr/v1/session_svr/get_sessions', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[msg] sessionList code=' + result.code.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	result.items = parseSessionData(data)
+	result.hasMore = numOf(data, 'has_more')
+	// 补齐头像昵称（源 queryAccountList：uids 逗号拼接 → account/v1/user/cards，按 mid 匹配 talkerId）
+	await fillAccountInfo(result.items)
+	console.log('[msg] sessionList ok n=' + result.items.length.toString() + ' hasMore=' + result.hasMore.toString())
+	result.status = true
+	return result
+}
+
+/** 补齐会话头像昵称（源 queryAccountList：uids 逗号拼接 → account/v1/user/cards，按 mid 匹配 talkerId） */
+async function fillAccountInfo(items: Array<SessionItem>) {
+	if (items.length == 0) {
+		return
+	}
+	const uids: string[] = []
+	for (let i = 0; i < items.length; i++) {
+		uids.push(items[i].talkerId.toString())
+	}
+	const params = new Params()
+	params.set('uids', uids.join(','))
+	params.setNum('build', 0)
+	params.set('mobi_app', 'web')
+	const cardsRes = await fetchAccountCards(params)
+	const cardMap = new Map<number, AccountCard>()
+	for (let i = 0; i < cardsRes.length; i++) {
+		cardMap.set(cardsRes[i].mid, cardsRes[i])
+	}
+	for (let i = 0; i < items.length; i++) {
+		const item = items[i]
+		const card = cardMap.get(item.talkerId)
+		if (card != null) {
+			item.accountInfo = card
+		}
+		// UP 主小助手特殊账号：硬编码名称与官方头像（源同款）
+		if (item.talkerId == UP_HELPER_TALKER_ID) {
+			const helper = new AccountCard()
+			helper.mid = UP_HELPER_TALKER_ID
+			helper.name = 'UP主小助手'
+			helper.face = UP_HELPER_FACE
+			item.accountInfo = helper
+		}
+	}
+}
+
+/** 私聊用户卡片（源 Api.sessionAccountList：GET 不签名，直接 apiGet 绝对地址） */
+async function fetchAccountCards(params: Params): Promise<Array<AccountCard>> {
+	const cards: Array<AccountCard> = []
+	const res = await apiGet(VC_BASE + '/account/v1/user/cards', params)
+	if (res == null) {
+		return cards
+	}
+	if (codeOf(res) != 0) {
+		console.log('[msg] accountList code=' + codeOf(res).toString())
+		return cards
+	}
+	const data = res.getArray('data')
+	if (data == null) {
+		return cards
+	}
+	for (let i = 0; i < data.length; i++) {
+		const raw = data[i]
+		if (raw == null) {
+			continue
+		}
+		const obj = raw as UTSJSONObject
+		const card = new AccountCard()
+		card.mid = numOf(obj, 'mid')
+		card.name = strOf(obj, 'name')
+		card.face = strOf(obj, 'face')
+		cards.push(card)
+	}
+	return cards
+}
+
+export async function fetchSessionList(endTs: number | null): Promise<MsgSessionResult> {
+	try {
+		return await fetchSessionListRaw(endTs)
+	} catch (e) {
+		console.log('[msg] fetchSessionList error')
+		console.log(e)
+		const failed = new MsgSessionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 会话消息
+
+/** 会话消息（源 MsgHttp.sessionMsg：一次拉取 size=20，源无 loadmore） */
+async function fetchSessionMsgRaw(talkerId: number): Promise<MsgDetailResult> {
+	const result = new MsgDetailResult()
+	const params = new Params()
+	params.setNum('talker_id', talkerId)
+	params.setNum('session_type', 1)
+	params.setNum('size', 20)
+	params.setNum('sender_device_id', 1)
+	params.setNum('build', 0)
+	params.set('mobi_app', 'web')
+	const res = await wbiGet(VC_BASE + '/svr_sync/v1/svr_sync/fetch_session_msgs', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[msg] sessionMsg code=' + result.code.toString() + ' talkerId=' + talkerId.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	result.messages = parseSessionMsgData(data)
+	result.eInfos = parseEmoteInfos(data)
+	console.log('[msg] sessionMsg ok talkerId=' + talkerId.toString() + ' n=' + result.messages.length.toString())
+	result.status = true
+	return result
+}
+
+export async function fetchSessionMsg(talkerId: number): Promise<MsgDetailResult> {
+	try {
+		return await fetchSessionMsgRaw(talkerId)
+	} catch (e) {
+		console.log('[msg] fetchSessionMsg error talkerId=' + talkerId.toString())
+		console.log(e)
+		const failed = new MsgDetailResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 写接口（csrf 前置）
+
+/**
+ * 消息标记已读（源 MsgHttp.ackSessionMsg：GET 写接口 + WBI 签名，参数含 csrf_token/csrf）。
+ * csrf 缺失 → 前置失败（不假成功）。
+ */
+async function ackSessionMsgRaw(talkerId: number, ackSeqno: number): Promise<MsgActionResult> {
+	const result = new MsgActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[msg] ack csrf empty talkerId=' + talkerId.toString())
+		return result
+	}
+	const params = new Params()
+	params.setNum('talker_id', talkerId)
+	params.setNum('session_type', 1)
+	params.setNum('ack_seqno', ackSeqno)
+	params.setNum('build', 0)
+	params.set('mobi_app', 'web')
+	params.set('csrf_token', csrf)
+	params.set('csrf', csrf)
+	const res = await wbiGet(VC_BASE + '/session_svr/v1/session_svr/update_ack', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[msg] ack code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+export async function ackSessionMsg(talkerId: number, ackSeqno: number): Promise<MsgActionResult> {
+	try {
+		return await ackSessionMsgRaw(talkerId, ackSeqno)
+	} catch (e) {
+		console.log('[msg] ackSessionMsg error')
+		console.log(e)
+		const failed = new MsgActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 发送私信（源 MsgHttp.sendMsg：POST 不签名，msg[...] 前缀参数体）。
+ * 未登录由页面拦截（源前置 toast「请先登录」）；csrf 缺失 → 统一凭据失败态，输入内容保留可重试。
+ */
+async function sendMsgRaw(senderUid: number, receiverId: number, content: string): Promise<MsgSendResult> {
+	const result = new MsgSendResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[msg] send csrf empty receiver=' + receiverId.toString())
+		return result
+	}
+	const body: UTSJSONObject = {}
+	body.set('msg[sender_uid]', senderUid.toString())
+	body.set('msg[receiver_id]', receiverId.toString())
+	body.set('msg[receiver_type]', '1')
+	body.set('msg[msg_type]', '1')
+	body.set('msg[msg_status]', '0')
+	// content 为 JSON 字符串（源 jsonEncode({'content': message})）
+	const contentObj: UTSJSONObject = {}
+	contentObj.set('content', content)
+	body.set('msg[content]', JSON.stringify(contentObj))
+	body.set('msg[timestamp]', Math.floor(Date.now() / 1000).toString())
+	body.set('msg[new_face_version]', '1')
+	body.set('msg[dev_id]', getDevId())
+	body.set('from_firework', '0')
+	body.set('build', '0')
+	body.set('mobi_app', 'web')
+	body.set('csrf_token', csrf)
+	body.set('csrf', csrf)
+	const res = await apiPost(VC_BASE + '/web_im/v1/web_im/send_msg', body)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[msg] send code=' + result.code.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		result.msgKey = numOf(data, 'msg_key')
+		// msg_content 为 JSON 字符串，取其 content 字段（源 jsonDecode(result['data']['msg_content'])['content']）
+		const rawContent = data.getString('msg_content')
+		if (rawContent != null && rawContent.length > 0) {
+			try {
+				const parsed = JSON.parse<UTSJSONObject>(rawContent)
+				if (parsed != null) {
+					result.content = strOf(parsed, 'content')
+				}
+			} catch (e) {
+				console.log('[msg] send msg_content parse failed')
+			}
+		}
+	}
+	result.status = true
+	console.log('[msg] send ok receiver=' + receiverId.toString() + ' msgKey=' + result.msgKey.toString())
+	return result
+}
+
+export async function sendMsg(senderUid: number, receiverId: number, content: string): Promise<MsgSendResult> {
+	try {
+		return await sendMsgRaw(senderUid, receiverId, content)
+	} catch (e) {
+		console.log('[msg] sendMsg error')
+		console.log(e)
+		const failed = new MsgSendResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 关闭（移除）会话（源 MsgHttp.removeSession：GET 写接口 + WBI 签名）。
+ */
+async function removeSessionRaw(talkerId: number): Promise<MsgActionResult> {
+	const result = new MsgActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[msg] remove csrf empty talkerId=' + talkerId.toString())
+		return result
+	}
+	const params = new Params()
+	params.setNum('talker_id', talkerId)
+	params.setNum('session_type', 1)
+	params.setNum('build', 0)
+	params.set('mobi_app', 'web')
+	params.set('csrf_token', csrf)
+	params.set('csrf', csrf)
+	const res = await wbiGet(VC_BASE + '/session_svr/v1/session_svr/remove_session', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[msg] remove code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+export async function removeSession(talkerId: number): Promise<MsgActionResult> {
+	try {
+		return await removeSessionRaw(talkerId)
+	} catch (e) {
+		console.log('[msg] removeSession error')
+		console.log(e)
+		const failed = new MsgActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 工具
+
+/**
+ * dev_id 生成（源 MsgHttp.getDevId 照搬：UUID v4 模板逐字符替换）。
+ * 用 substring 逐字符取值（uts App 端 split('') 行为不可靠，避免）。
+ */
+const DEV_HEX: string[] = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F']
+const DEV_TEMPLATE: string = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
+
+export function getDevId(): string {
+	let out = ''
+	for (let i = 0; i < DEV_TEMPLATE.length; i++) {
+		const ch = DEV_TEMPLATE.substring(i, i + 1)
+		if (ch == '-' || ch == '4') {
+			out = out + ch
+			continue
+		}
+		const randomInt = Math.floor(Math.random() * 16)
+		if (ch == 'x') {
+			out = out + DEV_HEX[randomInt]
+		} else {
+			// y 位：(3 & randomInt) | 8（源 b[3 & randomInt | 8]）
+			out = out + DEV_HEX[(3 & randomInt) | 8]
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------- 通知：回复我的 / 收到的赞 / 系统通知
+
+/** 系统通知一次拉取条数（源 messageSystem/messageSystemAccount page_size=20） */
+const SYSTEM_PAGE_SIZE: number = 20
+
+/** 回复我的列表结果（源 MessageReplyModel：cursor + items） */
+class MsgReplyResult {
+	status: boolean = false
+	code: number = 0
+	message: string = ''
+	items: Array<ReplyNoticeItem> = []
+	cursor: NoticeCursor = new NoticeCursor()
+}
+
+/** 收到的赞列表结果（源 MessageLikeModel.total：cursor + items） */
+class MsgLikeResult {
+	status: boolean = false
+	code: number = 0
+	message: string = ''
+	items: Array<LikeNoticeItem> = []
+	cursor: NoticeCursor = new NoticeCursor()
+}
+
+/** 系统通知列表结果（源两接口 system_notify_list 合并后） */
+class MsgSystemResult {
+	status: boolean = false
+	code: number = 0
+	message: string = ''
+	items: Array<SystemNoticeItem> = []
+}
+
+/**
+ * 回复我的（源 MsgHttp.messageReply：GET /x/msgfeed/reply）。
+ *
+ * 游标分页：首页不传参；下一页带 id + reply_time（源 controller 的 replyTime 参数在 http 层映射为 reply_time）。
+ * 响应 cursor.is_end 为 true 即没有更多。
+ */
+async function fetchMessageReplyRaw(id: number, replyTime: number): Promise<MsgReplyResult> {
+	const result = new MsgReplyResult()
+	const params = new Params()
+	// 源：只有 onLoad（加载更多）时才带游标，首页两个参数都不传
+	if (id > 0 || replyTime > 0) {
+		params.setNum('id', id)
+		params.setNum('reply_time', replyTime)
+	}
+	const res = await apiGet('/x/msgfeed/reply', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[msg] messageReply code=' + result.code.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	result.cursor = NoticeCursor.from(objOf(data, 'cursor'))
+	const items = arrOf(data, 'items')
+	for (let i = 0; i < items.length; i++) {
+		result.items.push(ReplyNoticeItem.from(items[i]))
+	}
+	result.status = true
+	console.log('[msg] messageReply ok id=' + id.toString() + ' n=' + result.items.length.toString() +
+		' isEnd=' + (result.cursor.isEnd ? '1' : '0'))
+	return result
+}
+
+/** 回复我的：id/replyTime 传 0（或不传）拉首页，传上页 cursor 拉下一页 */
+export async function fetchMessageReply(id: number = 0, replyTime: number = 0): Promise<MsgReplyResult> {
+	try {
+		return await fetchMessageReplyRaw(id, replyTime)
+	} catch (e) {
+		console.log('[msg] fetchMessageReply error id=' + id.toString())
+		console.log(e)
+		const failed = new MsgReplyResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 收到的赞（源 MsgHttp.messageLike：GET /x/msgfeed/like）。
+ *
+ * 分页与回复同构：首页不传参，下一页带 id + like_time；游标在响应 data.total.cursor。
+ * data.total 缺失（接口空数据形态）按「空列表 + 没有更多」返回，不抛异常。
+ */
+async function fetchMessageLikeRaw(id: number, likeTime: number): Promise<MsgLikeResult> {
+	const result = new MsgLikeResult()
+	const params = new Params()
+	if (id > 0 || likeTime > 0) {
+		params.setNum('id', id)
+		params.setNum('like_time', likeTime)
+	}
+	const res = await apiGet('/x/msgfeed/like', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[msg] messageLike code=' + result.code.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	const total = data == null ? null : objOf(data, 'total')
+	if (total == null) {
+		result.cursor = NoticeCursor.from(null)
+		result.status = true
+		console.log('[msg] messageLike ok empty id=' + id.toString())
+		return result
+	}
+	result.cursor = NoticeCursor.from(objOf(total, 'cursor'))
+	const items = arrOf(total, 'items')
+	for (let i = 0; i < items.length; i++) {
+		result.items.push(LikeNoticeItem.from(items[i]))
+	}
+	result.status = true
+	console.log('[msg] messageLike ok id=' + id.toString() + ' n=' + result.items.length.toString() +
+		' isEnd=' + (result.cursor.isEnd ? '1' : '0'))
+	return result
+}
+
+/** 收到的赞：id/likeTime 传 0（或不传）拉首页，传上页 cursor 拉下一页 */
+export async function fetchMessageLike(id: number = 0, likeTime: number = 0): Promise<MsgLikeResult> {
+	try {
+		return await fetchMessageLikeRaw(id, likeTime)
+	} catch (e) {
+		console.log('[msg] fetchMessageLike error id=' + id.toString())
+		console.log(e)
+		const failed = new MsgLikeResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 系统通知单源拉取（query_unified_notify / query_user_notify 同构：data.system_notify_list）。
+ * 读接口不强制 csrf：镜像里有就带（源一直带，值为空串时等价不校验），没有也不阻断读取。
+ * 内部自吞异常，供双源并行拉取时不会产生未处理 rejection。
+ */
+async function fetchNoticeSource(path: string): Promise<MsgSystemResult> {
+	const result = new MsgSystemResult()
+	try {
+		const params = new Params()
+		params.setNum('page_size', SYSTEM_PAGE_SIZE)
+		params.setNum('build', 0)
+		params.set('mobi_app', 'web')
+		const csrf = getCsrf()
+		if (csrf.length > 0) {
+			params.set('csrf', csrf)
+		}
+		const res = await apiGet(MESSAGE_BASE + path, params)
+		if (res == null) {
+			result.message = '网络异常，请稍后重试'
+			return result
+		}
+		result.code = codeOf(res)
+		if (result.code != 0) {
+			result.message = messageOf(res)
+			console.log('[msg] systemNotify code=' + result.code.toString() + ' path=' + path)
+			return result
+		}
+		const data = objOf(res, 'data')
+		if (data == null) {
+			result.message = '数据解析异常，请稍后重试'
+			return result
+		}
+		const list = arrOf(data, 'system_notify_list')
+		for (let i = 0; i < list.length; i++) {
+			result.items.push(SystemNoticeItem.from(list[i]))
+		}
+		result.status = true
+		console.log('[msg] systemNotify ok path=' + path + ' n=' + result.items.length.toString())
+		return result
+	} catch (e) {
+		console.log('[msg] systemNotify error path=' + path)
+		console.log(e)
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+}
+
+/**
+ * 系统通知（源 MsgHttp.messageSystem + messageSystemAccount + controller.queryAndProcessMessages）。
+ *
+ * 两源头并行拉取后合并、按 cursor 降序（游标越大越新）；单源失败时按另一源展示，
+ * 两源均失败才落失败结果（与源 `systemRes['status'] || accountRes['status']` 判定一致）。
+ * 源无分页（一次 20 条、无 loadmore），本函数同样不支持分页。
+ */
+export async function fetchSystemNotify(): Promise<MsgSystemResult> {
+	const merged = new MsgSystemResult()
+	try {
+		// 先发起两个请求再依次 await，等价源 Future.wait 并行（顺序 await 会翻倍等待）
+		const unifiedPromise = fetchNoticeSource('/x/sys-msg/query_unified_notify')
+		const userPromise = fetchNoticeSource('/x/sys-msg/query_user_notify')
+		const unified = await unifiedPromise
+		const user = await userPromise
+		if (!unified.status && !user.status) {
+			merged.code = unified.code != 0 ? unified.code : user.code
+			merged.message = unified.message.length > 0 ? unified.message : user.message
+			return merged
+		}
+		const all: Array<SystemNoticeItem> = []
+		for (let i = 0; i < unified.items.length; i++) {
+			all.push(unified.items[i])
+		}
+		for (let i = 0; i < user.items.length; i++) {
+			all.push(user.items[i])
+		}
+		// 降序插入排序（每轮最多 40 条；不依赖 Array.sort 比较器闭包在各端的实现差异）
+		const sorted: Array<SystemNoticeItem> = []
+		for (let i = 0; i < all.length; i++) {
+			const current = all[i]
+			let insertAt = sorted.length
+			for (let j = 0; j < sorted.length; j++) {
+				if (current.cursor > sorted[j].cursor) {
+					insertAt = j
+					break
+				}
+			}
+			sorted.push(current)
+			if (insertAt < sorted.length - 1) {
+				// 从尾部逐个后移，把新条目放到 insertAt
+				for (let k = sorted.length - 1; k > insertAt; k--) {
+					sorted[k] = sorted[k - 1]
+				}
+				sorted[insertAt] = current
+			}
+		}
+		merged.items = sorted
+		merged.status = true
+		console.log('[msg] systemNotify merged n=' + sorted.length.toString())
+		return merged
+	} catch (e) {
+		console.log('[msg] fetchSystemNotify error')
+		console.log(e)
+		const failed = new MsgSystemResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 系统通知已读上报（源 MsgHttp.systemMarkRead：GET {messageBaseUrl}/x/sys-msg/update_cursor）。
+ *
+ * 写接口——csrf 缺失即前置失败「登录凭据缺失，请重新登录后再试」，不发无凭据请求、不假成功。
+ * 调用方（系统通知页）按源口径失败静默：不影响列表展示，仅打日志。
+ */
+export async function markSystemRead(cursor: number): Promise<MsgActionResult> {
+	try {
+		const result = new MsgActionResult()
+		const csrf = getCsrf()
+		if (csrf.length == 0) {
+			result.message = '登录凭据缺失，请重新登录后再试'
+			console.log('[msg] systemMarkRead csrf empty cursor=' + cursor.toString())
+			return result
+		}
+		const params = new Params()
+		params.set('csrf', csrf)
+		params.setNum('cursor', cursor)
+		const res = await apiGet(MESSAGE_BASE + '/x/sys-msg/update_cursor', params)
+		if (res == null) {
+			result.message = '网络异常，请稍后重试'
+			return result
+		}
+		result.code = codeOf(res)
+		if (result.code != 0) {
+			result.message = messageOf(res)
+			console.log('[msg] systemMarkRead code=' + result.code.toString() + ' cursor=' + cursor.toString())
+			return result
+		}
+		result.status = true
+		console.log('[msg] systemMarkRead ok cursor=' + cursor.toString())
+		return result
+	} catch (e) {
+		console.log('[msg] markSystemRead error cursor=' + cursor.toString())
+		console.log(e)
+		const failed = new MsgActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+

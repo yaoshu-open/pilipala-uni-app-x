@@ -1,0 +1,134 @@
+/** 数字/时间格式化（源：lib/utils/utils.dart） */
+
+function pad2(value: number): string {
+	return value < 10 ? '0' + value.toString() : value.toString()
+}
+
+/** 播放量：>= 1 万显示「x.x万」，否则原值 */
+export function numFormat(value: number): string {
+	if (value < 10000) {
+		return Math.floor(value).toString()
+	}
+	return (value / 10000).toFixed(1) + '万'
+}
+
+/** 秒数 → mm:ss / hh:mm:ss */
+export function timeFormat(seconds: number): string {
+	const total = Math.floor(seconds)
+	if (total < 3600) {
+		const minute = Math.floor(total / 60)
+		const sec = total - minute * 60
+		return pad2(minute) + ':' + pad2(sec)
+	}
+	const hour = Math.floor(total / 3600)
+	const rest = total - hour * 3600
+	return pad2(hour) + ':' + timeFormat(rest)
+}
+
+/** 时间戳（秒）→ 相对时间 */
+export function relativeTime(timestamp: number): string {
+	const now = Date.now()
+	const diff = Math.floor(now / 1000) - timestamp
+	const days = Math.floor(diff / 86400)
+	if (days > 365) {
+		return Math.floor(days / 365).toString() + '年前'
+	}
+	if (days > 30) {
+		return Math.floor(days / 30).toString() + '个月前'
+	}
+	if (days > 0) {
+		return days.toString() + '天前'
+	}
+	const hours = Math.floor(diff / 3600)
+	if (hours > 0) {
+		return hours.toString() + '小时前'
+	}
+	const minutes = Math.floor(diff / 60)
+	if (minutes > 0) {
+		return minutes.toString() + '分钟前'
+	}
+	return '刚刚'
+}
+
+function stampText(timestamp: number, pattern: string, stripZero: boolean): string {
+	const date = new Date(timestamp * 1000)
+	const year = date.getFullYear()
+	let month = date.getMonth() + 1
+	let day = date.getDate()
+	let hour = date.getHours()
+	let minute = date.getMinutes()
+	let second = date.getSeconds()
+	let mm = pad2(month)
+	let dd = pad2(day)
+	let hh = pad2(hour)
+	let mi = pad2(minute)
+	let ss = pad2(second)
+	if (stripZero) {
+		mm = month.toString()
+		dd = day.toString()
+		hh = hour.toString()
+		mi = minute.toString()
+	}
+	let text = pattern
+	text = text.replace('YY', year.toString())
+	text = text.replace('MM', mm)
+	text = text.replace('DD', dd)
+	text = text.replace('hh', hh)
+	text = text.replace('mm', mi)
+	text = text.replace('ss', ss)
+	const today = new Date()
+	if (year == today.getFullYear() && month == today.getMonth() + 1 && day == today.getDate()) {
+		return '今天'
+	}
+	return text
+}
+
+/**
+ * 列表/详情时间（源：utils.dart#dateFormat）。
+ *
+ * 口径与源一致：formatType='detail' 走 YYYY-MM-DD hh:mm 图案，但**当天仍返回「今天」**
+ * （源 CustomStamp_str 无条件做当天判断）——这是源行为，不是缺陷；改为恒显示日期会与旧端分叉。
+ */
+export function dateFormat(timestamp: number, formatType: string): string {
+	if (timestamp == 0) {
+		return ''
+	}
+	const now = Math.floor(Date.now() / 1000)
+	const distance = now - timestamp
+	if (formatType == 'detail') {
+		return stampText(timestamp, 'YY-MM-DD hh:mm', false)
+	}
+	if (distance <= 60) {
+		return '刚刚'
+	}
+	if (distance <= 3600) {
+		return Math.floor(distance / 60).toString() + '分钟前'
+	}
+	if (distance <= 43200) {
+		return Math.floor(distance / 3600).toString() + '小时前'
+	}
+	const then = new Date(timestamp * 1000)
+	const current = new Date()
+	if (then.getFullYear() == current.getFullYear()) {
+		return stampText(timestamp, 'MM月DD日 hh:mm', false)
+	}
+	return stampText(timestamp, 'YY年MM月DD日 hh:mm', false)
+}
+
+/** "12:34" / "1:02:03" → 秒 */
+export function durationToSeconds(text: string): number {
+	const parts = text.split(':')
+	if (parts.length == 1) {
+		const n = parseInt(parts[0])
+		return isNaN(n) ? 0 : n
+	}
+	if (parts.length == 2) {
+		const m = parseInt(parts[0])
+		const s = parseInt(parts[1])
+		return (isNaN(m) ? 0 : m) * 60 + (isNaN(s) ? 0 : s)
+	}
+	const h = parseInt(parts[0])
+	const m = parseInt(parts[1])
+	const s = parseInt(parts[2])
+	return (isNaN(h) ? 0 : h) * 3600 + (isNaN(m) ? 0 : m) * 60 + (isNaN(s) ? 0 : s)
+}

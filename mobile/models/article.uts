@@ -1,0 +1,337 @@
+import { strOf, numOf, objOf, arrOf } from '../utils/json.uts'
+import { toSecureUrl } from '../utils/url.uts'
+
+/**
+ * 专栏/图文域模型（源头：`lib/models/read/read.dart` 的 ReadDataModel + `lib/models/read/opus.dart` 段落结构）。
+ *
+ * cv 专栏正文有两种形态（readInfo.opus 是否存在，源 ReadPage._buildContent 同款分诊）：
+ *  - 结构化段落（opus）：paragraphs[]，para_type=1 文本段（text.nodes 富词节点）/ 2 图片段（pic.pics）；
+ *  - HTML 片段（content）：rich-text 渲染（api 层做 data-src → src 预处理，见 api/article.uts 文件头）。
+ *
+ * 富词节点样式映射（源 `lib/pages/opus/text_helper.dart#buildTextSpan`）：
+ *  fontSize × 0.95、bold 加粗、color #RRGGBB 着色、行高 align==1 ? 2 : 1.5。
+ * 源码 R·G 颠倒字的翻转动效在 uts 无等价且仅装饰性——降级为静态着色（设计_设置与杂项域 §八 登记差异）。
+ */
+
+/** 文本段富词节点（word：字词 + 样式） */
+export class ArticleWord {
+	words: string = ''
+	fontSize: number = 0
+	/** #RRGGBB 文本色（空 = 主题正文色） */
+	colorHex: string = ''
+	bold: boolean = false
+
+	static from(obj: UTSJSONObject): ArticleWord {
+		const w = new ArticleWord()
+		w.words = strOf(obj, 'words')
+		w.fontSize = numOf(obj, 'font_size')
+		w.colorHex = strOf(obj, 'color')
+		const style = objOf(obj, 'style')
+		if (style != null) {
+			w.bold = numOf(style, 'bold') == 1
+		}
+		return w
+	}
+}
+
+/** 图片段单图（宽 =（屏宽−32）× scale，高 = 宽 / aspectRatio；源 Pic.fromJson 同款派生） */
+export class ArticlePic {
+	url: string = ''
+	aspectRatio: number = 1
+	/** 相对基准宽 600 的缩放（width/600） */
+	scale: number = 1
+
+	static from(obj: UTSJSONObject): ArticlePic {
+		const p = new ArticlePic()
+		// 正文图 URL 常为 http 明文，release 包原生 image 会拒载（详见 utils/url.uts）
+		p.url = toSecureUrl(strOf(obj, 'url'))
+		const w = numOf(obj, 'width')
+		const h = numOf(obj, 'height')
+		if (w > 0 && h > 0) {
+			p.aspectRatio = w / h
+			p.scale = w / 600
+		}
+		return p
+	}
+}
+
+/** 结构化段落（paraType：1 文本段 / 2 图片段 / 其它占位不渲染；align 0左 1中 2右） */
+export class ArticleParagraph {
+	paraType: number = 0
+	align: number = 0
+	words: Array<ArticleWord> = []
+	pics: Array<ArticlePic> = []
+
+	static from(obj: UTSJSONObject): ArticleParagraph {
+		const p = new ArticleParagraph()
+		p.paraType = numOf(obj, 'para_type')
+		p.align = numOf(obj, 'align')
+		if (objOf(obj, 'link_card') != null) {
+			// 源 ModuleParagraph.fromJson：link_card 段落视为非正文（paraType 置 0 不渲染）
+			p.paraType = 0
+		}
+		const text = objOf(obj, 'text')
+		if (text != null) {
+			const nodes = arrOf(text, 'nodes')
+			for (let i = 0; i < nodes.length; i++) {
+				const node = nodes[i]
+				const wordObj = objOf(node, 'word')
+				if (wordObj != null) {
+					// 仅消费 TEXT_NODE_TYPE_WORD（源 buildTextSpan default 分支渲染空串）
+					const type = strOf(node, 'type')
+					if (type.length == 0 || type == 'TEXT_NODE_TYPE_WORD') {
+						p.words.push(ArticleWord.from(wordObj))
+					}
+				}
+			}
+		}
+		const pic = objOf(obj, 'pic')
+		if (pic != null) {
+			const pics = arrOf(pic, 'pics')
+			for (let i = 0; i < pics.length; i++) {
+				p.pics.push(ArticlePic.from(pics[i]))
+			}
+		}
+		return p
+	}
+}
+
+/** 专栏作者行 */
+export class ArticleAuthor {
+	mid: number = 0
+	name: string = ''
+	face: string = ''
+	fans: number = 0
+	level: number = 0
+
+	static from(obj: UTSJSONObject | null): ArticleAuthor {
+		const a = new ArticleAuthor()
+		if (obj == null) {
+			return a
+		}
+		a.mid = numOf(obj, 'mid')
+		a.name = strOf(obj, 'name')
+		a.face = strOf(obj, 'face')
+		a.fans = numOf(obj, 'fans')
+		a.level = numOf(obj, 'level')
+		return a
+	}
+}
+
+/** 专栏正文（`/x/article/view` 的 data 摊平；`from(state)` 保留旧 HTML 状态入口） */
+export class ArticleReadInfo {
+	title: string = ''
+	/** 纯文本正文（无 opus 段落时按行拆段渲染；旧 HTML 状态入口可能带标签） */
+	contentText: string = ''
+	publishTime: number = 0
+	viewCount: number = 0
+	likeCount: number = 0
+	replyCount: number = 0
+	totalArtNum: number = 0
+	author: ArticleAuthor = new ArticleAuthor()
+	/** 结构化段落（readInfo.opus.content.paragraphs；hasOpus=false 时为空数组） */
+	paragraphs: Array<ArticleParagraph> = []
+	hasOpus: boolean = false
+
+	static from(state: UTSJSONObject | null): ArticleReadInfo {
+		const info = new ArticleReadInfo()
+		if (state == null) {
+			return info
+		}
+		const readInfo = objOf(state, 'readInfo')
+		if (readInfo == null) {
+			return info
+		}
+		info.title = strOf(readInfo, 'title')
+		info.publishTime = numOf(readInfo, 'publish_time')
+		info.totalArtNum = numOf(readInfo, 'total_art_num')
+		info.author = ArticleAuthor.from(objOf(readInfo, 'author'))
+		const stats = objOf(readInfo, 'stats')
+		if (stats != null) {
+			info.viewCount = numOf(stats, 'view')
+			info.likeCount = numOf(stats, 'like')
+			info.replyCount = numOf(stats, 'reply')
+		}
+		const opus = objOf(readInfo, 'opus')
+		if (opus != null) {
+			const content = objOf(opus, 'content')
+			if (content != null) {
+				const paragraphs = arrOf(content, 'paragraphs')
+				for (let i = 0; i < paragraphs.length; i++) {
+					info.paragraphs.push(ArticleParagraph.from(paragraphs[i]))
+				}
+			}
+		}
+		info.hasOpus = info.paragraphs.length > 0
+		if (!info.hasOpus) {
+			info.contentText = strOf(readInfo, 'content')
+		}
+		return info
+	}
+
+	/**
+	 * 从 `/x/article/view` 的 `data` 摊平（cv 正文兜底取数：站点改版后 cv 页不再输出 __INITIAL_STATE__）。
+	 * 字段口径与源 readInfo 同名：title / publish_time / total_art_num / author / stats / opus.content.paragraphs。
+	 * 无 opus 段落时 content 为纯文本（非 HTML），页面按行拆段渲染。
+	 */
+	static fromArticleView(data: UTSJSONObject | null): ArticleReadInfo {
+		const info = new ArticleReadInfo()
+		if (data == null) {
+			return info
+		}
+		info.title = strOf(data, 'title')
+		info.publishTime = numOf(data, 'publish_time')
+		info.totalArtNum = numOf(data, 'total_art_num')
+		info.author = ArticleAuthor.from(objOf(data, 'author'))
+		const stats = objOf(data, 'stats')
+		if (stats != null) {
+			info.viewCount = numOf(stats, 'view')
+			info.likeCount = numOf(stats, 'like')
+			info.replyCount = numOf(stats, 'reply')
+		}
+		const opus = objOf(data, 'opus')
+		if (opus != null) {
+			const content = objOf(opus, 'content')
+			if (content != null) {
+				const paragraphs = arrOf(content, 'paragraphs')
+				for (let i = 0; i < paragraphs.length; i++) {
+					info.paragraphs.push(ArticleParagraph.from(paragraphs[i]))
+				}
+			}
+		}
+		info.hasOpus = info.paragraphs.length > 0
+		if (!info.hasOpus) {
+			info.contentText = strOf(data, 'content')
+		}
+		return info
+	}
+}
+
+/** cv 专栏抓取结果 */
+export class ArticleCvResult {
+	status: boolean = false
+	message: string = ''
+	data: ArticleReadInfo | null = null
+}
+
+/**
+ * opus 图文（`https://www.bilibili.com/opus/{id}` 的 `__INITIAL_STATE__.detail` 摊平）。
+ * 与源 `OpusDataModel` 同口径：title 取 `basic.title`（源 controller 同款）、作者取首个 module_author、
+ * 统计取 module_stat（源取 modules.last.module_stat）、正文取首个 module_content.paragraphs。
+ * comment_type：11=动态 / 12=专栏（评论 oid 走 comment_id_str，字符串防精度丢失）。
+ */
+export class OpusDetailInfo {
+	id: string = ''
+	title: string = ''
+	authorName: string = ''
+	authorFace: string = ''
+	authorMid: number = 0
+	pubTime: string = ''
+	commentCount: number = 0
+	likeCount: number = 0
+	forwardCount: number = 0
+	commentIdStr: string = ''
+	commentType: number = 0
+	paragraphs: Array<ArticleParagraph> = []
+
+	static from(state: UTSJSONObject | null): OpusDetailInfo {
+		const info = new OpusDetailInfo()
+		if (state == null) {
+			return info
+		}
+		const detail = objOf(state, 'detail')
+		if (detail == null) {
+			return info
+		}
+		info.id = strOf(detail, 'id_str')
+		const basic = objOf(detail, 'basic')
+		if (basic != null) {
+			info.title = strOf(basic, 'title')
+			info.commentIdStr = strOf(basic, 'comment_id_str')
+			info.commentType = numOf(basic, 'comment_type')
+		}
+		const modules = arrOf(detail, 'modules')
+		for (let i = 0; i < modules.length; i++) {
+			const module = modules[i]
+			if (info.title.length == 0) {
+				const titleObj = objOf(module, 'module_title')
+				if (titleObj != null) {
+					info.title = strOf(titleObj, 'text')
+				}
+			}
+			if (info.authorName.length == 0) {
+				const author = objOf(module, 'module_author')
+				if (author != null) {
+					info.authorName = strOf(author, 'name')
+					info.authorFace = strOf(author, 'face')
+					info.authorMid = numOf(author, 'mid')
+					info.pubTime = strOf(author, 'pub_time')
+				}
+			}
+			if (info.paragraphs.length == 0) {
+				const content = objOf(module, 'module_content')
+				if (content != null) {
+					const paragraphs = arrOf(content, 'paragraphs')
+					for (let j = 0; j < paragraphs.length; j++) {
+						info.paragraphs.push(ArticleParagraph.from(paragraphs[j]))
+					}
+				}
+			}
+			const stat = objOf(module, 'module_stat')
+			if (stat != null) {
+				const comment = objOf(stat, 'comment')
+				if (comment != null) {
+					info.commentCount = numOf(comment, 'count')
+				}
+				const like = objOf(stat, 'like')
+				if (like != null) {
+					info.likeCount = numOf(like, 'count')
+				}
+				const forward = objOf(stat, 'forward')
+				if (forward != null) {
+					info.forwardCount = numOf(forward, 'count')
+				}
+			}
+		}
+		return info
+	}
+}
+
+/** opus 抓取结果 */
+export class OpusResult {
+	status: boolean = false
+	message: string = ''
+	data: OpusDetailInfo | null = null
+	/** 页面 canonical 指向 /read/cv{id}（源 parseArticleOpus 的 isCv 分诊） */
+	isCv: boolean = false
+	cvId: string = ''
+}
+
+/**
+ * 动态/专栏 HTML 详情（源 `lib/pages/html/controller.dart#reqHtml` 抽取结果）。
+ * 源用 DOM 选择器从 `https://www.bilibili.com/opus/{id}` 抓 `.fixed-author-header` / `.opus-module-content`
+ * / `.bili-comment-container`；2026 站点结构已变（这些类名不再存在），改为解析页面 __INITIAL_STATE__
+ * （等价字段：module_author / module_content / basic.comment_id_str），非 opus 形态回落专栏 JSON 端点。
+ */
+export class DynamicHtmlInfo {
+	avatar: string = ''
+	uname: string = ''
+	updateTime: string = ''
+	/** 纯文本正文（无结构化段落时按行拆段） */
+	contentText: string = ''
+	paragraphs: Array<ArticleParagraph> = []
+	/** 评论 oid（字符串：动态/专栏的 comment_id 超出 Number 安全整数） */
+	commentId: string = ''
+	/** 评论 type：11 图片动态 / 12 图文动态·专栏（源 controller 同款） */
+	commentType: number = 12
+}
+
+/** 动态/专栏 HTML 详情抓取结果 */
+export class DynamicHtmlResult {
+	status: boolean = false
+	message: string = ''
+	data: DynamicHtmlInfo | null = null
+}
+
+// 统计/评论 oid 换取（/x/article/viewinfo）已有实现与模型：api/dynamics.uts#fetchArticleViewInfo
+// + models/dynamics.uts#ArticleViewInfoResult（P6 建）——本文件不重复定义，opus/read 页按需从那边导入。

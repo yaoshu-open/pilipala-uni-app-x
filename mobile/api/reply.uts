@@ -1,0 +1,402 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { strOf, numOf, objOf, arrOf } from '../utils/json.uts'
+import {
+	ReplyListResult, ReplyData, ReplyItem, ReplyActionResult, ReplyAddResult, EmoteResult, EmotePackage
+} from '../models/reply.uts'
+
+/**
+ * 评论与表情接口层（源头：`lib/http/reply.dart` + `lib/http/video.dart#replyAdd`）。
+ *
+ * 约定与 P3/P4 其它 api 文件一致：
+ *  - 内部 `xxxRaw` 负责请求 + 解析，导出函数统一 try/catch 兜底，**解析异常落失败结果并打日志**，
+ *    绝不让异常穿透到页面（P3 曾因异常穿透导致列表恒停在骨架）；
+ *  - 失败不伪装成空：message 优先取接口 message，其次网络/解析文案；
+ *  - rpid / root / parent 一律按**字符串**传（19 位量级 id 走 number 会丢精度，见 models/reply.uts 文件头）。
+ *
+ * 评论关闭用接口原值判断：`code == 12061`（页面据此隐藏发评论入口）。
+ */
+
+const REPLY_TYPE_VIDEO: number = 1
+const REPLY_PAGE_SIZE: number = 20
+
+/** 评论区已关闭（源 controller 用同一份 code 判定隐藏发评论 FAB） */
+export const REPLY_CLOSED_CODE: number = 12061
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+/** 楼中楼错误码文案（源 ReplyHttp.replyReplyList 的 errMap） */
+function replyReplyMessage(code: number, fallback: string): string {
+	if (code == -400) {
+		return '请求错误'
+	}
+	if (code == -404) {
+		return '无此项'
+	}
+	if (code == 12002) {
+		return '评论区已关闭'
+	}
+	if (code == 12009) {
+		return '评论主体类型不合法'
+	}
+	return fallback
+}
+
+/** 带 csrf 的写请求；csrf 取不到时明确失败（不静默当成成功，取数限制见 utils/request.uts#getCsrf） */
+async function postWithCsrf(path: string, params: Params): Promise<ReplyActionResult> {
+	const result = new ReplyActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[reply] csrf empty path=' + path)
+		return result
+	}
+	const body = params.clone()
+	body.set('csrf', csrf)
+	const res = await apiPost(path, body.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[reply] post fail path=' + path + ' code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+// ---------------------------------------------------------------- 一级评论列表
+
+/** oid 统一字符串承载：动态评论 oid 为 19 位量级（>2^53），number 会丢精度（P4 视频场景 aid 无此问题） */
+async function fetchReplyListRaw(oid: string, pn: number, sort: number, type: number): Promise<ReplyListResult> {
+	const result = new ReplyListResult()
+	const params = new Params()
+	params.set('oid', oid)
+	params.setNum('pn', pn)
+	params.setNum('type', type)
+	params.setNum('sort', sort)
+	params.setNum('ps', REPLY_PAGE_SIZE)
+	const res = await apiGet('/x/v2/reply', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[reply] list code=' + result.code.toString() + ' oid=' + oid)
+		return result
+	}
+	result.data = ReplyData.from(objOf(res, 'data'))
+	result.status = true
+	const data = result.data
+	if (data != null) {
+		console.log('[reply] list ok oid=' + oid + ' pn=' + pn.toString() +
+			' replies=' + data.replies.length.toString() + ' top=' + data.topReplies.length.toString() +
+			' count=' + data.page.count.toString())
+	}
+	return result
+}
+
+/**
+ * 一级评论列表（sort：0 最新 / 1 最热；ps 固定 20，与源一致）。
+ * type：评论主体类型，1 视频（默认）/ 11 动态（取动态 basic.comment_type，0 视为 11）——既有调用方不传保持视频场景零改动。
+ */
+export async function fetchReplyList(oid: number, pn: number, sort: number, type: number = REPLY_TYPE_VIDEO): Promise<ReplyListResult> {
+	try {
+		return await fetchReplyListRaw(oid.toString(), pn, sort, type)
+	} catch (e) {
+		console.log('[reply] fetchReplyList error oid=' + oid.toString() + ' pn=' + pn.toString())
+		console.log(e)
+		const failed = new ReplyListResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 一级评论列表（字符串 oid 版：动态评论等超 number 精度场景用） */
+export async function fetchReplyListByStr(oid: string, pn: number, sort: number, type: number = REPLY_TYPE_VIDEO): Promise<ReplyListResult> {
+	try {
+		return await fetchReplyListRaw(oid, pn, sort, type)
+	} catch (e) {
+		console.log('[reply] fetchReplyListByStr error oid=' + oid + ' pn=' + pn.toString())
+		console.log(e)
+		const failed = new ReplyListResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 楼中楼（二级评论）
+
+async function fetchReplyReplyListRaw(oid: string, root: string, pn: number, type: number): Promise<ReplyListResult> {
+	const result = new ReplyListResult()
+	const params = new Params()
+	params.set('oid', oid)
+	params.set('root', root)
+	params.setNum('pn', pn)
+	params.setNum('type', type)
+	params.setNum('sort', 1)
+	params.setNum('ps', REPLY_PAGE_SIZE)
+	// 源同款带 csrf；未登录时镜像里没有 bili_jct，此时不塞空值（空 csrf 会被服务端判非法）
+	const csrf = getCsrf()
+	if (csrf.length > 0) {
+		params.set('csrf', csrf)
+	}
+	const res = await apiGet('/x/v2/reply/reply', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = replyReplyMessage(result.code, messageOf(res))
+		console.log('[reply] reply-list code=' + result.code.toString() + ' root=' + root)
+		return result
+	}
+	result.data = ReplyData.from(objOf(res, 'data'))
+	result.status = true
+	const data = result.data
+	if (data != null) {
+		console.log('[reply] reply-list ok root=' + root + ' pn=' + pn.toString() +
+			' replies=' + data.replies.length.toString() + ' count=' + data.page.count.toString())
+	}
+	return result
+}
+
+/** 楼中楼列表（root 为根评论 rpid；ps 同 20；type 口径同 fetchReplyList） */
+export async function fetchReplyReplyList(oid: number, root: string, pn: number, type: number = REPLY_TYPE_VIDEO): Promise<ReplyListResult> {
+	try {
+		return await fetchReplyReplyListRaw(oid.toString(), root, pn, type)
+	} catch (e) {
+		console.log('[reply] fetchReplyReplyList error root=' + root)
+		console.log(e)
+		const failed = new ReplyListResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 楼中楼列表（字符串 oid 版：动态评论场景用） */
+export async function fetchReplyReplyListByStr(oid: string, root: string, pn: number, type: number = REPLY_TYPE_VIDEO): Promise<ReplyListResult> {
+	try {
+		return await fetchReplyReplyListRaw(oid, root, pn, type)
+	} catch (e) {
+		console.log('[reply] fetchReplyReplyListByStr error root=' + root)
+		console.log(e)
+		const failed = new ReplyListResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 评论点赞
+
+async function likeReplyRaw(oid: string, rpid: string, action: number, type: number): Promise<ReplyActionResult> {
+	const params = new Params()
+	params.setNum('type', type)
+	params.set('oid', oid)
+	params.set('rpid', rpid)
+	params.setNum('action', action)
+	return await postWithCsrf('/x/v2/reply/action', params)
+}
+
+/** （取消）点赞评论；action 1 点赞 / 0 取消（源 ZanButton 同款）；type 口径同 fetchReplyList */
+export async function likeReply(oid: number, rpid: string, action: number, type: number = REPLY_TYPE_VIDEO): Promise<ReplyActionResult> {
+	try {
+		return await likeReplyRaw(oid.toString(), rpid, action, type)
+	} catch (e) {
+		console.log('[reply] likeReply error rpid=' + rpid)
+		console.log(e)
+		const failed = new ReplyActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** （取消）点赞评论（字符串 oid 版：动态评论场景用） */
+export async function likeReplyByStr(oid: string, rpid: string, action: number, type: number = REPLY_TYPE_VIDEO): Promise<ReplyActionResult> {
+	try {
+		return await likeReplyRaw(oid, rpid, action, type)
+	} catch (e) {
+		console.log('[reply] likeReplyByStr error rpid=' + rpid)
+		console.log(e)
+		const failed = new ReplyActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 发评论
+
+async function addReplyRaw(oid: string, root: string, parent: string, message: string, type: number): Promise<ReplyAddResult> {
+	const result = new ReplyAddResult()
+	if (message.trim().length == 0) {
+		result.message = '请输入评论内容'
+		return result
+	}
+	const params = new Params()
+	params.setNum('type', type)
+	params.set('oid', oid)
+	// 源：root / parent 为空时传空串（不是 0）
+	params.set('root', root.length > 0 && root != '0' ? root : '')
+	params.set('parent', parent.length > 0 && parent != '0' ? parent : '')
+	params.set('message', message)
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[reply] add csrf empty oid=' + oid)
+		return result
+	}
+	params.set('csrf', csrf)
+	const res = await apiPost('/x/v2/reply/add', params.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[reply] add fail code=' + result.code.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		result.successToast = strOf(data, 'success_toast')
+		const reply = objOf(data, 'reply')
+		if (reply != null) {
+			// 新评论的 isUp 无法在客户端判定（拿不到 UP mid），由列表侧按 upMid 重设
+			result.item = ReplyItem.from(reply, '', false)
+		}
+	}
+	result.status = true
+	console.log('[reply] add ok oid=' + oid + ' rpid=' + (result.item == null ? '-' : result.item.rpid))
+	return result
+}
+
+/**
+ * 发评论 / 回复。
+ * root、parent 为字符串 id，一级评论传 ""（或 "0"）；回复某条评论时 root=根评论、parent=被回复评论。
+ * type 口径同 fetchReplyList（默认 1 视频；动态详情传 11）。
+ */
+export async function addReply(oid: number, root: string, parent: string, message: string, type: number = REPLY_TYPE_VIDEO): Promise<ReplyAddResult> {
+	try {
+		return await addReplyRaw(oid.toString(), root, parent, message, type)
+	} catch (e) {
+		console.log('[reply] addReply error oid=' + oid.toString())
+		console.log(e)
+		const failed = new ReplyAddResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 发评论 / 回复（字符串 oid 版：动态评论场景用） */
+export async function addReplyByStr(oid: string, root: string, parent: string, message: string, type: number = REPLY_TYPE_VIDEO): Promise<ReplyAddResult> {
+	try {
+		return await addReplyRaw(oid, root, parent, message, type)
+	} catch (e) {
+		console.log('[reply] addReplyByStr error oid=' + oid)
+		console.log(e)
+		const failed = new ReplyAddResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 删除自己的评论（源头 `lib/http/reply.dart#replyDel`）。
+ * 端点 `POST /x/v2/reply/del`，参数走 query（源同款：type/oid/rpid/csrf），rpid 用字符串防大数精度丢失。
+ */
+export async function deleteReply(oid: number, rpid: string, type: number = REPLY_TYPE_VIDEO): Promise<ReplyActionResult> {
+	const result = new ReplyActionResult()
+	try {
+		const csrf = getCsrf()
+		if (csrf.length == 0) {
+			result.message = '登录凭据缺失，请重新登录后再试'
+			console.log('[reply] del csrf empty oid=' + oid.toString())
+			return result
+		}
+		const query = new Params()
+		query.setNum('type', type)
+		query.setNum('oid', oid)
+		query.set('rpid', rpid)
+		query.set('csrf', csrf)
+		const res = await apiPost('/x/v2/reply/del', null, query)
+		if (res == null) {
+			result.message = '网络异常，请稍后重试'
+			return result
+		}
+		result.code = codeOf(res)
+		if (result.code != 0) {
+			result.message = messageOf(res)
+			console.log('[reply] del fail code=' + result.code.toString() + ' rpid=' + rpid)
+			return result
+		}
+		result.status = true
+		console.log('[reply] del ok oid=' + oid.toString() + ' rpid=' + rpid)
+	} catch (e) {
+		console.log('[reply] deleteReply error oid=' + oid.toString())
+		console.log(e)
+		result.message = '数据解析异常，请稍后重试'
+	}
+	return result
+}
+
+// ---------------------------------------------------------------- 表情列表
+
+async function fetchEmoteListRaw(business: string): Promise<EmoteResult> {
+	const result = new EmoteResult()
+	const params = new Params()
+	params.set('business', business)
+	params.set('web_location', '333.1245')
+	const res = await apiGet('/x/emote/user/panel/web', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		console.log('[reply] emote code=' + code.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	const packages = data == null ? [] : arrOf(data, 'packages')
+	for (let i = 0; i < packages.length; i++) {
+		const pack = EmotePackage.from(packages[i])
+		if (pack.emotes.length > 0) {
+			result.packages.push(pack)
+		}
+	}
+	result.status = true
+	console.log('[reply] emote ok business=' + business + ' packages=' + result.packages.length.toString())
+	return result
+}
+
+/** 表情面板列表（business 默认 reply；弹幕场景传 danmaku） */
+export async function fetchEmoteList(business: string = 'reply'): Promise<EmoteResult> {
+	try {
+		return await fetchEmoteListRaw(business)
+	} catch (e) {
+		console.log('[reply] fetchEmoteList error business=' + business)
+		console.log(e)
+		const failed = new EmoteResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}

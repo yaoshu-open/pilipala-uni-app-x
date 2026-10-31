@@ -1,0 +1,51 @@
+<template>
+	<view class="mpr" @click="onTap">
+		<text class="mpr-title" :style="titleStyle">{{ title }}</text>
+		<text v-if="showArrow" class="mpr-arrow" :style="arrowStyle">→</text>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 主页纵排入口行（源头：`lib/pages/member/view.dart` 的 ListTile 序列——
+ * Ta的动态/投稿/收藏/专栏带右箭头，「Ta的合集」行无箭头（基线_P5_member 同形态）；
+ * 亦作「最近投币/最近点赞」等无箭头的面板标题行复用。
+ * 空态文案（「用户没有设置合集」等）由页面在该行下方渲染，不在本组件内。
+ */
+const props = defineProps({
+	title: { type: String, default: '' },
+	showArrow: { type: Boolean, default: true }
+})
+
+const emit = defineEmits(['tap'])
+
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const arrowStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	.mpr {
+		height: 52px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+		padding-right: 14px;
+	}
+	.mpr-title {
+		flex: 1;
+		font-size: 15px;
+		font-weight: 500;
+	}
+	.mpr-arrow {
+		font-size: 16px;
+		margin-left: 8px;
+	}
+</style>

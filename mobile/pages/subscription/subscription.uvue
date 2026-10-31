@@ -1,0 +1,362 @@
+<template>
+	<view class="sub" :style="pageStyle">
+		<!-- 顶栏：← +「我的/Ta 的订阅」，无右侧按钮（基线 P5_subscription） -->
+		<app-navbar :title="isOwner ? '我的订阅' : 'Ta 的订阅'"></app-navbar>
+
+		<view v-if="state == 'loading'" class="sub-fill">
+			<view v-for="n in 6" :key="'sk-' + n.toString()">
+				<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+			</view>
+		</view>
+
+		<view v-else-if="state == 'error'" class="sub-fill">
+			<!-- 错误态：源用 HttpError；-101 时按钮改「去登录」（p-http-error 按钮文案固定，页内自绘同形态块） -->
+			<view class="sub-error">
+				<image class="sub-error-image" src="/static/images/error.png" mode="aspectFit"></image>
+				<text class="sub-error-text" :style="errorTextStyle">{{ errorText }}</text>
+				<view class="sub-error-btn" :style="errorBtnStyle" @click="onErrorAction">
+					<text class="sub-error-btn-text" :style="errorBtnTextStyle">{{ errorCode == -101 ? '去登录' : '点击重试' }}</text>
+				</view>
+			</view>
+		</view>
+
+		<list-view v-else-if="items.length > 0" class="sub-list" :lower-threshold="300" @scrolltolower="onLoadMore">
+			<list-item v-for="folder in items" :key="folder.id" :type="1">
+				<!-- 订阅卡（源 SubItem）：左封面 16:10 + 右标题/合集 UP主/N个视频/owner 取消 × -->
+				<view class="sub-card" :style="cardStyle" @click="openDetail(folder)">
+					<view class="sub-cover" :style="coverStyle">
+						<network-img :src="folder.cover" width="100%" height="100%" radius="10px"></network-img>
+					</view>
+					<view class="sub-body">
+						<text class="sub-title" :style="titleStyle" :max-lines="2">{{ folder.title }}</text>
+						<text class="sub-upper" :style="secondaryStyle" :max-lines="1">合集 UP主：{{ folder.upper.name }}</text>
+						<text class="sub-count" :style="secondaryStyle">{{ folder.mediaCount.toString() }}个视频</text>
+						<view class="sub-spacer"></view>
+						<view v-if="isOwner" class="sub-cancel" @click.stop="confirmCancel(folder)">
+							<p-icon name="clear-outlined" :size="18" :color="iconColor"></p-icon>
+						</view>
+					</view>
+				</view>
+			</list-item>
+			<list-item :key="'footer'" :type="2">
+				<view class="sub-footer">
+					<text class="sub-footer-text" :style="footerStyle">{{ footerText }}</text>
+				</view>
+			</list-item>
+		</list-view>
+
+		<view v-else class="sub-fill">
+			<!-- 空态：插画 + 胶囊「没有数据」（基线 P5_subscription 同款） -->
+			<empty-illus text="没有数据" :pill="true"></empty-illus>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchSubFolder, cancelSub } from '../../api/user-center.uts'
+import { SubFolderItem } from '../../models/fav.uts'
+import { userState } from '../../stores/user.uts'
+import { themeColor, currentThemeIndex, pageBackground, textPrimary, textSecondary, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 我的订阅（源头：lib/pages/subscription/{view,controller}.dart + widgets/item.dart）。
+ *
+ * 列表 = /x/v3/fav/folder/collected/list（需登录；-101 → 错误态按钮「去登录」，
+ * 登录返回后 onShow 自动重试——设计 §八）。卡片 = 左封面 16:10（宽=(屏宽-24-48)/2，
+ * 源 LayoutBuilder 公式）+ 标题 / 合集 UP主 / N个视频；owner 态右下 × 取消订阅
+ * （二次确认 → cancelSub 写接口，凭据缺失明确失败）。
+ */
+const PAGE_SIZE: number = 20
+
+const mid = ref<number>(0)
+const isOwner = ref<boolean>(true)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const errorCode = ref<number>(0)
+const items = ref<Array<SubFolderItem>>([])
+const page = ref<number>(1)
+const loading = ref<boolean>(false)
+const noMore = ref<boolean>(false)
+const footerText = ref<string>('加载中...')
+
+const primary = themeColor(currentThemeIndex())
+const iconColor = textSecondary()
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const errorTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const errorBtnStyle = computed((): string => 'background-color:' + withAlpha(primary, 0.08) + ';')
+const errorBtnTextStyle = computed((): string => 'color:' + primary + ';')
+const footerStyle = computed((): string => 'color:' + textSecondary() + ';padding-bottom:' + (safeAreaBottom() + 16).toString() + 'px;')
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return Math.max(88, Math.round(((info.windowWidth - 24 - 48) / 2) / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+const coverStyle = computed((): string => {
+	const width = Math.round(cardHeight * 1.6)
+	return 'width:' + width.toString() + 'px;height:' + cardHeight.toString() + 'px;'
+})
+
+const cardStyle = computed((): string => 'height:' + cardHeight.toString() + 'px;')
+
+async function loadPage(first: boolean) {
+	if (loading.value) {
+		return
+	}
+	if (!userState.isLogin) {
+		state.value = 'error'
+		errorCode.value = -101
+		errorText.value = '账号未登录'
+		return
+	}
+	if (first) {
+		page.value = 1
+		noMore.value = false
+		footerText.value = '加载中...'
+		if (state.value != 'ready') {
+			state.value = 'loading'
+		}
+	}
+	loading.value = true
+	const res = await fetchSubFolder(mid.value, page.value, PAGE_SIZE)
+	loading.value = false
+	if (!res.status) {
+		if (state.value != 'ready') {
+			state.value = 'error'
+			errorCode.value = res.code
+			errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	if (first) {
+		items.value = res.items
+	} else {
+		for (let i = 0; i < res.items.length; i++) {
+			items.value.push(res.items[i])
+		}
+	}
+	page.value = page.value + 1
+	if (res.items.length == 0) {
+		noMore.value = true
+		footerText.value = '没有更多了'
+	}
+	if (state.value != 'ready') {
+		state.value = 'ready'
+	}
+}
+
+function onLoadMore() {
+	if (noMore.value || loading.value || state.value != 'ready') {
+		return
+	}
+	loadPage(false)
+}
+
+function reload() {
+	items.value = []
+	state.value = 'loading'
+	loadPage(true)
+}
+
+/** 错误态动作：-101 去登录（返回后 onShow 自动重试）；其余重载 */
+function onErrorAction() {
+	if (errorCode.value == -101) {
+		uni.navigateTo({ url: '/pages/login/login' })
+	} else {
+		reload()
+	}
+}
+
+function openDetail(folder: SubFolderItem) {
+	let url = '/pages/subscription-detail/subscription-detail?seasonId=' + folder.id.toString() +
+		'&type=' + folder.type.toString()
+	if (folder.title.length > 0) {
+		url = url + '&title=' + encodeURIComponent(folder.title)
+	}
+	if (folder.cover.length > 0) {
+		url = url + '&cover=' + encodeURIComponent(folder.cover)
+	}
+	if (folder.upper.name.length > 0) {
+		url = url + '&upperName=' + encodeURIComponent(folder.upper.name)
+	}
+	if (folder.upper.mid > 0) {
+		url = url + '&upperMid=' + folder.upper.mid.toString()
+	}
+	url = url + '&mediaCount=' + folder.mediaCount.toString()
+	uni.navigateTo({ url: url })
+}
+
+/** 取消订阅：二次确认（源 showDialog 提示/确定取消吗）→ 写接口 */
+function confirmCancel(folder: SubFolderItem) {
+	uni.showModal({
+		title: '提示',
+		content: '确定取消订阅吗？',
+		cancelText: '取消',
+		confirmText: '确定',
+		success: (res) => {
+			if (res.confirm == true) {
+				doCancel(folder)
+			}
+		}
+	})
+}
+
+async function doCancel(folder: SubFolderItem) {
+	const res = await cancelSub(folder.id)
+	if (!res.status) {
+		// 凭据缺失/接口失败：真实失败 toast，列表不变（不假成功）
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	const next: Array<SubFolderItem> = []
+	for (let i = 0; i < items.value.length; i++) {
+		if (items.value[i].id != folder.id) {
+			next.push(items.value[i])
+		}
+	}
+	items.value = next
+	uni.showToast({ title: '取消订阅成功', icon: 'none' })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	const myMid = userState.info.mid
+	// 源口径：无 mid 参数 = 看自己（isOwner）；有参数则按 mid == 本人判定
+	if (rawMid != null && (rawMid as string).length > 0) {
+		const parsed = parseInt(rawMid as string)
+		mid.value = isNaN(parsed) ? myMid : parsed
+		isOwner.value = mid.value == myMid && myMid > 0
+	} else {
+		mid.value = myMid
+		isOwner.value = true
+	}
+	loadPage(true)
+})
+
+onShow(() => {
+	// 从登录页返回：未登录错误态自动重试（设计 §八）
+	if (state.value == 'error' && errorCode.value == -101 && userState.isLogin) {
+		reload()
+	}
+})
+</script>
+
+<style>
+	.sub {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.sub-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.sub-list {
+		flex: 1;
+	}
+	/* 订阅卡：行内边距 LTRB(12,7,12,7)（源 SubItem Padding） */
+	.sub-card {
+		display: flex;
+		flex-direction: row;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 7px;
+		margin-bottom: 7px;
+	}
+	.sub-cover {
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.sub-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-right: 6px;
+		padding-top: 2px;
+	}
+	.sub-title {
+		font-size: 14px;
+		font-weight: 500;
+		line-height: 20px;
+	}
+	.sub-upper {
+		font-size: 12px;
+		margin-top: 2px;
+	}
+	.sub-count {
+		font-size: 12px;
+		margin-top: 2px;
+	}
+	.sub-spacer {
+		flex: 1;
+	}
+	.sub-cancel {
+		align-self: flex-end;
+		width: 36px;
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sub-error {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding-top: 40px;
+		padding-bottom: 40px;
+	}
+	.sub-error-image {
+		width: 236px;
+		height: 200px;
+	}
+	.sub-error-text {
+		font-size: 14px;
+		margin-top: 30px;
+		text-align: center;
+	}
+	.sub-error-btn {
+		margin-top: 20px;
+		height: 40px;
+		padding-left: 16px;
+		padding-right: 16px;
+		border-radius: 20px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sub-error-btn-text {
+		font-size: 14px;
+	}
+	.sub-footer {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		height: 60px;
+	}
+	.sub-footer-text {
+		font-size: 13px;
+	}
+</style>

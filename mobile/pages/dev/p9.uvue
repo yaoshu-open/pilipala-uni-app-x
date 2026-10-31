@@ -1,0 +1,249 @@
+<template>
+	<view class="p9">
+		<view class="p9-head">
+			<text class="p9-title">P9 组件 fixture（直播域）</text>
+		</view>
+		<scroll-view class="p9-scroll">
+			<text class="p9-label">① 关注横滑行（源 LiveFollowingListView，高 100 / 头像 54+1.5 描边 / 昵称宽 62）</text>
+			<live-following-row :list="following" @tap="onFollowTap"></live-following-row>
+
+			<text class="p9-label">② 直播卡（源 LiveCardV：封面 16:10 圆角 10 + 底部渐变条「分区 / text_small」）</text>
+			<view class="p9-grid">
+				<view v-for="(item, index) in cards" :key="item.roomId.toString()" class="p9-cell" :style="cellStyle(index)">
+					<live-card
+						:pic="item.pic"
+						:title="item.title"
+						:uname="item.uname"
+						:area-name="item.areaName"
+						:watched-text="item.watchedText"
+						:cover-height="coverHeightText"
+						:columns="2"
+						@tap="onCardTap(item)"
+					></live-card>
+				</view>
+			</view>
+
+			<text class="p9-label">③ 聊天列表（源 buildMessageListUI：气泡圆角 20 / 昵称 60% 白 / 行内表情）</text>
+			<view class="p9-chat">
+				<live-chat-list :messages="chatSamples" :portrait="true"></live-chat-list>
+			</view>
+
+			<text class="p9-label">④ 播放器控制条（刷新 / 画质菜单 / 全屏）</text>
+			<view class="p9-ctrl">
+				<live-bottom-control
+					:qn-desc="'原画'"
+					:qn-list="qnList"
+					:current-qn="10000"
+					@refresh="onRefreshTap"
+					@quality="onQualityTap"
+					@fullscreen="onFullscreenTap"
+				></live-bottom-control>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref } from 'vue'
+import { onReady } from '@dcloudio/uni-app'
+import LiveCard from '../../components/live/live-card.uvue'
+import LiveFollowingRow from '../../components/live/live-following-row.uvue'
+import LiveChatList from '../../components/live/live-chat-list.uvue'
+import LiveBottomControl from '../../components/live/live-bottom-control.uvue'
+import { LiveItem, LiveFollowingItem, LiveMessage, LiveChatSeg } from '../../models/live.uts'
+
+/**
+ * P9 组件 fixture 验证页（同 P3/P8 dev 页做法）。
+ *
+ * 为什么需要：直播域的两个关键数据源在本机网络被风控限制（getUserRecommend / getDanmuInfo 回 -352，
+ * 与旧版 App 同款），真实列表与真实弹幕都无法稳定复现。组件形态（卡片角标、关注圈、聊天气泡、
+ * 行内表情、画质菜单）用本页固定数据取证；**本页数据不进业务代码**，业务页仍走真实接口
+ * （列表已接同用途兜底接口，弹幕按 D-1 降级呈现）。
+ *
+ * 取证范围：卡片/关注行/聊天列表（含行内表情）/控制条画质菜单的尺寸与配色。
+ */
+const following = ref<Array<LiveFollowingItem>>([])
+const cards = ref<Array<LiveItem>>([])
+const chatSamples = ref<Array<LiveMessage>>([])
+
+/**
+ * 数据在 onReady 后填充：setup 顶层直接构造复杂模型数组时，真机出现
+ * 「TypeError: Cannot convert undefined or null to object」并整页白屏
+ * （与业务页一致的做法是空数组 + 生命周期内填充）。
+ */
+function buildFollowing() {
+	const list: Array<LiveFollowingItem> = []
+	const names: Array<string> = ['小七宅子o', '是离宝', '冷柿Nay', '软昕昕の']
+	const face = 'https://i2.hdslb.com/bfs/face/6cf63154b26a962506dca630c539d12c7c0b3e65.jpg'
+	for (let i = 0; i < names.length; i++) {
+		const item = new LiveFollowingItem()
+		item.roomId = 1000 + i
+		item.uname = names[i]
+		item.face = face
+		list.push(item)
+	}
+	following.value = list
+}
+
+function buildCards() {
+	const list: Array<LiveItem> = []
+	const conf: Array<Array<string>> = [
+		['b站最爱抖腿主播', '是离宝', '颜值', '5009'],
+		['b站第一冷萌脸', '冷柿Nay', '颜值', '4085'],
+		['封面本人b站杨幂', '小七宅子o', '颜值', '1.2万'],
+		['B站最权威红毛', '缝葉', '萌宅领域', '211']
+	]
+	for (let i = 0; i < conf.length; i++) {
+		const item = new LiveItem()
+		item.roomId = 2000 + i
+		item.title = conf[i][0]
+		item.uname = conf[i][1]
+		item.areaName = conf[i][2]
+		item.watchedText = conf[i][3]
+		item.pic = 'https://i0.hdslb.com/bfs/live/new_room_cover/f103db672490e653acf49ae6a4d9a4279b6ba566.jpg'
+		list.push(item)
+	}
+	cards.value = list
+}
+
+function buildChat() {
+	const list: Array<LiveMessage> = []
+	const conf: Array<Array<string>> = [
+		['一只小怪兽', '主播好厉害啊，这波操作太秀了'],
+		['Tide_Lock', '来了来了，今天也在线'],
+		['mex111', '这个滤镜是什么呀'],
+		['琴瑟喵呜', '打卡打卡，蹲一个唱歌'],
+		['面游客1998', '画面好清晰，HLS 也不卡']
+	]
+	for (let i = 0; i < conf.length; i++) {
+		const msg = new LiveMessage()
+		msg.type = 'chat'
+		msg.userName = conf[i][0]
+		msg.message = conf[i][1]
+		const seg = new LiveChatSeg()
+		seg.kind = 'text'
+		seg.text = conf[i][1]
+		msg.segments.push(seg)
+		list.push(msg)
+	}
+	// 行内表情样本：第二段为图片（用 B 站 CDN 图证明内嵌图能渲染，尺寸取接口同款 20）
+	const withEmote = new LiveMessage()
+	withEmote.type = 'chat'
+	withEmote.userName = '小七宅子o'
+	withEmote.message = '谢谢礼物[爱心]'
+	const t1 = new LiveChatSeg()
+	t1.kind = 'text'
+	t1.text = '谢谢礼物'
+	const e1 = new LiveChatSeg()
+	e1.kind = 'emote'
+	e1.url = 'https://i0.hdslb.com/bfs/face/member/noface.jpg'
+	e1.width = 20
+	e1.height = 20
+	withEmote.segments.push(t1)
+	withEmote.segments.push(e1)
+	list.push(withEmote)
+	chatSamples.value = list
+}
+
+onReady(() => {
+	buildFollowing()
+	buildCards()
+	buildChat()
+})
+const qnList = ref<Array<number>>([30000, 20000, 10000, 400, 250, 150, 80])
+
+const CELL_WIDTH = 178
+const GUTTER = 12
+const coverHeightText = Math.round(CELL_WIDTH / 1.6).toString() + 'px'
+
+function cellStyle(index: number): string {
+	const base = 'width:' + CELL_WIDTH.toString() + 'px;'
+	if (index % 2 == 0) {
+		return base + 'margin-right:' + GUTTER.toString() + 'px;'
+	}
+	return base
+}
+
+function onFollowTap(item: LiveFollowingItem) {
+	uni.showToast({ title: 'follow tap ' + item.uname, icon: 'none' })
+}
+
+function onCardTap(item: LiveItem) {
+	uni.showToast({ title: 'card tap ' + item.title, icon: 'none' })
+}
+
+function onRefreshTap() {
+	uni.showToast({ title: 'refresh tap', icon: 'none' })
+}
+
+function onQualityTap(code: number) {
+	uni.showToast({ title: 'quality ' + code.toString(), icon: 'none' })
+}
+
+function onFullscreenTap() {
+	uni.showToast({ title: 'fullscreen tap', icon: 'none' })
+}
+</script>
+
+<style>
+	.p9 {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.p9-head {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+	}
+
+	.p9-title {
+		font-size: 15px;
+		font-weight: bold;
+	}
+
+	.p9-scroll {
+		flex: 1;
+	}
+
+	.p9-label {
+		margin-left: 12px;
+		margin-top: 12px;
+		margin-bottom: 6px;
+		font-size: 12px;
+		color: #888888;
+	}
+
+	.p9-grid {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		padding-left: 12px;
+	}
+
+	.p9-cell {
+		margin-bottom: 12px;
+	}
+
+	/* 聊天列表按竖屏直播间气泡底（30% 黑）取证，外层给深色底模拟播放区 */
+	.p9-chat {
+		height: 260px;
+		margin-left: 12px;
+		margin-right: 12px;
+		background-color: #2A2A2C;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.p9-ctrl {
+		height: 120px;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 12px;
+		background-color: #1A1A1C;
+		position: relative;
+	}
+</style>

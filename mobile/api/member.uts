@@ -1,0 +1,677 @@
+import { apiGet } from '../utils/request.uts'
+import { wbiGet } from '../utils/wbi.uts'
+import { Params } from '../utils/params.uts'
+import { strOf, numOf, objOf, arrOf } from '../utils/json.uts'
+import { REFERER, UA_MOBILE, REQUEST_TIMEOUT } from '../utils/constants.uts'
+import {
+	MemberInfo, VListItem, MemberArchiveItem, MemberSeasonsItem, MemberCoinsItem, MemberLikeItem,
+	MemberArticleItem, DynamicItem,
+	MemberInfoResult, RelationStatResult, MemberUpstatResult, RelationResult, MemberArchiveResult,
+	DynamicFeedResult, MemberSeasonsResult, SeasonDetailResult, WWebidResult, MemberArticleResult,
+	MemberListResult
+} from '../models/member.uts'
+
+/**
+ * 用户主页域接口层（源头：`lib/http/member.dart` + `lib/http/video.dart#relationMod`）。
+ *
+ * 约定与 P3/P4 其它 api 文件一致：
+ *  - 内部 `xxxRaw` 负责请求 + 解析，导出函数统一 try/catch 兜底，**解析异常落失败结果并打日志**，
+ *    绝不让异常穿透到页面；失败不伪装成空（message 优先取接口 message）。
+ *  - 写操作（关注/取关/拉黑）不在本文件：与视频详情页共用 `api/play.uts#followMod`
+ *    （同一端点 /x/relation/modify，已含 getCsrf 前置校验与 act 泛化）。
+ *  - 投稿接口 -352 映射「风控校验失败，请检查登录状态」（源同款 errMap）。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+/** 投稿/动态接口的错误码文案（源 memberArchive / memberDynamic 的 errMap） */
+function riskControlMessage(code: number, fallback: string): string {
+	if (code == -352) {
+		return '风控校验失败，请检查登录状态'
+	}
+	return fallback
+}
+
+/** 源 Utils.base64EncodeRandomString(len, 64)：风控装饰字段，服务器只校验存在性 */
+function randomImgStr(len: number): string {
+	const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+	let out = ''
+	for (let i = 0; i < len; i++) {
+		const idx = Math.floor(Math.random() * chars.length)
+		out = out + chars.substring(idx, idx + 1)
+	}
+	// 源 substring(0, len-2)：等价去掉 base64 尾部 padding 的两位
+	return out.substring(0, len - 2)
+}
+
+// ---------------------------------------------------------------- 用户资料与统计
+
+async function fetchMemberInfoRaw(mid: number): Promise<MemberInfoResult> {
+	const result = new MemberInfoResult()
+	const params = new Params()
+	params.setNum('mid', mid)
+	params.set('token', '')
+	params.set('platform', 'web')
+	params.set('web_location', '1550101')
+	const res = await wbiGet('/x/space/wbi/acc/info', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		console.log('[member] info code=' + code.toString() + ' mid=' + mid.toString())
+		return result
+	}
+	result.info = MemberInfo.from(objOf(res, 'data'))
+	result.status = true
+	return result
+}
+
+/** 用户资料（WBI 签名） */
+export async function fetchMemberInfo(mid: number): Promise<MemberInfoResult> {
+	try {
+		return await fetchMemberInfoRaw(mid)
+	} catch (e) {
+		console.log('[member] fetchMemberInfo error mid=' + mid.toString())
+		console.log(e)
+		const failed = new MemberInfoResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function fetchRelationStatRaw(mid: number): Promise<RelationStatResult> {
+	const result = new RelationStatResult()
+	const params = new Params()
+	params.setNum('vmid', mid)
+	const res = await apiGet('/x/relation/stat', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	if (codeOf(res) != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		result.following = numOf(data, 'following')
+		result.follower = numOf(data, 'follower')
+	}
+	result.status = true
+	return result
+}
+
+/** 关注数/粉丝数 */
+export async function fetchRelationStat(mid: number): Promise<RelationStatResult> {
+	try {
+		return await fetchRelationStatRaw(mid)
+	} catch (e) {
+		console.log('[member] fetchRelationStat error mid=' + mid.toString())
+		console.log(e)
+		const failed = new RelationStatResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function fetchMemberUpstatRaw(mid: number): Promise<MemberUpstatResult> {
+	const result = new MemberUpstatResult()
+	const params = new Params()
+	params.setNum('mid', mid)
+	const res = await apiGet('/x/space/upstat', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	if (codeOf(res) != 0) {
+		// 该接口需登录 cookie；未登录失败是预期形态，页面按 '-' 展示（源 userStat['likes'] == null 同款）
+		result.message = messageOf(res)
+		console.log('[member] upstat code=' + codeOf(res).toString() + ' mid=' + mid.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		result.likes = numOf(data, 'likes')
+	}
+	result.status = true
+	return result
+}
+
+/** 获赞数（读-登录态；失败不阻塞页面，仅获赞列显示 '-'） */
+export async function fetchMemberUpstat(mid: number): Promise<MemberUpstatResult> {
+	try {
+		return await fetchMemberUpstatRaw(mid)
+	} catch (e) {
+		console.log('[member] fetchMemberUpstat error mid=' + mid.toString())
+		console.log(e)
+		const failed = new MemberUpstatResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function fetchRelationRaw(mid: number): Promise<RelationResult> {
+	const result = new RelationResult()
+	const params = new Params()
+	params.setNum('fid', mid)
+	const res = await apiGet('/x/relation', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	if (codeOf(res) != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		result.attribute = numOf(data, 'attribute')
+		result.special = numOf(data, 'special')
+	}
+	result.status = true
+	return result
+}
+
+/**
+ * 与某用户的关系（关注按钮状态机数据源：attribute + special）。
+ * 与 api/play.uts#hasFollow 的差异：这里同时取 special（SP 后缀需要）。
+ */
+export async function fetchRelation(mid: number): Promise<RelationResult> {
+	try {
+		return await fetchRelationRaw(mid)
+	} catch (e) {
+		console.log('[member] fetchRelation error mid=' + mid.toString())
+		console.log(e)
+		const failed = new RelationResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 投稿（arc/search）
+
+async function fetchMemberArchiveRaw(mid: number, pn: number, order: string, keyword: string): Promise<MemberArchiveResult> {
+	const result = new MemberArchiveResult()
+	const params = new Params()
+	params.setNum('mid', mid)
+	params.setNum('ps', 30)
+	params.setNum('tid', 0)
+	params.setNum('pn', pn)
+	params.set('keyword', keyword)
+	params.set('platform', 'web')
+	params.set('web_location', '1550101')
+	params.set('order_avoided', 'true')
+	params.set('dm_img_list', '[]')
+	params.set('dm_img_str', randomImgStr(64))
+	params.set('dm_cover_img_str', randomImgStr(128))
+	params.set('dm_img_inter', '{"ds":[],"wh":[0,0,0],"of":[0,0,0]}')
+	// 源同款：充电专属 = pubdate 排序 + special_type=charging
+	if (order == 'charge') {
+		params.set('order', 'pubdate')
+		params.set('special_type', 'charging')
+	} else {
+		params.set('order', order)
+	}
+	const res = await wbiGet('/x/space/wbi/arc/search', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = riskControlMessage(result.code, messageOf(res))
+		console.log('[member] archive code=' + result.code.toString() + ' mid=' + mid.toString() + ' pn=' + pn.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		const list = objOf(data, 'list')
+		if (list != null) {
+			const vlist = arrOf(list, 'vlist')
+			for (let i = 0; i < vlist.length; i++) {
+				result.items.push(VListItem.from(vlist[i]))
+			}
+		}
+		const page = objOf(data, 'page')
+		if (page != null) {
+			result.count = numOf(page, 'count')
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 投稿列表（member-archive 页与 member-search 投稿搜索共用；order：pubdate/click/stow/charge） */
+export async function fetchMemberArchive(mid: number, pn: number, order: string, keyword: string): Promise<MemberArchiveResult> {
+	try {
+		return await fetchMemberArchiveRaw(mid, pn, order, keyword)
+	} catch (e) {
+		console.log('[member] fetchMemberArchive error mid=' + mid.toString() + ' pn=' + pn.toString())
+		console.log(e)
+		const failed = new MemberArchiveResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 空间动态（feed/space）
+
+async function fetchMemberDynamicRaw(mid: number, offset: string): Promise<DynamicFeedResult> {
+	const result = new DynamicFeedResult()
+	const params = new Params()
+	params.set('offset', offset)
+	params.setNum('host_mid', mid)
+	params.set('timezone_offset', '-480')
+	params.set('features', 'itemOpusStyle')
+	const res = await apiGet('/x/polymer/web-dynamic/v1/feed/space', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = riskControlMessage(result.code, messageOf(res))
+		console.log('[member] dynamic code=' + result.code.toString() + ' mid=' + mid.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		result.offset = strOf(data, 'offset')
+		result.hasMore = data.getBoolean('has_more') == true
+		const items = arrOf(data, 'items')
+		for (let i = 0; i < items.length; i++) {
+			result.items.push(DynamicItem.from(items[i]))
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 某用户动态流（offset 分页；源：offset 空串起步、返回空串置 '-1' 终止） */
+export async function fetchMemberDynamic(mid: number, offset: string): Promise<DynamicFeedResult> {
+	try {
+		return await fetchMemberDynamicRaw(mid, offset)
+	} catch (e) {
+		console.log('[member] fetchMemberDynamic error mid=' + mid.toString())
+		console.log(e)
+		const failed = new DynamicFeedResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 主页合集面板
+
+async function fetchMemberSeasonsRaw(mid: number): Promise<MemberSeasonsResult> {
+	const result = new MemberSeasonsResult()
+	const params = new Params()
+	params.setNum('mid', mid)
+	params.setNum('page_num', 1)
+	params.setNum('page_size', 10)
+	const res = await apiGet('/x/polymer/web-space/home/seasons_series', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	if (codeOf(res) != 0) {
+		result.message = messageOf(res)
+		console.log('[member] seasons code=' + codeOf(res).toString() + ' mid=' + mid.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	const lists = data == null ? null : objOf(data, 'items_lists')
+	if (lists != null) {
+		// 源同款：seasons_list 与 series_list 拼接成一个面板列表
+		const seasons = arrOf(lists, 'seasons_list')
+		for (let i = 0; i < seasons.length; i++) {
+			result.items.push(MemberSeasonsItem.from(seasons[i]))
+		}
+		const series = arrOf(lists, 'series_list')
+		for (let i = 0; i < series.length; i++) {
+			result.items.push(MemberSeasonsItem.from(series[i]))
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 主页合集面板（seasons+series 拼接；页面侧截取前 4 条视频） */
+export async function fetchMemberSeasons(mid: number): Promise<MemberSeasonsResult> {
+	try {
+		return await fetchMemberSeasonsRaw(mid)
+	} catch (e) {
+		console.log('[member] fetchMemberSeasons error mid=' + mid.toString())
+		console.log(e)
+		const failed = new MemberSeasonsResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 最近投币 / 最近点赞
+
+async function fetchRecentCoinVideoRaw(mid: number): Promise<MemberListResult<MemberCoinsItem>> {
+	const result = new MemberListResult<MemberCoinsItem>()
+	const params = new Params()
+	params.setNum('mid', mid)
+	params.set('gaia_source', 'main_web')
+	params.set('web_location', '333.999')
+	const res = await wbiGet('/x/space/coin/video', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	if (codeOf(res) != 0) {
+		result.message = messageOf(res)
+		console.log('[member] coin code=' + codeOf(res).toString() + ' mid=' + mid.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	// coin 接口 data 为裸数组（源 res.data['data'].map 直接遍历）；objOf 只认对象，先走数组分支
+	const rawArray = res.getArray('data')
+	if (rawArray != null) {
+		for (let i = 0; i < rawArray.length; i++) {
+			const item = rawArray[i]
+			if (item != null) {
+				result.items.push(MemberCoinsItem.from(item as UTSJSONObject))
+			}
+		}
+	} else if (data != null) {
+		const list = arrOf(data, 'list')
+		for (let i = 0; i < list.length; i++) {
+			result.items.push(MemberCoinsItem.from(list[i]))
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 最近投币视频（读-登录态；未登录页面不请求） */
+export async function fetchRecentCoinVideo(mid: number): Promise<MemberListResult<MemberCoinsItem>> {
+	try {
+		return await fetchRecentCoinVideoRaw(mid)
+	} catch (e) {
+		console.log('[member] fetchRecentCoinVideo error mid=' + mid.toString())
+		console.log(e)
+		const failed = new MemberListResult<MemberCoinsItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function fetchRecentLikeVideoRaw(mid: number): Promise<MemberListResult<MemberLikeItem>> {
+	const result = new MemberListResult<MemberLikeItem>()
+	const params = new Params()
+	params.setNum('mid', mid)
+	params.set('gaia_source', 'main_web')
+	params.set('web_location', '333.999')
+	const res = await wbiGet('/x/space/like/video', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	if (codeOf(res) != 0) {
+		result.message = messageOf(res)
+		console.log('[member] like code=' + codeOf(res).toString() + ' mid=' + mid.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	const list = data == null ? [] : arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(MemberLikeItem.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+/** 最近点赞视频（读-登录态；data.list[] 形态） */
+export async function fetchRecentLikeVideo(mid: number): Promise<MemberListResult<MemberLikeItem>> {
+	try {
+		return await fetchRecentLikeVideoRaw(mid)
+	} catch (e) {
+		console.log('[member] fetchRecentLikeVideo error mid=' + mid.toString())
+		console.log(e)
+		const failed = new MemberListResult<MemberLikeItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 合集 / 系列详情
+
+async function fetchSeasonDetailRaw(mid: number, seasonId: number, pn: number): Promise<SeasonDetailResult> {
+	const result = new SeasonDetailResult()
+	const params = new Params()
+	params.setNum('mid', mid)
+	params.setNum('season_id', seasonId)
+	params.set('sort_reverse', 'false')
+	params.setNum('page_num', pn)
+	params.setNum('page_size', 30)
+	const res = await apiGet('/x/polymer/web-space/seasons_archives_list', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	if (codeOf(res) != 0) {
+		result.message = messageOf(res)
+		console.log('[member] season-detail code=' + codeOf(res).toString() + ' seasonId=' + seasonId.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		const archives = arrOf(data, 'archives')
+		for (let i = 0; i < archives.length; i++) {
+			result.items.push(MemberArchiveItem.from(archives[i]))
+		}
+		const page = objOf(data, 'page')
+		if (page != null) {
+			result.total = numOf(page, 'total')
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 合集详情（category=0；pn 递增分页） */
+export async function fetchSeasonDetail(mid: number, seasonId: number, pn: number): Promise<SeasonDetailResult> {
+	try {
+		return await fetchSeasonDetailRaw(mid, seasonId, pn)
+	} catch (e) {
+		console.log('[member] fetchSeasonDetail error seasonId=' + seasonId.toString())
+		console.log(e)
+		const failed = new SeasonDetailResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function fetchSeriesDetailRaw(mid: number, seriesId: number, pn: number, currentMid: number): Promise<SeasonDetailResult> {
+	const result = new SeasonDetailResult()
+	const params = new Params()
+	params.setNum('mid', mid)
+	params.setNum('series_id', seriesId)
+	params.set('only_normal', 'true')
+	params.set('sort', 'desc')
+	params.setNum('pn', pn)
+	params.setNum('ps', 30)
+	params.setNum('current_mid', currentMid)
+	const res = await apiGet('/x/series/archives', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	if (codeOf(res) != 0) {
+		result.message = messageOf(res)
+		console.log('[member] series-detail code=' + codeOf(res).toString() + ' seriesId=' + seriesId.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		const archives = arrOf(data, 'archives')
+		for (let i = 0; i < archives.length; i++) {
+			result.items.push(MemberArchiveItem.from(archives[i]))
+		}
+		const page = objOf(data, 'page')
+		if (page != null) {
+			result.total = numOf(page, 'total')
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 系列详情（category=1；currentMid 传登录用户 mid，未登录传 0） */
+export async function fetchSeriesDetail(mid: number, seriesId: number, pn: number, currentMid: number): Promise<SeasonDetailResult> {
+	try {
+		return await fetchSeriesDetailRaw(mid, seriesId, pn, currentMid)
+	} catch (e) {
+		console.log('[member] fetchSeriesDetail error seriesId=' + seriesId.toString())
+		console.log(e)
+		const failed = new SeasonDetailResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 图文专栏（w_webid 前置 + opus feed）
+
+/**
+ * 抓 space.bilibili.com/{mid}/article 页面 HTML，取 <script id="__RENDER_DATA__"> 的
+ * URL 编码 JSON，解出 access_id 作 w_webid（源 MemberHttp.getWWebid）。
+ *
+ * 走裸 uni.request 取文本（utils/request.uts 的 rawGet 只回 JSON 对象，HTML 会被
+ * JSON.parse 判失败返回 null，拿不到正文）；失败返回 status=false，调用方 fallback '-1'。
+ */
+function fetchWWebidRaw(mid: number): Promise<WWebidResult> {
+	return new Promise<WWebidResult>((resolve) => {
+		const result = new WWebidResult()
+		const url = 'https://space.bilibili.com/' + mid.toString() + '/article'
+		const header: UTSJSONObject = {}
+		header.set('referer', REFERER)
+		header.set('user-agent', UA_MOBILE)
+		uni.request({
+			url: url,
+			method: 'GET',
+			header: header,
+			timeout: REQUEST_TIMEOUT,
+			success: (res) => {
+				const html = res.data == null ? '' : (res.data as string)
+				const marker = '<script id="__RENDER_DATA__" type="application/json">'
+				const start = html.indexOf(marker)
+				if (start < 0) {
+					result.message = '请检查登录状态'
+					console.log('[member] wwebid marker missing mid=' + mid.toString() + ' status=' + res.statusCode.toString())
+					resolve(result)
+					return
+				}
+				const bodyStart = start + marker.length
+				const bodyEnd = html.indexOf('</script>', bodyStart)
+				if (bodyEnd < 0) {
+					result.message = '请检查登录状态'
+					resolve(result)
+					return
+				}
+				try {
+					const decoded = decodeURIComponent(html.substring(bodyStart, bodyEnd))
+					const map = JSON.parse<UTSJSONObject>(decoded)
+					if (map == null) {
+						result.message = '请检查登录状态'
+						resolve(result)
+						return
+					}
+					const accessId = map.getString('access_id')
+					if (accessId == null || accessId.length == 0) {
+						result.message = '请检查登录状态'
+						resolve(result)
+						return
+					}
+					result.webid = accessId
+					result.status = true
+					resolve(result)
+				} catch (e) {
+					result.message = '请检查登录状态'
+					console.log('[member] wwebid parse error mid=' + mid.toString())
+					console.log(e)
+					resolve(result)
+				}
+			},
+			fail: (err) => {
+				result.message = '网络异常，请稍后重试'
+				console.log('[member] wwebid request fail mid=' + mid.toString() + ' err=' + JSON.stringify(err))
+				resolve(result)
+			}
+		})
+	})
+}
+
+/** w_webid 前置（失败时页面 fallback '-1' + toast，源 controller.getWWebid 同款） */
+export async function fetchWWebid(mid: number): Promise<WWebidResult> {
+	try {
+		return await fetchWWebidRaw(mid)
+	} catch (e) {
+		console.log('[member] fetchWWebid error mid=' + mid.toString())
+		console.log(e)
+		const failed = new WWebidResult()
+		failed.message = '请检查登录状态'
+		return failed
+	}
+}
+
+async function fetchMemberArticleRaw(mid: number, page: number, offset: string, wWebid: string): Promise<MemberArticleResult> {
+	const result = new MemberArticleResult()
+	const params = new Params()
+	params.setNum('host_mid', mid)
+	params.setNum('page', page)
+	params.set('offset', offset)
+	params.set('web_location', '333.999')
+	params.set('w_webid', wWebid)
+	const res = await wbiGet('/x/polymer/web-dynamic/v1/opus/feed/space', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		console.log('[member] article code=' + code.toString() + ' mid=' + mid.toString() + ' page=' + page.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		result.offset = strOf(data, 'offset')
+		result.hasMore = data.getBoolean('has_more') == true
+		const items = arrOf(data, 'items')
+		for (let i = 0; i < items.length; i++) {
+			result.items.push(MemberArticleItem.from(items[i]))
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 图文专栏列表（page + offset 双游标；w_webid 由 fetchWWebid 前置取得） */
+export async function fetchMemberArticle(mid: number, page: number, offset: string, wWebid: string): Promise<MemberArticleResult> {
+	try {
+		return await fetchMemberArticleRaw(mid, page, offset, wWebid)
+	} catch (e) {
+		console.log('[member] fetchMemberArticle error mid=' + mid.toString())
+		console.log(e)
+		const failed = new MemberArticleResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}

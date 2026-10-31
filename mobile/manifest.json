@@ -1,0 +1,16 @@
+{
+	"name": "PiliPala",
+	"appid": "__UNI__M69EE4A1",
+	"description": "哔哩哔哩第三方客户端（uni-app x 迁移工程）",
+	"versionName": "1.0.25",
+	"versionCode": 1025,
+	"uni-app-x": {
+		"vapor": true,
+		"styleIsolationVersion": "2",
+		"vapor-render-target": "bytecode"
+	},
+	"vueVersion": "3",
+	"web": {
+		"router": { "base": "/", "mode": "" }
+	}
+}

@@ -1,0 +1,349 @@
+<template>
+	<view class="mp" :style="pageStyle">
+		<!-- 顶部：状态栏避让 + 标题「媒体库」（源 AppBar(toolbarHeight:30) + ListTile 标题） -->
+		<view class="mp-head" :style="headStyle">
+			<text class="mp-title" :style="titleStyle">媒体库</text>
+		</view>
+
+		<scroll-view class="mp-scroll">
+			<!-- 5 入口行（源 media/controller.list：图标主色 + 标题 15） -->
+			<view v-for="entry in entries" :key="entry.title" class="mp-entry" @click="onEntry(entry.path)">
+				<view class="mp-entry-icon">
+					<text class="mp-entry-glyph" :style="primaryGlyphStyle">{{ entry.glyph }}</text>
+				</view>
+				<text class="mp-entry-title" :style="entryTitleStyle">{{ entry.title }}</text>
+			</view>
+
+			<!-- 登录后：分割线 + 收藏夹 N 标题行（刷新）+ 横滑预览（ps=5） -->
+			<view v-if="isLogin" class="mp-fav">
+				<view class="mp-divider" :style="dividerStyle"></view>
+				<view class="mp-fav-head" @click="openFavList">
+					<view class="mp-fav-title-wrap">
+						<text class="mp-fav-title" :style="titleStyle">收藏夹 </text>
+						<text class="mp-fav-count" :style="primaryTextStyle">{{ countText }}</text>
+					</view>
+					<view class="mp-refresh" @click.stop="reloadFolders">
+						<text class="mp-refresh-glyph" :style="glyphStyle">{{ refreshGlyph }}</text>
+					</view>
+				</view>
+
+				<view v-if="folderState == 'loading'" class="mp-fav-skeleton">
+					<view v-for="n in 3" :key="'sk-' + n.toString()" class="mp-sk-item">
+						<skeleton-block width="180px" height="110px" radius="12px"></skeleton-block>
+					</view>
+				</view>
+				<view v-else-if="folderState == 'error'" class="mp-fav-error" @click="reloadFolders">
+					<text class="mp-fav-error-text" :style="secondaryStyle">{{ folderError }}</text>
+					<text class="mp-fav-retry" :style="primaryTextStyle">点击重试</text>
+				</view>
+				<scroll-view v-else-if="folders.length > 0" class="mp-hscroll" direction="horizontal" :show-scrollbar="false">
+					<view class="mp-hrow">
+						<view class="mp-hpad"></view>
+						<view v-for="folder in folders" :key="folder.id" class="mp-hitem">
+							<fav-folder-mini
+								:cover="folder.cover"
+								:title="folder.title"
+								:media-count="folder.mediaCount"
+								@tap="openFavDetail(folder.id)"
+							></fav-folder-mini>
+						</view>
+						<view v-if="hasMore" class="mp-more" :style="moreStyle" @click="openFavList">
+							<text class="mp-more-glyph" :style="primaryTextStyle">{{ arrowGlyph }}</text>
+						</view>
+						<view class="mp-hpad"></view>
+					</view>
+				</scroll-view>
+			</view>
+
+			<view class="mp-bottom" :style="bottomStyle"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch, onMounted } from 'vue'
+import SkeletonBlock from '../skeleton/skeleton-block.uvue'
+import FavFolderMini from '../fav/fav-folder-mini.uvue'
+import { fetchFavFolder } from '../../api/fav.uts'
+import { FavFolderItem } from '../../models/fav.uts'
+import { userState } from '../../stores/user.uts'
+import { themeColor, currentThemeIndex, pageBackground, textPrimary, textSecondary, withAlpha } from '../../utils/theme.uts'
+import { statusBarPaddingTop, statusBarHeight, safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 媒体库面板（源头：lib/pages/media/{view,controller}.dart）。
+ *
+ * 组件形态（不注册路由）：main 第四 tab 的挂载体（集成阶段替换占位）。
+ * 结构：标题「媒体库」→ 5 入口行（离线缓存=toast「功能开发中」源行为一致，非假入口；
+ * 其余 4 项跳 history/fav/subscription/later）→ 登录后收藏夹预览（ps=5 横滑 180×110 小卡，
+ * count>5 尾项「更多」圆钮跳 fav 列表，源同款）。
+ * 登录态变化：watch userState.isLogin 自动重取（设计 §三 常驻保活要求）。
+ * 图标码点（项目字体 cmap 已核对）：file_download=E2C4 / history=E889 /
+ * 码点按本机 Flutter 3.3.10 icons.dart 反查（源 media/controller.list：file_download_outlined/
+ * history/star_border/subscriptions_outlined/watch_later_outlined + refresh/arrow_forward_ios）：
+ * F05B / E314 / E5FA / F3FB / F4B1 / E514 / E09C。
+ */
+const glyphDownload: string = '\uf05b'
+const glyphHistory: string = '\ue314'
+const glyphStar: string = '\ue5fa'
+const glyphSubs: string = '\uf3fb'
+const glyphLater: string = '\uf4b1'
+const refreshGlyph: string = '\ue514'
+const arrowGlyph: string = '\ue09c'
+
+class MediaEntry {
+	title: string = ''
+	glyph: string = ''
+	/** 空串 = 无路由（离线缓存 toast） */
+	path: string = ''
+}
+
+const entries: Array<MediaEntry> = ((): Array<MediaEntry> => {
+	const list: Array<MediaEntry> = []
+	const conf: Array<Array<string>> = [
+		['离线缓存', glyphDownload, ''],
+		['观看记录', glyphHistory, '/pages/history/history'],
+		['我的收藏', glyphStar, '/pages/fav/fav'],
+		['我的订阅', glyphSubs, '/pages/subscription/subscription'],
+		['稍后再看', glyphLater, '/pages/later/later']
+	]
+	for (let i = 0; i < conf.length; i++) {
+		const entry = new MediaEntry()
+		entry.title = conf[i][0]
+		entry.glyph = conf[i][1]
+		entry.path = conf[i][2]
+		list.push(entry)
+	}
+	return list
+})()
+
+const PREVIEW_SIZE: number = 5
+
+const folders = ref<Array<FavFolderItem>>([])
+const folderCount = ref<number>(0)
+const folderState = ref<string>('idle')
+const folderError = ref<string>('')
+
+const primary = themeColor(currentThemeIndex())
+const isLogin = computed((): boolean => userState.isLogin)
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const headStyle = computed((): string => 'height:' + (statusBarHeight() + 52).toString() + 'px;' + statusBarPaddingTop(0))
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const glyphStyle = computed((): string => 'color:' + textPrimary() + ';font-family:MaterialIcons;')
+const primaryGlyphStyle = computed((): string => 'color:' + primary + ';font-family:MaterialIcons;')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const entryTitleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const dividerStyle = computed((): string => 'background-color:' + withAlpha(textSecondary(), 0.12) + ';')
+const moreStyle = computed((): string => 'background-color:' + withAlpha(primary, 0.12) + ';')
+const bottomStyle = computed((): string => 'height:' + (90 + safeAreaBottom()).toString() + 'px;')
+
+const countText = computed((): string => folderCount.value.toString())
+const hasMore = computed((): boolean => folderCount.value > folders.value.length)
+
+async function loadFolders() {
+	if (!userState.isLogin) {
+		folders.value = []
+		folderCount.value = 0
+		folderState.value = 'idle'
+		return
+	}
+	folderState.value = 'loading'
+	const res = await fetchFavFolder(userState.info.mid, 1, PREVIEW_SIZE)
+	if (!res.status) {
+		folderState.value = 'error'
+		folderError.value = res.message.length > 0 ? res.message : '请求异常'
+		return
+	}
+	folders.value = res.items
+	folderCount.value = res.page.count
+	folderState.value = res.items.length > 0 ? 'ready' : 'empty'
+}
+
+function reloadFolders() {
+	loadFolders()
+}
+
+/** 入口分发：空路由 = 离线缓存（源 toast「功能开发中」）；其余跳真实页面 */
+function onEntry(path: string) {
+	if (path.length == 0) {
+		uni.showToast({ title: '功能开发中', icon: 'none' })
+		return
+	}
+	uni.navigateTo({ url: path })
+}
+
+function openFavList() {
+	uni.navigateTo({ url: '/pages/fav/fav' })
+}
+
+function openFavDetail(mediaId: number) {
+	uni.navigateTo({ url: '/pages/fav-detail/fav-detail?mediaId=' + mediaId.toString() + '&isOwner=1' })
+}
+
+onMounted(() => {
+	loadFolders()
+})
+
+// 登录态变化（登录/退出返回）自动重取预览
+watch(isLogin, () => {
+	loadFolders()
+})
+</script>
+
+<style>
+	.mp {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* 标题区（源 AppBar 30 + ListTile 标题左移 20） */
+	.mp-head {
+		height: 52px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 20px;
+	}
+	.mp-title {
+		font-size: 22px;
+		font-weight: 700;
+	}
+	.mp-scroll {
+		flex: 1;
+	}
+	/* 入口行（源 ListTile dense：图标主色 + 标题 15，行内边距 left 15+10） */
+	.mp-entry {
+		height: 52px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 25px;
+		padding-right: 12px;
+	}
+	.mp-entry-icon {
+		width: 32px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mp-entry-glyph {
+		font-size: 22px;
+		line-height: 22px;
+	}
+	.mp-entry-title {
+		font-size: 15px;
+		margin-left: 10px;
+	}
+	.mp-fav {
+		display: flex;
+		flex-direction: column;
+	}
+	.mp-divider {
+		height: 1px;
+		margin-top: 17px;
+		margin-bottom: 17px;
+		margin-left: 12px;
+		margin-right: 12px;
+	}
+	.mp-fav-head {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 20px;
+		padding-right: 12px;
+	}
+	.mp-fav-title-wrap {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.mp-fav-title {
+		font-size: 16px;
+		font-weight: 700;
+	}
+	.mp-fav-count {
+		font-size: 14px;
+	}
+	.mp-refresh {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mp-refresh-glyph {
+		font-size: 20px;
+		line-height: 20px;
+	}
+	/* 横滑预览（横向 scroll-view 三要素：row + 定宽 + 子项不收缩） */
+	.mp-hscroll {
+		width: 100%;
+		height: 170px;
+	}
+	.mp-hrow {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		padding-top: 12px;
+	}
+	.mp-hpad {
+		width: 14px;
+		flex-shrink: 0;
+	}
+	/* 横滑子项不收缩（横向 scroll-view 三要素之一）；卡间距由本容器承担（fav-folder-mini 不再自带边距） */
+	.mp-hitem {
+		flex-shrink: 0;
+		margin-left: 6px;
+		margin-right: 6px;
+	}
+	.mp-fav-skeleton {
+		display: flex;
+		flex-direction: row;
+		padding-top: 12px;
+		padding-left: 14px;
+	}
+	.mp-sk-item {
+		margin-right: 12px;
+	}
+	.mp-fav-error {
+		height: 120px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mp-fav-error-text {
+		font-size: 13px;
+	}
+	.mp-fav-retry {
+		font-size: 13px;
+		margin-left: 10px;
+	}
+	/* 尾项「更多」圆钮（源 primaryContainer 半透明底 + 主色箭头） */
+	.mp-more {
+		width: 44px;
+		height: 44px;
+		border-radius: 22px;
+		margin-top: 33px;
+		margin-left: 6px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+	}
+	.mp-more-glyph {
+		font-family: MaterialIcons;
+		font-size: 18px;
+		line-height: 18px;
+	}
+	.mp-bottom {
+		width: 100%;
+	}
+</style>

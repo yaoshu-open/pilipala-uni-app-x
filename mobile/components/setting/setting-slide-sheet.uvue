@@ -1,0 +1,162 @@
+<template>
+	<!-- 常驻 + display 切换：App 端 v-if 转 false 不卸载节点（P8/P9 已复现），弹层必须走 display -->
+	<view class="ss-mask" :style="maskStyle" @click="onCancel">
+		<view class="ss-dialog" :style="dialogStyle" @click.stop="noop">
+			<text class="ss-title" :style="titleStyle">{{ title }}</text>
+			<view class="ss-value-row">
+				<text class="ss-value" :style="valueTextStyle">{{ valueText }}</text>
+			</view>
+			<slider
+				class="ss-slider"
+				:min="min"
+				:max="max"
+				:step="step"
+				:value="draft"
+				:activeColor="primary"
+				backgroundColor="#D8DCE3"
+				block-size="20"
+				@changing="onSliding"
+				@change="onSliding"
+			></slider>
+			<view class="ss-actions">
+				<view class="ss-btn" @click.stop="onCancel">
+					<text class="ss-cancel" :style="secondaryStyle">取消</text>
+				</view>
+				<view class="ss-btn" @click.stop="onConfirm">
+					<text class="ss-ok" :style="okStyle">确定</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import { cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 滑条弹层（源头：`lib/pages/setting/widgets/slide_dialog.dart` —— AlertDialog + Slider）。
+ *
+ * 用法：图片质量（10~100，步进 10）与 Toast 不透明度（0.1~1.0，步进 0.1）共用。
+ *  - 点遮罩/取消 = 放弃（不写键）；点确定 = 抛 `confirm(数值)`，由页面写键并 toast；
+ *  - `visible` 由父页持有，页面级 onBackPress 负责关闭（组件内钩子无效）；
+ *  - 草稿值在弹层打开时从 `value` 同步（watch），拖动只改草稿，确定才提交。
+ */
+const props = defineProps({
+	visible: { type: Boolean, default: false },
+	title: { type: String, default: '' },
+	value: { type: Number, default: 0 },
+	min: { type: Number, default: 0 },
+	max: { type: Number, default: 100 },
+	step: { type: Number, default: 10 },
+	/** 展示后缀（如 '%'）；空串表示只显示数值 */
+	suffix: { type: String, default: '' }
+})
+
+const emit = defineEmits(['confirm', 'close'])
+
+const primary: string = themeColor(currentThemeIndex())
+const dialogStyle: string = 'background-color:' + cardBackground() + ';'
+const titleStyle: string = 'color:' + textPrimary() + ';'
+const secondaryStyle: string = 'color:' + textSecondary() + ';'
+const okStyle: string = 'color:' + primary + ';'
+const valueTextStyle: string = 'color:' + textPrimary() + ';'
+
+const draft = ref<number>(props.value)
+
+const maskStyle = computed((): string => props.visible ? '' : 'display:none;')
+
+const valueText = computed((): string => {
+	// 0.1 步进的浮点尾数收敛到一位小数；整数档位不带小数点
+	const raw = Math.round(draft.value * 100) / 100
+	const text = raw == Math.floor(raw) ? raw.toFixed(0) : raw.toFixed(1)
+	return text + props.suffix
+})
+
+watch((): boolean => props.visible, (visible: boolean) => {
+	if (visible) {
+		draft.value = props.value
+	}
+})
+
+function noop() {}
+
+function onSliding(event: UniSliderChangeEvent) {
+	const precision = props.step >= 1 ? 0 : (props.step >= 0.1 ? 1 : 2)
+	const factor = precision == 0 ? 1 : (precision == 1 ? 10 : 100)
+	draft.value = Math.round(event.detail.value * factor) / factor
+}
+
+function onCancel() {
+	emit('close')
+}
+
+function onConfirm() {
+	emit('confirm', draft.value)
+	emit('close')
+}
+</script>
+
+<style>
+	.ss-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.ss-dialog {
+		width: 300px;
+		border-radius: 14px;
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 20px;
+		padding-bottom: 8px;
+		display: flex;
+		flex-direction: column;
+	}
+	.ss-title {
+		font-size: 17px;
+		font-weight: bold;
+	}
+	.ss-value-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		margin-top: 12px;
+	}
+	.ss-value {
+		font-size: 18px;
+		font-weight: bold;
+	}
+	.ss-slider {
+		margin-top: 4px;
+	}
+	.ss-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+	}
+	.ss-btn {
+		min-height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 14px;
+	}
+	.ss-cancel {
+		font-size: 14px;
+	}
+	.ss-ok {
+		font-size: 14px;
+		font-weight: bold;
+	}
+</style>

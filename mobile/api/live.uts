@@ -1,0 +1,681 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { LIVE_BASE } from '../utils/constants.uts'
+import { objOf, arrOf, strOf, numOf } from '../utils/json.uts'
+import { getNumber, SK } from '../utils/storage.uts'
+import { ListResult } from '../models/video.uts'
+import { ActionResult } from '../models/video-detail.uts'
+import {
+	LiveItem, LivePlayData, LivePlayFormat, LiveRoomH5, LiveDanmakuInfo, LiveDanmakuHost,
+	LiveFollowingItem,
+	LivePlayResult, LiveH5Result, LiveDanmakuInfoResult
+} from '../models/live.uts'
+import { numFormat } from '../utils/format.uts'
+
+/**
+ * 直播域接口层（源头：lib/http/live.dart 的相关条目，端点与参数见 设计_直播域 §三）。
+ *
+ * 约定与 P3/P4 接口层一致：内部 xxxRaw 负责请求 + 解析，导出函数统一 try/catch 兜底，
+ * 解析异常落失败结果并打日志；失败不伪装成空（message 优先接口文案）。
+ * 写操作（发弹幕/进房上报）统一带 csrf：取不到时明确失败，不静默当成功（utils/request.uts#getCsrf 取数限制）。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+/** 带 csrf 的写请求（同 api/play.uts#postWithCsrf 口径，直播域独立一份便于日志定位） */
+async function postWithCsrf(path: string, params: Params): Promise<ActionResult> {
+	const result = new ActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[live] csrf empty path=' + path)
+		return result
+	}
+	const body = params.clone()
+	body.set('csrf', csrf)
+	const res = await apiPost(path, body.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[live] post fail path=' + path + ' code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+// ---------------------------------------------------------------- 直播列表
+
+async function liveListRaw(page: number, pageSize: number): Promise<ListResult<LiveItem>> {
+	const result = new ListResult<LiveItem>()
+	const params = new Params()
+	params.setNum('page', page)
+	params.setNum('page_size', pageSize)
+	params.set('platform', 'web')
+	const res = await apiGet(LIVE_BASE + '/xlive/web-interface/v1/second/getUserRecommend', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		console.log('[live] list code=' + code.toString() + ' page=' + page.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(LiveItem.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+/**
+ * 直播推荐列表（分页 page 递增，空页由调用方停页）。
+ *
+ * 上游可用性兜底：`getUserRecommend` 在部分网络/风控档位下直接回 `-352`（本项目实测：本机与真机同款，
+ * 旧版 App 也回 -352 并显示错误页）。此时改取官方同用途的 web 直播首页接口
+ * `xlive/web-interface/v1/index/getList`（recommend_room_list + 分区 room_list，字段足以填同一张卡），
+ * 保证列表可用；两路都失败才回错误态（原样返回首路 message，不掩盖根因）。
+ * 该兜底是「数据源可用性」差异，非视觉/行为差异，已登记 设计_直播域 §三。
+ */
+export async function liveList(page: number, pageSize: number): Promise<ListResult<LiveItem>> {
+	try {
+		const primary = await liveListRaw(page, pageSize)
+		if (primary.status) {
+			return primary
+		}
+		if (page <= 1) {
+			console.log('[live] recommend fail, fallback index/getList msg=' + primary.message)
+			const fallback = await liveListViaIndexRaw()
+			if (fallback.status) {
+				return fallback
+			}
+			console.log('[live] fallback also failed: ' + fallback.message)
+		}
+		return primary
+	} catch (e) {
+		console.log('[live] liveList error page=' + page.toString())
+		console.log(e)
+		const failed = new ListResult<LiveItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** index/getList 的房卡字段名与 getRoomRecommend 不同（roomid/area_v2_name），单独映射 */
+function liveItemFromIndex(obj: UTSJSONObject): LiveItem {
+	const item = new LiveItem()
+	item.roomId = numOf(obj, 'roomid')
+	item.uid = numOf(obj, 'uid')
+	item.title = strOf(obj, 'title')
+	item.uname = strOf(obj, 'uname')
+	item.online = numOf(obj, 'online')
+	item.cover = strOf(obj, 'cover')
+	item.face = strOf(obj, 'face')
+	item.areaName = strOf(obj, 'area_v2_name')
+	item.parentName = strOf(obj, 'area_v2_parent_name')
+	const watched = objOf(obj, 'watched_show')
+	if (watched != null) {
+		item.watchedText = strOf(watched, 'text_small')
+	}
+	if (item.watchedText.length == 0 && item.online > 0) {
+		// 兜底卡没有 watched_show 时按在线人数格式化（与 text_small 同口径：1.2万）
+		item.watchedText = numFormat(item.online)
+	}
+	return item
+}
+
+/**
+ * 列表兜底数据源（web 直播首页）：recommend_room_list 在前、各分区模块的 room 列表按 roomId 去重补充。
+ * 该接口无分页游标，一次取满即判无更多（调用方按空页停页逻辑处理）。
+ */
+async function liveListViaIndexRaw(): Promise<ListResult<LiveItem>> {
+	const result = new ListResult<LiveItem>()
+	const params = new Params()
+	params.set('platform', 'web')
+	const res = await apiGet(LIVE_BASE + '/xlive/web-interface/v1/index/getList', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	const seen: Map<number, boolean> = new Map<number, boolean>()
+	const recommend = arrOf(data, 'recommend_room_list')
+	for (let i = 0; i < recommend.length; i++) {
+		const item = liveItemFromIndex(recommend[i])
+		if (item.roomId <= 0 || seen.has(item.roomId)) {
+			continue
+		}
+		seen.set(item.roomId, true)
+		result.items.push(item)
+	}
+	const modules = arrOf(data, 'room_list')
+	for (let m = 0; m < modules.length; m++) {
+		const rooms = arrOf(modules[m], 'list')
+		for (let i = 0; i < rooms.length; i++) {
+			const item = liveItemFromIndex(rooms[i])
+			if (item.roomId <= 0 || seen.has(item.roomId)) {
+				continue
+			}
+			seen.set(item.roomId, true)
+			result.items.push(item)
+		}
+	}
+	result.status = result.items.length > 0
+	if (!result.status) {
+		result.message = '暂无直播内容'
+	}
+	console.log('[live] fallback index/getList rooms=' + result.items.length.toString())
+	return result
+}
+
+// ---------------------------------------------------------------- 关注中正在直播
+
+async function liveFollowingRaw(page: number, pageSize: number): Promise<ListResult<LiveFollowingItem>> {
+	const result = new ListResult<LiveFollowingItem>()
+	const params = new Params()
+	params.setNum('page', page)
+	params.setNum('page_size', pageSize)
+	params.set('platform', 'web')
+	params.setNum('ignoreRecord', 1)
+	params.set('hit_ab', 'true')
+	const res = await apiGet(LIVE_BASE + '/xlive/web-ucenter/user/following', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		console.log('[live] following code=' + code.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.status = true
+		return result
+	}
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		const item = LiveFollowingItem.from(list[i])
+		// 源过滤：只留正在直播（liveStatus==1 且非轮播）
+		if (item.roomId > 0 && item.liveStatus == 1 && item.recordLiveTime == 0) {
+			result.items.push(item)
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 关注中正在直播的主播（首页直播频道「我的关注」横滑行；未登录时接口失败，调用方按空行处理） */
+export async function liveFollowing(page: number, pageSize: number): Promise<ListResult<LiveFollowingItem>> {
+	try {
+		return await liveFollowingRaw(page, pageSize)
+	} catch (e) {
+		console.log('[live] liveFollowing error')
+		console.log(e)
+		const failed = new ListResult<LiveFollowingItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 拉流（getRoomPlayInfo）
+
+async function liveRoomInfoRaw(roomId: number, qn: number): Promise<LivePlayResult> {
+	const result = new LivePlayResult()
+	const params = new Params()
+	params.setNum('room_id', roomId)
+	// 协议/格式/编码全开。注意必须写成不带空格的逗号串：源码写作 '0, 1'（Dart 侧编码后服务端可容错），
+	// 本端经 encodeURIComponent 后变成 '0%2C%201'，服务端解析 ' 1' 失败 → 只回 http_stream/flv 一种流
+	// （真机实测：带空格时 streams=1 且无任何 HLS 格式，取流即误判「不支持」）。
+	params.set('protocol', '0,1')
+	params.set('format', '0,1,2')
+	params.set('codec', '0,1')
+	if (qn > 0) {
+		params.setNum('qn', qn)
+	}
+	params.set('platform', 'web')
+	params.setNum('ptype', 8)
+	params.setNum('dolby', 5)
+	params.setNum('panorama', 1)
+	const res = await apiGet(LIVE_BASE + '/xlive/web-room/v2/index/getRoomPlayInfo', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.message = messageOf(res)
+	const code = codeOf(res)
+	if (code != 0) {
+		console.log('[live] playInfo code=' + code.toString() + ' room=' + roomId.toString())
+		return result
+	}
+	const dataObj = objOf(res, 'data')
+	if (dataObj == null) {
+		result.message = '数据解析异常，请稍后重试'
+		console.log('[live] playInfo no data room=' + roomId.toString())
+		return result
+	}
+	const playUrlInfo = objOf(dataObj, 'playurl_info')
+	if (playUrlInfo == null) {
+		result.message = '数据解析异常，请稍后重试'
+		console.log('[live] playInfo no playurl_info room=' + roomId.toString())
+		return result
+	}
+	const playUrl = objOf(playUrlInfo, 'playurl')
+	if (playUrl == null) {
+		result.message = '数据解析异常，请稍后重试'
+		console.log('[live] playInfo no playurl room=' + roomId.toString())
+		return result
+	}
+	const data = LivePlayData.from(playUrl)
+	// is_portrait 在 data 层（源 controller 用 RoomInfoModel 的 isPortrait 字段，同层）
+	data.isPortrait = boolOfField(dataObj, 'is_portrait')
+	result.data = data
+	result.status = true
+	console.log('[live] playInfo ok room=' + roomId.toString() + ' streams=' + data.streamList.length.toString())
+	return result
+}
+
+function boolOfField(obj: UTSJSONObject, key: string): boolean {
+	// is_portrait 为 boolean；个别端/版本可能回 0/1，两种形态都兜住
+	const b = obj.getBoolean(key)
+	if (b != null) {
+		return b
+	}
+	const n = obj.getNumber(key)
+	if (n != null) {
+		return n == 1
+	}
+	return false
+}
+
+/** 拉流信息（qn<=0 不传画质参数，服务端按默认画质返回；current_qn 校验随画质切换功能后置） */
+export async function liveRoomInfo(roomId: number, qn: number): Promise<LivePlayResult> {
+	try {
+		return await liveRoomInfoRaw(roomId, qn)
+	} catch (e) {
+		console.log('[live] liveRoomInfo error room=' + roomId.toString())
+		console.log(e)
+		const failed = new LivePlayResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 从拉流结果遍历取第一个 HLS 地址（D3 决策：先 HLS 兜底，FLV 后置）。
+ *
+ * 源（libmpv）取 format[0].codec[0] 不区分协议；新端内置 video 仅稳 HLS：
+ * 遍历全部 stream 的全部 format，format_name 为 fmp4/ts（HLS 形态）时取 codec[0]（AVC 优先），
+ * 拼 url_info[0].host + base_url + extra。
+ * 全无 HLS → 返回空串（调用方落「流格式暂不支持(FLV)」错误态，不回退硬播 FLV——ExoPlayer 对
+ * FLV 支持不保证，静默硬播等于把失败推迟到播放中途，违反错误态真实呈现原则）。
+ *
+ * 线路：取 url_info[0]（服务端默认线路）；`enableCdn` 开启时按源 `VideoUtils.getCdnUrl` 同款规则改写
+ * （mcdn 走 proxy-tf-all-ws 代理、/upgcxcode/ 换 ali 镜像域），关闭时用原始线路。
+ */
+export function pickLiveHlsUrl(data: LivePlayData, enableCdn: boolean): string {
+	for (let s = 0; s < data.streamList.length; s++) {
+		const stream = data.streamList[s]
+		for (let f = 0; f < stream.formatList.length; f++) {
+			const format = stream.formatList[f]
+			if (!LivePlayFormat.isHls(format)) {
+				continue
+			}
+			if (format.codecList.length == 0) {
+				continue
+			}
+			const codec = format.codecList[0]
+			if (codec.baseUrl.length == 0) {
+				continue
+			}
+			let raw = codec.baseUrl
+			if (codec.urlInfo.length > 0 && codec.urlInfo[0].host.length > 0) {
+				raw = codec.urlInfo[0].host + codec.baseUrl + codec.urlInfo[0].extra
+			}
+			if (raw.length == 0) {
+				continue
+			}
+			return enableCdn ? cdnUrlOf(raw) : raw
+		}
+	}
+	return ''
+}
+
+/**
+ * CDN 优选（源头：lib/utils/video_utils.dart#getCdnUrl 的 CodecItem 分支）。
+ *  - mcdn 节点（PCDN，常见丢流）改走官方代理 `proxy-tf-all-ws.bilivideo.com`；
+ *  - `/upgcxcode/` 路径换 ali 镜像域（源 cdnList 取 'ali'）。
+ * 本端不引入源里按 CDN 名单筛选多线路的逻辑（源 enableCDN 关闭时同样只用 url_info[0]，无额外事实可依）。
+ */
+function cdnUrlOf(videoUrl: string): string {
+	if (videoUrl.indexOf('.mcdn.bilivideo') >= 0) {
+		return 'https://proxy-tf-all-ws.bilivideo.com/?url=' + encodeURIComponent(videoUrl)
+	}
+	const marker = '/upgcxcode/'
+	const idx = videoUrl.indexOf(marker)
+	if (idx >= 0) {
+		return 'https://upos-sz-mirrorali.bilivideo.com' + videoUrl.substring(idx)
+	}
+	return videoUrl
+}
+
+/** 画质态（控制条画质菜单 + current_qn 校验用） */
+export class LiveQualityState {
+	/** 服务端实际回包画质（源 controller：以服务端 current_qn 为准） */
+	currentQn: number = 0
+	/** 可切换档位（服务端 accept_qn） */
+	acceptQn: Array<number> = []
+}
+
+/** 取首个 HLS codec 的画质态；无 HLS 流时返回空态（currentQn=0） */export function qualityStateOf(data: LivePlayData): LiveQualityState {
+	const state = new LiveQualityState()
+	for (let s = 0; s < data.streamList.length; s++) {
+		const stream = data.streamList[s]
+		for (let f = 0; f < stream.formatList.length; f++) {
+			const format = stream.formatList[f]
+			if (!LivePlayFormat.isHls(format) || format.codecList.length == 0) {
+				continue
+			}
+			const codec = format.codecList[0]
+			state.currentQn = codec.currentQn
+			for (let i = 0; i < codec.acceptQn.length; i++) {
+				state.acceptQn.push(codec.acceptQn[i])
+			}
+			return state
+		}
+	}
+	return state
+}
+
+/** 流形态摘要（诊断用：逐层列出 protocol/format 名，便于判断是「拿不到流」还是「只回了 FLV」） */
+export function formatSummaryOf(data: LivePlayData): string {
+	const parts: Array<string> = []
+	for (let s = 0; s < data.streamList.length; s++) {
+		const stream = data.streamList[s]
+		for (let f = 0; f < stream.formatList.length; f++) {
+			parts.push(stream.protocolName + '/' + stream.formatList[f].formatName)
+		}
+	}
+	return parts.join(',')
+}
+
+// ---------------------------------------------------------------- 房间 H5 信息（顶栏/背景）
+
+async function liveRoomInfoH5Raw(roomId: number): Promise<LiveH5Result> {
+	const result = new LiveH5Result()
+	const params = new Params()
+	params.setNum('room_id', roomId)
+	const res = await apiGet(LIVE_BASE + '/xlive/web-room/v1/index/getH5InfoByRoom', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		console.log('[live] h5 code=' + code.toString() + ' room=' + roomId.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	result.data = LiveRoomH5.from(data)
+	result.status = true
+	return result
+}
+
+/** 房间 H5 信息（主播昵称/头像/观看数/关键帧/背景图/开播状态） */
+export async function liveRoomInfoH5(roomId: number): Promise<LiveH5Result> {
+	try {
+		return await liveRoomInfoH5Raw(roomId)
+	} catch (e) {
+		console.log('[live] liveRoomInfoH5 error room=' + roomId.toString())
+		console.log(e)
+		const failed = new LiveH5Result()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 弹幕连接信息
+
+async function liveDanmakuInfoRaw(roomId: number): Promise<LiveDanmakuInfoResult> {
+	const result = new LiveDanmakuInfoResult()
+	const params = new Params()
+	params.setNum('id', roomId)
+	const res = await apiGet(LIVE_BASE + '/xlive/web-room/v1/index/getDanmuInfo', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		console.log('[live] danmuInfo code=' + code.toString() + ' room=' + roomId.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	result.data = LiveDanmakuInfo.from(data)
+	result.status = true
+	return result
+}
+
+/**
+ * 弹幕连接信息的备用来源：`room/v1/Danmu/getConf`（老版 web 同用途接口，回 token + host_server_list）。
+ *
+ * 为什么需要：`getDanmuInfo` 在风控档位下直接回 `-352`（本项目实测：主机与真机同款），
+ * 而 getConf 同环境可用（code=0 带 token）。两者都是官方「取弹幕服务器与鉴权 token」的接口，
+ * 用途等价；连接协议不变（wss://host:443/sub）。差异已登记 设计_直播域 §五。
+ */
+async function liveDanmakuConfRaw(roomId: number): Promise<LiveDanmakuInfoResult> {
+	const result = new LiveDanmakuInfoResult()
+	const params = new Params()
+	params.setNum('room_id', roomId)
+	params.set('platform', 'pc')
+	const res = await apiGet(LIVE_BASE + '/room/v1/Danmu/getConf', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	const info = new LiveDanmakuInfo()
+	info.token = strOf(data, 'token')
+	const hosts = arrOf(data, 'host_server_list')
+	for (let i = 0; i < hosts.length; i++) {
+		const host = new LiveDanmakuHost()
+		host.host = strOf(hosts[i], 'host')
+		// getConf 的 host_server_list 用 wss_port（老接口无该字段时按 443）
+		host.wssPort = numOf(hosts[i], 'wss_port')
+		if (host.wssPort <= 0) {
+			host.wssPort = 443
+		}
+		if (host.host.length > 0 && host.wssPort > 0) {
+			info.hostList.push(host)
+		}
+	}
+	result.data = info
+	result.status = info.hostList.length > 0
+	if (!result.status) {
+		result.message = '弹幕服务器信息缺失'
+	}
+	return result
+}
+
+/** 弹幕服务器信息（token + host_list，供 useLiveSocket 连接）：getDanmuInfo 优先，失败回 getConf */
+export async function liveDanmakuInfo(roomId: number): Promise<LiveDanmakuInfoResult> {
+	try {
+		const primary = await liveDanmakuInfoRaw(roomId)
+		if (primary.status) {
+			return primary
+		}
+		console.log('[live] danmuInfo fail(' + primary.message + ')，改用 Danmu/getConf')
+		const fallback = await liveDanmakuConfRaw(roomId)
+		if (fallback.status) {
+			return fallback
+		}
+		console.log('[live] Danmu/getConf also failed: ' + fallback.message)
+		return primary
+	} catch (e) {
+		console.log('[live] liveDanmakuInfo error room=' + roomId.toString())
+		console.log(e)
+		const failed = new LiveDanmakuInfoResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 写操作
+
+/**
+ * 发送直播弹幕的请求体（源头：lib/http/live.dart#sendDanmaku 参数逐项对齐）。
+ * body 直接用 UTSJSONObject 构造：源里 `statistics` 是嵌套对象，Params 只支持标量。
+ */
+async function sendLiveDanmakuRaw(roomId: number, msg: string): Promise<ActionResult> {
+	const result = new ActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[live] csrf empty path=/msg/send room=' + roomId.toString())
+		return result
+	}
+	const statistics: UTSJSONObject = {}
+	statistics.set('appId', 100)
+	statistics.set('platform', 5)
+	const body: UTSJSONObject = {}
+	body.set('bubble', 0)
+	body.set('msg', msg)
+	body.set('color', 16777215)
+	body.set('mode', 1)
+	body.set('room_type', 0)
+	body.set('jumpfrom', 71001)
+	body.set('reply_mid', 0)
+	body.set('reply_attr', 0)
+	body.set('replay_dmid', '')
+	body.set('statistics', statistics)
+	body.set('fontsize', 25)
+	body.set('rnd', Math.floor(Date.now() / 1000))
+	body.set('roomid', roomId)
+	body.set('csrf', csrf)
+	body.set('csrf_token', csrf)
+	const res = await apiPost('/msg/send', body)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[live] post fail path=/msg/send code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+/**
+ * 发送直播弹幕（写接口）：csrf 前置——凭据缺失直接失败（message 可直接 toast），
+ * 成功后弹幕经 websocket 广播回流量，不做本地假回显。
+ */
+export async function sendLiveDanmaku(roomId: number, msg: string): Promise<ActionResult> {
+	try {
+		return await sendLiveDanmakuRaw(roomId, msg)
+	} catch (e) {
+		console.log('[live] sendLiveDanmaku error room=' + roomId.toString())
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function liveRoomEntryRaw(roomId: number): Promise<ActionResult> {
+	const params = new Params()
+	params.setNum('room_id', roomId)
+	params.set('platform', 'pc')
+	params.set('visit_id', '')
+	return await postWithCsrf('/xlive/web-room/v1/index/roomEntryAction', params)
+}
+
+/**
+ * 进房上报（写-上报）：失败只打日志、不影响主流程（源 async 不阻塞口径），
+ * 未登录（csrf 缺失）时同样静默跳过——上报是旁路行为，不构成用户可见失败。
+ */
+export async function liveRoomEntry(roomId: number): Promise<ActionResult> {
+	try {
+		const result = await liveRoomEntryRaw(roomId)
+		if (!result.status) {
+			console.log('[live] roomEntry skip room=' + roomId.toString() + ' msg=' + result.message)
+		}
+		return result
+	} catch (e) {
+		console.log('[live] liveRoomEntry error room=' + roomId.toString())
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = ''
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 画质初值
+
+/**
+ * 默认直播画质（SK.defaultLiveQa，源 LiveQuality code：30000 杜比 / 20000 4K / 10000 原画 /
+ * 400 蓝光 / 250 超清 / 150 高清 / 80 流畅）。
+ * 缺省取 10000（原画，设计 §三口径）；0 表示不传 qn、由服务端决定（用户手动选到 0 的场景不存在，
+ * 仅作异常兜底）。设置页写入后，直播间下次取流即按此档请求（enableCDN 同样在取流时读）。
+ */
+export function defaultLiveQn(): number {
+	const value = getNumber(SK.defaultLiveQa, 10000)
+	if (value <= 0) {
+		return 0
+	}
+	return Math.round(value)
+}

@@ -1,0 +1,200 @@
+<template>
+	<view class="zone">
+		<view v-if="state == 'error'" class="zone-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+		<view v-else-if="state == 'empty'" class="zone-fill">
+			<view class="zone-empty">
+				<text class="zone-empty-text" :style="secondaryStyle">该分区暂无榜单数据</text>
+			</view>
+		</view>
+		<view v-else-if="state == 'loading'" class="zone-fill">
+			<list-view class="zone-list">
+				<list-item v-for="n in skeletonCount" :key="'sk-' + n.toString()" :type="2">
+					<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+				</list-item>
+			</list-view>
+		</view>
+		<list-view
+			v-else
+			class="zone-list"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:scroll-top="scrollTop"
+			@refresherrefresh="onRefreshGesture"
+		>
+			<list-item v-for="item in items" :key="item.bvid" :type="1">
+				<p-video-card-h
+					:pic="item.pic"
+					:title="item.title"
+					:duration="item.duration"
+					:view-count="item.stat.view"
+					:danmu-count="item.stat.danmaku"
+					:pubdate="item.pubdate"
+					:owner-name="item.owner.name"
+					:tname="item.tname"
+					:show-pubdate="true"
+					:card-height="cardHeight"
+					@tap="openDetail(item.bvid, item.cid)"
+				></p-video-card-h>
+			</list-item>
+			<list-item :key="'footer'" :type="3">
+				<view class="zone-footer"></view>
+			</list-item>
+		</list-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import PVideoCardH from '../../../components/p-video-card-h/p-video-card-h.uvue'
+import PHttpError from '../../../components/p-http-error/p-http-error.uvue'
+import SkeletonVideoCardH from '../../../components/skeleton/skeleton-video-card-h.uvue'
+import { fetchRank } from '../../../api/video.uts'
+import { HotVideoItem, ListResult } from '../../../models/video.uts'
+import { rankTopSeq, rankRefreshSeq } from '../../../stores/tabSignal.uts'
+import { navigateTo } from '../../../utils/routes.uts'
+import { textSecondary } from '../../../utils/theme.uts'
+
+/**
+ * 排行榜分区（源头：lib/pages/rank/zone/view.dart）。
+ *
+ * 榜单为整榜返回（源 onLoad 亦为整体替换，不追加）；
+ * 懒加载：宿主 active 首次为 true 时才请求，切回不重取。
+ * 骨架 10 行（源 SliverList 同款），错误态/空态独立于宿主。
+ */
+const props = defineProps({
+	rid: { type: Number, default: 0 },
+	active: { type: Boolean, default: false }
+})
+
+const items = ref<Array<HotVideoItem>>([])
+const state = ref<string>('idle')
+const errorText = ref<string>('')
+const refreshing = ref<boolean>(false)
+const scrollTop = ref<number>(0)
+const skeletonCount = ref<number>(10)
+const loaded = ref<boolean>(false)
+
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return Math.max(88, Math.round(((info.windowWidth - 24 - 48) / 2) / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+async function load() {
+	state.value = 'loading'
+	const res: ListResult<HotVideoItem> = await fetchRank(props.rid)
+	if (!res.status) {
+		state.value = 'error'
+		errorText.value = res.message
+		return
+	}
+	items.value = []
+	for (let i = 0; i < res.items.length; i++) {
+		items.value.push(res.items[i])
+	}
+	loaded.value = true
+	state.value = items.value.length > 0 ? 'ready' : 'empty'
+}
+
+async function onRefresh() {
+	if (state.value == 'loading' || state.value == 'idle') {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	const res = await fetchRank(props.rid)
+	if (res.status) {
+		items.value = []
+		for (let i = 0; i < res.items.length; i++) {
+			items.value.push(res.items[i])
+		}
+		state.value = items.value.length > 0 ? 'ready' : 'empty'
+	}
+	refreshing.value = false
+}
+
+function reload() {
+	load()
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+function scrollToTop() {
+	scrollTop.value = 1
+	setTimeout(() => {
+		scrollTop.value = 0
+	}, 16)
+}
+
+/** 点卡片进详情（源头 lib/common/widgets/video_card_h.dart:75：/video?bvid=&cid=） */
+function openDetail(bvid: string, cid: number) {
+	if (bvid.length == 0) {
+		uni.showToast({ title: '无法获取视频信息', icon: 'none' })
+		return
+	}
+	let url = '/pages/video/video?bvid=' + bvid
+	if (cid > 0) {
+		url = url + '&cid=' + cid.toString()
+	}
+	navigateTo(url)
+}
+
+// 懒加载：首次可见才请求
+watch(() => props.active, (value: boolean) => {
+	if (value && !loaded.value && state.value == 'idle') {
+		load()
+	}
+}, { immediate: true })
+
+// 回顶 / 刷新信号：只响应当前可见分区
+watch(rankTopSeq, (value: number) => {
+	if (value > 0 && props.active) {
+		scrollToTop()
+	}
+})
+
+watch(rankRefreshSeq, (value: number) => {
+	if (value > 0 && props.active) {
+		onRefresh()
+	}
+})
+</script>
+
+<style>
+	.zone {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-top: 7px;
+	}
+	.zone-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.zone-empty {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.zone-empty-text {
+		font-size: 14px;
+	}
+	.zone-list {
+		flex: 1;
+	}
+	.zone-footer {
+		height: 60px;
+	}
+</style>

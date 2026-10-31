@@ -1,0 +1,338 @@
+import { strOf, numOf, objOf, arrOf, numArrayOf, strArrayOf } from '../utils/json.uts'
+
+/**
+ * 视频详情域模型。
+ * 源头：`lib/models/video_detail_res.dart`（详情/分P/合集/统计）、`lib/models/video/play/url.dart`（播放地址）。
+ * 字段名与源保持一致（源 snake_case JSON 键在 from() 内映射），供详情页、播放器与后续评论/弹幕复用。
+ */
+
+/** UP 主（源头 Owner） */
+export class VideoOwner {
+	mid: number = 0
+	name: string = ''
+	face: string = ''
+
+	static from(obj: UTSJSONObject | null): VideoOwner {
+		const owner = new VideoOwner()
+		if (obj == null) {
+			return owner
+		}
+		owner.mid = numOf(obj, 'mid')
+		owner.name = strOf(obj, 'name')
+		owner.face = strOf(obj, 'face')
+		return owner
+	}
+}
+
+/** 视频统计（源头 Stat） */
+export class VideoStat {
+	aid: number = 0
+	view: number = 0
+	danmaku: number = 0
+	reply: number = 0
+	favorite: number = 0
+	coin: number = 0
+	share: number = 0
+	like: number = 0
+	dislike: number = 0
+
+	static from(obj: UTSJSONObject | null): VideoStat {
+		const stat = new VideoStat()
+		if (obj == null) {
+			return stat
+		}
+		stat.aid = numOf(obj, 'aid')
+		stat.view = numOf(obj, 'view')
+		stat.danmaku = numOf(obj, 'danmaku')
+		stat.reply = numOf(obj, 'reply')
+		stat.favorite = numOf(obj, 'favorite')
+		stat.coin = numOf(obj, 'coin')
+		stat.share = numOf(obj, 'share')
+		stat.like = numOf(obj, 'like')
+		stat.dislike = numOf(obj, 'dislike')
+		return stat
+	}
+}
+
+/** 分P（源头 Part；封面取 first_frame） */
+export class VideoPage {
+	cid: number = 0
+	page: number = 0
+	from: string = ''
+	part: string = ''
+	duration: number = 0
+	vid: string = ''
+	weblink: string = ''
+	firstFrame: string = ''
+	cover: string = ''
+
+	static from(obj: UTSJSONObject | null): VideoPage {
+		const page = new VideoPage()
+		if (obj == null) {
+			return page
+		}
+		page.cid = numOf(obj, 'cid')
+		page.page = numOf(obj, 'page')
+		page.from = strOf(obj, 'from')
+		page.part = strOf(obj, 'part')
+		page.duration = numOf(obj, 'duration')
+		page.vid = strOf(obj, 'vid')
+		page.weblink = strOf(obj, 'weblink')
+		page.firstFrame = strOf(obj, 'first_frame')
+		page.cover = page.firstFrame
+		return page
+	}
+}
+
+/** 合集分集（源头 EpisodeItem；封面取 arc.pic） */
+export class VideoSeasonEpisode {
+	seasonId: number = 0
+	sectionId: number = 0
+	id: number = 0
+	aid: number = 0
+	cid: number = 0
+	bvid: string = ''
+	title: string = ''
+	attribute: number = 0
+	cover: string = ''
+	page: VideoPage | null = null
+
+	static from(obj: UTSJSONObject): VideoSeasonEpisode {
+		const episode = new VideoSeasonEpisode()
+		episode.seasonId = numOf(obj, 'season_id')
+		episode.sectionId = numOf(obj, 'sectionId')
+		episode.id = numOf(obj, 'id')
+		episode.aid = numOf(obj, 'aid')
+		episode.cid = numOf(obj, 'cid')
+		episode.bvid = strOf(obj, 'bvid')
+		episode.title = strOf(obj, 'title')
+		episode.attribute = numOf(obj, 'attribute')
+		const arc = objOf(obj, 'arc')
+		if (arc != null) {
+			episode.cover = strOf(arc, 'pic')
+		}
+		const pageObj = objOf(obj, 'page')
+		episode.page = pageObj == null ? null : VideoPage.from(pageObj)
+		return episode
+	}
+}
+
+/** 合集分组（源头 SectionItem） */
+export class VideoSeasonSection {
+	seasonId: number = 0
+	id: number = 0
+	title: string = ''
+	type: number = 0
+	episodes: Array<VideoSeasonEpisode> = []
+
+	static from(obj: UTSJSONObject): VideoSeasonSection {
+		const section = new VideoSeasonSection()
+		section.seasonId = numOf(obj, 'season_id')
+		section.id = numOf(obj, 'id')
+		section.title = strOf(obj, 'title')
+		section.type = numOf(obj, 'type')
+		const list = arrOf(obj, 'episodes')
+		for (let i = 0; i < list.length; i++) {
+			section.episodes.push(VideoSeasonEpisode.from(list[i]))
+		}
+		return section
+	}
+}
+
+/** 合集（源头 UgcSeason） */
+export class VideoSeason {
+	id: number = 0
+	title: string = ''
+	cover: string = ''
+	mid: number = 0
+	intro: string = ''
+	epCount: number = 0
+	seasonType: number = 0
+	sections: Array<VideoSeasonSection> = []
+
+	static from(obj: UTSJSONObject): VideoSeason {
+		const season = new VideoSeason()
+		season.id = numOf(obj, 'id')
+		season.title = strOf(obj, 'title')
+		season.cover = strOf(obj, 'cover')
+		season.mid = numOf(obj, 'mid')
+		season.intro = strOf(obj, 'intro')
+		season.epCount = numOf(obj, 'ep_count')
+		season.seasonType = numOf(obj, 'season_type')
+		const list = arrOf(obj, 'sections')
+		for (let i = 0; i < list.length; i++) {
+			season.sections.push(VideoSeasonSection.from(list[i]))
+		}
+		return season
+	}
+}
+
+/** 视频详情（源头 VideoDetailData，只保留详情页业务用到的字段） */
+export class VideoDetail {
+	bvid: string = ''
+	aid: number = 0
+	videos: number = 0
+	tid: number = 0
+	tname: string = ''
+	copyright: number = 0
+	pic: string = ''
+	title: string = ''
+	pubdate: number = 0
+	ctime: number = 0
+	desc: string = ''
+	state: number = 0
+	duration: number = 0
+	cid: number = 0
+	owner: VideoOwner = new VideoOwner()
+	stat: VideoStat = new VideoStat()
+	pages: Array<VideoPage> = []
+	ugcSeason: VideoSeason | null = null
+
+	static from(obj: UTSJSONObject): VideoDetail {
+		const detail = new VideoDetail()
+		detail.bvid = strOf(obj, 'bvid')
+		detail.aid = numOf(obj, 'aid')
+		detail.videos = numOf(obj, 'videos')
+		detail.tid = numOf(obj, 'tid')
+		detail.tname = strOf(obj, 'tname')
+		detail.copyright = numOf(obj, 'copyright')
+		detail.pic = strOf(obj, 'pic')
+		detail.title = strOf(obj, 'title')
+		detail.pubdate = numOf(obj, 'pubdate')
+		detail.ctime = numOf(obj, 'ctime')
+		detail.desc = strOf(obj, 'desc')
+		detail.state = numOf(obj, 'state')
+		detail.duration = numOf(obj, 'duration')
+		detail.cid = numOf(obj, 'cid')
+		detail.owner = VideoOwner.from(objOf(obj, 'owner'))
+		detail.stat = VideoStat.from(objOf(obj, 'stat'))
+		const pageList = arrOf(obj, 'pages')
+		for (let i = 0; i < pageList.length; i++) {
+			detail.pages.push(VideoPage.from(pageList[i]))
+		}
+		const seasonObj = objOf(obj, 'ugc_season')
+		detail.ugcSeason = seasonObj == null ? null : VideoSeason.from(seasonObj)
+		return detail
+	}
+}
+
+/** durl 分片（源头 Durl；durl 模式通常是单个完整 mp4） */
+export class DurlItem {
+	order: number = 0
+	length: number = 0
+	size: number = 0
+	url: string = ''
+	/** 备用地址：B 站主 URL 常指向 PCDN 节点（非标准端口），失败时切标准 CDN */
+	backupUrl: string = ''
+
+	static from(obj: UTSJSONObject): DurlItem {
+		const item = new DurlItem()
+		item.order = numOf(obj, 'order')
+		item.length = numOf(obj, 'length')
+		item.size = numOf(obj, 'size')
+		item.url = strOf(obj, 'url')
+		const backups = strArrayOf(obj, 'backup_url')
+		item.backupUrl = backups.length > 0 ? backups[0] : ''
+		return item
+	}
+}
+
+/** 播放地址数据（源头 PlayUrlModel 的业务子集） */
+export class PlayData {
+	quality: number = 0
+	/** 总时长（毫秒，源 timelength） */
+	timeLength: number = 0
+	/** 上次播放进度（毫秒，源 last_play_time） */
+	lastPlayTime: number = 0
+	lastPlayCid: number = 0
+	acceptQuality: Array<number> = []
+	acceptDesc: Array<string> = []
+	durl: Array<DurlItem> = []
+	/** DASH 预留（fnval=4048 时才有；本期播放内核不用，切 pl-player 时启用） */
+	dashDuration: number = 0
+	dashVideoUrl: string = ''
+	dashAudioUrl: string = ''
+}
+
+/** 播放地址结果 */
+export class PlayResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	data: PlayData | null = null
+}
+
+/** 视频详情结果 */
+export class DetailResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	data: VideoDetail | null = null
+}
+
+/** 通用写操作结果（点赞/投币/收藏/关注/稍后再看） */
+export class ActionResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+}
+
+/** 布尔状态结果（是否点赞/是否收藏） */
+export class FlagResult {
+	status: boolean = false
+	message: string = ''
+	value: boolean = false
+}
+
+/** 投币状态（源头 data.multiply） */
+export class CoinStateResult {
+	status: boolean = false
+	message: string = ''
+	multiply: number = 0
+}
+
+/** 关注状态（源头 data.attribute：0 未关注 / 2 已关注 / 6 互关 / 128 拉黑） */
+export class FollowStateResult {
+	status: boolean = false
+	message: string = ''
+	attribute: number = 0
+	/** 该 UP 的粉丝数由 /x/relation/stat 单独取，这里只承载关注属性 */
+}
+
+/** 三连结果（源头 data.{like,coin,fav}） */
+export class TripleResult {
+	status: boolean = false
+	message: string = ''
+	like: boolean = false
+	coin: boolean = false
+	fav: boolean = false
+}
+
+/** 同时在看人数（源头 data.total，字符串） */
+export class OnlineResult {
+	status: boolean = false
+	message: string = ''
+	total: string = ''
+}
+
+/** UP 主粉丝数（源头 /x/relation/stat 的 data.follower） */
+export class UserStatResult {
+	status: boolean = false
+	message: string = ''
+	follower: number = 0
+}
+
+/** 默认收藏夹状态（源头 FavFolderData.list[0]） */
+export class FavFolderResult {
+	status: boolean = false
+	message: string = ''
+	folderId: number = 0
+	favState: number = 0
+}
+
+/** 收藏切换结果（带切换后的收藏态） */
+export class FavToggleResult {
+	status: boolean = false
+	message: string = ''
+	faved: boolean = false
+}

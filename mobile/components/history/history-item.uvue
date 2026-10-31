@@ -1,0 +1,279 @@
+<template>
+	<view class="hi" @click="onTap" @longpress="onLongPress">
+		<view class="hi-inner">
+			<view class="hi-cover" :style="coverStyle">
+				<network-img :src="coverSrc" width="100%" height="100%" radius="10px"></network-img>
+				<view v-if="showDuration" class="hi-progress-badge">
+					<p-badge :text="progressText" type="gray" size="small" :font-size="11"></p-badge>
+				</view>
+				<view v-if="showTopBadge" class="hi-top-badge">
+					<p-badge :text="badge" type="primary" size="small" :font-size="11"></p-badge>
+				</view>
+				<view v-if="multiple" class="hi-multi-mask" :style="maskStyle" @click.stop="onCheckTap">
+					<view class="hi-check" :style="checkStyle">
+						<p-icon name="done-all-outlined" :size="20" :color="checked ? primary : 'rgba(0,0,0,0)'"></p-icon>
+					</view>
+				</view>
+				<view v-if="showBar" class="hi-bar-track">
+					<view class="hi-bar-fill" :style="barStyle"></view>
+				</view>
+			</view>
+			<view class="hi-body">
+				<text class="hi-title" :style="titleStyle" :max-lines="titleLines">{{ title }}</text>
+				<text v-if="showTitle.length > 0" class="hi-subtitle" :style="secondaryStyle" :max-lines="1">{{ showTitle }}</text>
+				<view class="hi-spacer"></view>
+				<text v-if="authorName.length > 0" class="hi-author" :style="secondaryStyle" :max-lines="1">{{ authorName }}</text>
+				<view class="hi-foot">
+					<text class="hi-time" :style="secondaryStyle">{{ timeText }}</text>
+					<view class="hi-more" @click.stop="onMore">
+						<p-icon name="more-vert" :size="14" :color="moreColor"></p-icon>
+					</view>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import PBadge from '../p-badge/p-badge.uvue'
+import PIcon from '../p-icon/p-icon.uvue'
+import { textPrimary, textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+import { timeFormat, dateFormat } from '../../utils/format.uts'
+import { HisListItem, historyCoverOf, historyFinished } from '../../models/history.uts'
+
+/**
+ * 观看历史条目（源头：`lib/pages/history/widgets/item.dart` HistoryItem）。
+ *
+ * 结构（源常量 safeSpace=12 / cardSpace=8 / aspectRatio=16:10）：
+ *  - 行内边距 LTRB(12, 5, 12, 5)，半宽封面 16:10 圆角 10；
+ *  - 封面右下角进度角标（right 6 / bottom 8）：progress == -1 →「已看完」，
+ *    否则「mm:ss/mm:ss」；business ∈ [live, article-list, article] 不显示（源 hiddenDurationType）；
+ *  - 封面右上角类型角标（源 showBadge = [pgc, article-list, article] 或 live）；
+ *  - 封面底部进度条（progress/duration 比例，已看完满宽；progress/duration 为 0 不显示）；
+ *  - 多选态：黑色 60% 遮罩 + 中央 34×34 勾选钮（选中时白底 80% + 主色 done_all 图标，
+ *    码点取自本机 Flutter SDK icons.dart:7481）；
+ *  - 右文字列（padding LTRB(10, 2, 6, 0)）：标题 w500（videos>1 单行否则 2 行）→
+ *    分 P 名（showTitle，单行）→ 弹性空隙 → UP 主 → 底行（观看时间 + ⋮ 菜单）。
+ *
+ * 路由分支（article/live/番剧）与菜单动作由页面承接：组件只 emit，
+ * 不内置导航（history 与 history-search 两个页面复用同一份渲染）。
+ */
+const props = defineProps({
+	item: { type: HisListItem, required: true },
+	/** 多选模式开关（history 页长按进入；history-search 恒 false） */
+	multiple: { type: Boolean, default: false },
+	checked: { type: Boolean, default: false }
+})
+
+const emit = defineEmits(['tap', 'longpress', 'more', 'check'])
+
+const primary: string = themeColor(currentThemeIndex())
+
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const coverSrc = computed((): string => historyCoverOf(props.item))
+const title = computed((): string => props.item.title)
+const showTitle = computed((): string => props.item.showTitle)
+const authorName = computed((): string => props.item.authorName)
+const titleLines = computed((): number => props.item.videos > 1 ? 1 : 2)
+const timeText = computed((): string => dateFormat(props.item.viewAt, 'list'))
+const badge = computed((): string => props.item.badge)
+
+const business = computed((): string => props.item.history.business)
+
+/** 源 hiddenDurationType = [live, article-list, article]：这些 business 不显示进度角标 */
+const showDuration = computed((): boolean => {
+	if (business.value == 'live' || business.value == 'article-list' || business.value == 'article') {
+		return false
+	}
+	return true
+})
+
+const progressText = computed((): string => {
+	if (historyFinished(props.item)) {
+		return '已看完'
+	}
+	return timeFormat(props.item.progress) + '/' + timeFormat(props.item.duration)
+})
+
+/** 源 showBadge = [pgc, article-list, article]，live 也显示右上角标 */
+const showTopBadge = computed((): boolean => {
+	return badge.value.length > 0 && (
+		business.value == 'pgc' || business.value == 'article-list' ||
+		business.value == 'article' || business.value == 'live'
+	)
+})
+
+/** 底部进度条：progress 与 duration 均非 0 才显示（源同款条件） */
+const showBar = computed((): boolean => props.item.progress != 0 && props.item.duration != 0)
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		const half = (info.windowWidth - 24 - 48) / 2
+		return Math.round(half / 1.6)
+	} catch (e) {
+		return 106
+	}
+})()
+
+const coverStyle = computed((): string => {
+	const width = Math.round(cardHeight * 1.6)
+	return 'width:' + width.toString() + 'px;height:' + cardHeight.toString() + 'px;'
+})
+
+const barStyle = computed((): string => {
+	let ratio = 1.0
+	if (!historyFinished(props.item) && props.item.duration > 0) {
+		ratio = props.item.progress / props.item.duration
+		if (ratio < 0) {
+			ratio = 0
+		}
+		if (ratio > 1) {
+			ratio = 1
+		}
+	}
+	const trackWidth = Math.round(cardHeight * 1.6) - 6
+	return 'width:' + Math.round(trackWidth * ratio).toString() + 'px;background-color:' + primary + ';'
+})
+
+/** 多选遮罩：选中 60% 黑，未选中透明（点击穿透到整行切换选中） */
+const maskStyle = computed((): string => {
+	return 'background-color:rgba(0,0,0,' + (props.checked ? '0.6' : '0') + ');'
+})
+
+const checkStyle = computed((): string => {
+	return 'background-color:' + (props.checked ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0)') + ';'
+})
+
+const moreColor: string = textSecondary()
+
+function onTap() {
+	emit('tap')
+}
+
+function onLongPress() {
+	emit('longpress')
+}
+
+function onMore() {
+	emit('more')
+}
+
+function onCheckTap() {
+	emit('check')
+}
+</script>
+
+<style>
+	.hi {
+		display: flex;
+		flex-direction: column;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 5px;
+		margin-bottom: 5px;
+	}
+	.hi-inner {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+	}
+	.hi-cover {
+		position: relative;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.hi-progress-badge {
+		position: absolute;
+		right: 6px;
+		bottom: 8px;
+	}
+	.hi-top-badge {
+		position: absolute;
+		right: 6px;
+		top: 6px;
+	}
+	.hi-multi-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 10px;
+	}
+	.hi-check {
+		width: 34px;
+		height: 34px;
+		border-radius: 17px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.hi-bar-track {
+		position: absolute;
+		left: 3px;
+		right: 3px;
+		bottom: 0;
+		height: 3px;
+		display: flex;
+		flex-direction: row;
+		background-color: rgba(255, 255, 255, 0.35);
+		border-bottom-left-radius: 10px;
+		border-bottom-right-radius: 10px;
+		overflow: hidden;
+	}
+	.hi-bar-fill {
+		height: 3px;
+		background-color: #5CB67B;
+	}
+	.hi-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-top: 2px;
+		padding-right: 6px;
+	}
+	.hi-title {
+		font-size: 14px;
+		font-weight: 500;
+		line-height: 20px;
+	}
+	.hi-subtitle {
+		font-size: 11px;
+		margin-top: 2px;
+	}
+	.hi-spacer {
+		flex: 1;
+	}
+	.hi-author {
+		font-size: 11px;
+		margin-top: 2px;
+	}
+	.hi-foot {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		margin-top: 2px;
+	}
+	.hi-time {
+		font-size: 11px;
+	}
+	.hi-more {
+		width: 32px;
+		height: 24px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+	}
+</style>

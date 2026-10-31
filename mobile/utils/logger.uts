@@ -1,0 +1,173 @@
+/**
+ * 应用日志（P10 新建）。
+ *
+ * 源头：`lib/services/loggeer.dart`（catcher 2 落文件 + logs 页按分隔符解析）。
+ * 目标端等价：环形缓冲 + 分级 + uni storage 持久化——
+ *  - 蒸汽端没有 catcher 等价的崩溃捕获库，`uni.getFileSystemManager` 在本工程未经真机验证，
+ *    日志直接写 uni storage（跨进程持久、重启可读，logs 页消费），避免引入未验证的 fs 通道；
+ *  - 环形上限 200 条（超出丢最旧），单条正文截断 800 字，防止 storage 膨胀；
+ *  - 全局钩子由 `App.uvue` 的 `onError` / `onUnhandledRejection` 接入（uni-app x App 生命周期）。
+ *
+ * 分级口径：debug 开发诊断 / info 关键流程 / warn 可恢复异常 / error 失败与异常。
+ * 写日志一律同时 console.log（开发期真机日志可直读），页面侧只读 `getLogs()`。
+ */
+
+const LOG_KEY: string = 'appLogs'
+const LOG_MAX: number = 200
+const MSG_MAX: number = 800
+
+export class LogEntry {
+	/** 毫秒时间戳（页面按 HH:mm:ss 展示） */
+	time: number = 0
+	/** debug / info / warn / error */
+	level: string = 'info'
+	/** 模块标签（player / request / danmaku …） */
+	tag: string = ''
+	message: string = ''
+}
+
+let entries: Array<LogEntry> = []
+let loaded: boolean = false
+
+function loadEntries() {
+	if (loaded) {
+		return
+	}
+	loaded = true
+	try {
+		const raw = uni.getStorageSync(LOG_KEY)
+		if (raw == null) {
+			return
+		}
+		const text = raw as string
+		if (text.length == 0) {
+			return
+		}
+		// 用 UTSJSONObject 逐条还原：直接 JSON.parse<Array<LogEntry>> 在蒸汽端不可靠
+		// （类反序列化拿到的可能不是类实例），这里显式取值再建对象。
+		const parsed = JSON.parse<Array<UTSJSONObject>>(text)
+		if (parsed == null) {
+			return
+		}
+		const list: Array<LogEntry> = []
+		for (let i = 0; i < parsed.length; i++) {
+			const obj = parsed[i]
+			const item = new LogEntry()
+			const time = obj.getNumber('time')
+			const level = obj.getString('level')
+			const tag = obj.getString('tag')
+			const message = obj.getString('message')
+			item.time = time == null ? 0 : time
+			item.level = level == null ? 'info' : level
+			item.tag = tag == null ? '' : tag
+			item.message = message == null ? '' : message
+			list.push(item)
+		}
+		entries = list
+	} catch (e) {
+		// 历史日志损坏不阻塞新日志写入：直接以空缓冲继续
+		console.log('[logger] load failed, reset buffer')
+	}
+}
+
+function persist() {
+	try {
+		uni.setStorageSync(LOG_KEY, JSON.stringify(entries))
+	} catch (e) {
+		console.log('[logger] persist failed')
+	}
+}
+
+function trimMessage(text: string): string {
+	if (text.length <= MSG_MAX) {
+		return text
+	}
+	return text.substring(0, MSG_MAX) + '…（截断）'
+}
+
+/** 写一条日志（唯一写入口，其余分级函数都是它的薄封装） */
+export function logAt(level: string, tag: string, message: string) {
+	loadEntries()
+	const item = new LogEntry()
+	item.time = Date.now()
+	item.level = level
+	item.tag = tag
+	item.message = trimMessage(message)
+	entries.push(item)
+	while (entries.length > LOG_MAX) {
+		entries.splice(0, 1)
+	}
+	persist()
+	console.log('[' + level + ']' + tag + ' ' + item.message)
+}
+
+export function logDebug(tag: string, message: string) {
+	logAt('debug', tag, message)
+}
+
+export function logInfo(tag: string, message: string) {
+	logAt('info', tag, message)
+}
+
+export function logWarn(tag: string, message: string) {
+	logAt('warn', tag, message)
+}
+
+export function logError(tag: string, message: string) {
+	logAt('error', tag, message)
+}
+
+/** 日志列表（新→旧，与源 logs 页 `result.reversed` 同序） */
+export function getLogs(): Array<LogEntry> {
+	loadEntries()
+	const list: Array<LogEntry> = []
+	for (let i = entries.length - 1; i >= 0; i--) {
+		list.push(entries[i])
+	}
+	return list
+}
+
+export function logCount(): number {
+	loadEntries()
+	return entries.length
+}
+
+export function clearLogs() {
+	loadEntries()
+	entries = []
+	persist()
+}
+
+function pad2(value: number): string {
+	return value < 10 ? '0' + value.toString() : value.toString()
+}
+
+/** 时间戳 → `yyyy-MM-dd HH:mm:ss`（不依赖 format.uts 的相对时间口径） */
+export function formatLogTime(ms: number): string {
+	const d = new Date(ms)
+	const year = d.getFullYear().toString()
+	const month = pad2(d.getMonth() + 1)
+	const day = pad2(d.getDate())
+	const hour = pad2(d.getHours())
+	const minute = pad2(d.getMinutes())
+	const second = pad2(d.getSeconds())
+	return year + '-' + month + '-' + day + ' ' + hour + ':' + minute + ':' + second
+}
+
+/** 单条日志的纯文本形态（复制到剪贴板 / 详情展示） */
+export function formatLogEntry(entry: LogEntry): string {
+	return '[' + formatLogTime(entry.time) + '][' + entry.level + '][' + entry.tag + '] ' + entry.message
+}
+
+/** 全量日志文本（旧→新，复制日志用） */
+export function exportLogText(): string {
+	loadEntries()
+	let text = ''
+	for (let i = 0; i < entries.length; i++) {
+		if (text.length > 0) {
+			text = text + '\n'
+		}
+		text = text + formatLogEntry(entries[i])
+	}
+	return text
+}

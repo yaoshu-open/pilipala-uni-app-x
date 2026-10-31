@@ -1,0 +1,332 @@
+<template>
+	<view class="op" :style="pageStyle">
+		<app-navbar :title="title" :show-back="true" :title-opacity="navTitleOpacity">
+			<template #right>
+				<view class="op-more" @click="openMenu">
+					<p-icon name="more-vert" :size="22" :color="textPrimary()"></p-icon>
+				</view>
+			</template>
+		</app-navbar>
+
+		<scroll-view class="op-scroll" direction="vertical" @scroll="onScroll">
+			<!-- 标题：24 粗体 / 字距 1 / 行高 1.5（源 _buildTitle 同款，滚动后导航栏标题淡入） -->
+			<view class="op-title-block">
+				<text class="op-title" :style="titleStyle">{{ title }}</text>
+			</view>
+
+			<view class="op-content" :style="contentStyle">
+				<view class="op-loading" :style="loadingStyle">
+					<view v-for="n in 4" :key="'sk-' + n.toString()" class="op-sk-row">
+						<skeleton-block width="90%" height="14px" radius="4px"></skeleton-block>
+						<view class="op-sk-gap"></view>
+						<skeleton-block width="62%" height="13px" radius="4px"></skeleton-block>
+						<view class="op-sk-gap"></view>
+					</view>
+				</view>
+
+				<view class="op-error" :style="errorStyle">
+					<text class="op-error-text" :style="secondaryStyle">{{ errorText }}</text>
+					<view class="op-retry" @click="loadAll">
+						<text class="op-retry-text" :style="primaryStyle">点击重试</text>
+					</view>
+				</view>
+
+				<view class="op-body" :style="bodyStyle">
+					<!-- 统计行：N评论 / N赞 / N转发（13 outline，间距 10） -->
+					<view class="op-stats">
+						<text class="op-stat" :style="secondaryStyle">{{ statsComment }}</text>
+						<view class="op-gap10"></view>
+						<text class="op-stat" :style="secondaryStyle">{{ statsLike }}</text>
+						<view class="op-gap10"></view>
+						<text class="op-stat" :style="secondaryStyle">{{ statsForward }}</text>
+					</view>
+
+					<!-- 作者行：头像 48 + 昵称 + 发布时间（源 _buildAuthorWidget 同款） -->
+					<view class="op-author" @click="openAuthor">
+						<network-img :src="authorFace" width="48px" height="48px" radius="24px"></network-img>
+						<view class="op-gap10"></view>
+						<view class="op-author-body">
+							<text class="op-author-name" :style="primaryTextStyle" :max-lines="1">{{ authorName }}</text>
+							<text class="op-author-time" :style="secondaryStyle" :max-lines="1">{{ pubTime }}</text>
+						</view>
+					</view>
+
+					<!-- 正文段落（文本段富节点 / 图片段） -->
+					<article-body :paragraphs="paragraphs"></article-body>
+				</view>
+			</view>
+			<view class="op-bottom" :style="bottomStyle"></view>
+		</scroll-view>
+
+		<!-- 更多菜单（源 PopupMenuButton：查看原网页） -->
+		<view class="op-menu-mask" :style="menuMaskStyle" @click="closeMenu">
+			<view class="op-menu" :style="menuStyle">
+				<view class="op-menu-item" @click.stop="onOpenOrigin">
+					<text class="op-menu-text" :style="titleStyle">查看原网页</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import ArticleBody from '../../components/article/article-body.uvue'
+import { fetchArticleOpus } from '../../api/article.uts'
+import { ArticleParagraph } from '../../models/article.uts'
+import { navigateTo } from '../../utils/routes.uts'
+import { pageBackground, textPrimary, textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+import { safeAreaBottom, statusBarHeight } from '../../utils/safeArea.uts'
+import { numFormat } from '../../utils/format.uts'
+
+/**
+ * 图文详情（源头：`lib/pages/opus/view.dart` + `controller.dart`）。
+ *
+ * 取数：`https://www.bilibili.com/opus/{id}`（UA=pc）→ body 首个 script 的 __INITIAL_STATE__
+ *       → `OpusDetailInfo`（api/article.uts#fetchArticleOpus）。
+ * 结构（1:1）：导航栏（滚动 > 100 标题淡入 + ⋮「查看原网页」）→ 标题 24 粗体 → 统计行（评论/赞/转发）
+ *       → 作者行（头像 48 + 昵称 + 发布时间）→ 段落流（文本段富节点 / 图片段）。
+ * 分诊：canonical 指向 /read/cv{id} 时 → `redirectTo` read 页（源 controller isCv 分支同款）。
+ * 差异：源 SelectableText 可选中复制，uts 无等价（正文不可选中）；R·G 颠倒字动效降级静态着色。
+ */
+const id = ref<string>('')
+const title = ref<string>('')
+const authorName = ref<string>('')
+const authorFace = ref<string>('')
+const authorMid = ref<number>(0)
+const pubTime = ref<string>('')
+const commentCount = ref<number>(0)
+const likeCount = ref<number>(0)
+const forwardCount = ref<number>(0)
+const paragraphs = ref<Array<ArticleParagraph>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const scrollY = ref<number>(0)
+const menuVisible = ref<boolean>(false)
+
+const primary = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryStyle = computed((): string => 'color:' + primary + ';')
+const contentStyle = computed((): string => 'padding-left:16px;padding-right:16px;')
+const bottomStyle = computed((): string => 'height:' + (safeAreaBottom() + 40).toString() + 'px;')
+const loadingStyle = computed((): string => state.value == 'loading' ? 'display:flex;' : 'display:none;')
+const errorStyle = computed((): string => state.value == 'error' ? 'display:flex;' : 'display:none;')
+const bodyStyle = computed((): string => state.value == 'ready' ? 'display:flex;' : 'display:none;')
+const menuMaskStyle = computed((): string => menuVisible.value ? 'display:flex;' : 'display:none;')
+const menuStyle = computed((): string => 'margin-top:' + (statusBarHeight() + 44).toString() + 'px;background-color:' + pageBackground() + ';')
+const navTitleOpacity = computed((): number => scrollY.value > 100 ? 1 : 0)
+const statsComment = computed((): string => numFormat(commentCount.value) + '评论')
+const statsLike = computed((): string => numFormat(likeCount.value) + '赞')
+const statsForward = computed((): string => numFormat(forwardCount.value) + '转发')
+
+function onScroll(event: UniScrollEvent) {
+	scrollY.value = Math.round(event.detail.scrollTop)
+}
+
+async function loadAll() {
+	state.value = 'loading'
+	errorText.value = ''
+	const res = await fetchArticleOpus(id.value)
+	if (res.isCv && res.cvId.length > 0) {
+		// 源：canonical 指 cv → 跳专栏页（同参数 title/articleType 语义）
+		uni.redirectTo({ url: '/pages/read/read?id=' + res.cvId + '&articleType=cv' })
+		return
+	}
+	if (!res.status || res.data == null) {
+		state.value = 'error'
+		errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		return
+	}
+	const info = res.data
+	title.value = info.title.length > 0 ? info.title : title.value
+	authorName.value = info.authorName
+	authorFace.value = info.authorFace
+	authorMid.value = info.authorMid
+	pubTime.value = info.pubTime
+	commentCount.value = info.commentCount
+	likeCount.value = info.likeCount
+	forwardCount.value = info.forwardCount
+	paragraphs.value = info.paragraphs
+	state.value = 'ready'
+}
+
+function openMenu() {
+	menuVisible.value = true
+}
+
+function closeMenu() {
+	menuVisible.value = false
+}
+
+function onOpenOrigin() {
+	menuVisible.value = false
+	const url = 'https://www.bilibili.com/opus/' + id.value
+	navigateTo('/pages/webview/webview?url=' + encodeURIComponent(url) + '&type=webview&pageTitle=' + encodeURIComponent(title.value))
+}
+
+function openAuthor() {
+	if (authorMid.value <= 0) {
+		return
+	}
+	navigateTo('/pages/member/member?mid=' + authorMid.value.toString())
+}
+
+onBackPress(() => {
+	if (menuVisible.value) {
+		closeMenu()
+		return true
+	}
+	return false
+})
+
+onLoad((options) => {
+	const rawId = options != null ? options['id'] : null
+	if (rawId == null || (rawId as string).length == 0) {
+		state.value = 'error'
+		errorText.value = '缺少图文参数（id）'
+		return
+	}
+	id.value = rawId as string
+	const rawTitle = options != null ? options['title'] : null
+	if (rawTitle != null) {
+		title.value = rawTitle as string
+	}
+	loadAll()
+})
+</script>
+
+<style>
+	.op {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.op-more {
+		width: 44px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.op-scroll {
+		flex: 1;
+	}
+	.op-title-block {
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 16px;
+		padding-bottom: 4px;
+	}
+	.op-title {
+		font-size: 24px;
+		font-weight: 700;
+		letter-spacing: 1px;
+		line-height: 36px;
+	}
+	.op-content {
+		display: flex;
+		flex-direction: column;
+	}
+	.op-loading {
+		display: flex;
+		flex-direction: column;
+		padding-top: 8px;
+	}
+	.op-sk-row {
+		display: flex;
+		flex-direction: column;
+		padding-bottom: 4px;
+	}
+	.op-sk-gap {
+		height: 6px;
+	}
+	.op-error {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		height: 100px;
+	}
+	.op-error-text {
+		font-size: 14px;
+	}
+	.op-retry {
+		margin-top: 10px;
+	}
+	.op-retry-text {
+		font-size: 14px;
+	}
+	.op-body {
+		display: flex;
+		flex-direction: column;
+	}
+	.op-stats {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-bottom: 30px;
+	}
+	.op-stat {
+		font-size: 13px;
+	}
+	.op-gap10 {
+		width: 10px;
+	}
+	.op-author {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-bottom: 20px;
+	}
+	.op-author-body {
+		display: flex;
+		flex-direction: column;
+	}
+	.op-author-name {
+		font-size: 14px;
+		font-weight: 500;
+	}
+	.op-author-time {
+		font-size: 13px;
+	}
+	.op-bottom {
+		width: 100%;
+	}
+	.op-menu-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+	}
+	.op-menu {
+		width: 150px;
+		border-radius: 8px;
+		padding-top: 6px;
+		padding-bottom: 6px;
+		margin-right: 10px;
+	}
+	.op-menu-item {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+	}
+	.op-menu-text {
+		font-size: 15px;
+	}
+</style>

@@ -1,0 +1,571 @@
+import { strOf, numOf, boolOf, objOf, arrOf } from '../utils/json.uts'
+
+/**
+ * 私信消息域模型。源头：`lib/models/msg/session.dart` + `lib/models/msg/account.dart`。
+ * 字段名与源 json 键一致（from() 内做 snake_case 映射）。
+ *
+ * content 字段说明：接口给的是 **JSON 字符串**（如 "{\"content\":\"hi\"}"），
+ * 源 Dart fromJson 里 jsonDecode 成 Map；此处解析为 UTSJSONObject，解析失败置 null
+ * （空串与 null 均视为「无内容」，由消费方回退到「不支持的消息类型」——源同款回退链）。
+ */
+
+/** 私信消息类型（源 chat_item.dart MsgType 枚举） */
+export class MsgType {
+	static text: number = 1
+	static pic: number = 2
+	static revoke: number = 5
+	static customFace: number = 6
+	static shareV2: number = 7
+	static notifyMsg: number = 10
+	static archiveCard: number = 11
+	static articleCard: number = 12
+	static picCard: number = 13
+	static autoReplyPush: number = 16
+	static notifyText: number = 18
+}
+
+/** 会话对方账号卡（源 AccountListModel 业务子集） */
+export class AccountCard {
+	mid: number = 0
+	name: string = ''
+	face: string = ''
+}
+
+/** 会话末条消息（源 LastMsg；content 为解析后的对象） */
+export class LastMsg {
+	senderUid: number = 0
+	receiverId: number = 0
+	msgType: number = 0
+	msgSeqno: number = 0
+	timestamp: number = 0
+	msgKey: number = 0
+	msgStatus: number = 0
+	content: UTSJSONObject | null = null
+}
+
+/** 会话条目（源 SessionList 业务子集） */
+export class SessionItem {
+	talkerId: number = 0
+	sessionTs: number = 0
+	unreadCount: number = 0
+	lastMsg: LastMsg | null = null
+	accountInfo: AccountCard | null = null
+}
+
+/** 会话消息（源 MessageItem） */
+export class ChatMsg {
+	senderUid: number = 0
+	receiverId: number = 0
+	msgType: number = 0
+	msgSeqno: number = 0
+	timestamp: number = 0
+	msgKey: number = 0
+	msgStatus: number = 0
+	content: UTSJSONObject | null = null
+}
+
+/** 消息内表情映射（源 e_infos：[表情码] → 图片） */
+export class EmoteInfo {
+	text: string = ''
+	url: string = ''
+}
+
+// ---------------------------------------------------------------- 解析
+
+/** content JSON 字符串 → UTSJSONObject；空串/解析失败返回 null */
+function parseContent(raw: string): UTSJSONObject | null {
+	if (raw.length == 0) {
+		return null
+	}
+	try {
+		return JSON.parse<UTSJSONObject>(raw)
+	} catch (e) {
+		return null
+	}
+}
+
+function parseLastMsg(obj: UTSJSONObject): LastMsg {
+	const msg = new LastMsg()
+	msg.senderUid = numOf(obj, 'sender_uid')
+	msg.receiverId = numOf(obj, 'receiver_id')
+	msg.msgType = numOf(obj, 'msg_type')
+	msg.msgSeqno = numOf(obj, 'msg_seqno')
+	msg.timestamp = numOf(obj, 'timestamp')
+	msg.msgKey = numOf(obj, 'msg_key')
+	msg.msgStatus = numOf(obj, 'msg_status')
+	const rawContent = obj.getString('content')
+	msg.content = parseContent(rawContent == null ? '' : rawContent)
+	return msg
+}
+
+function parseSessionItem(obj: UTSJSONObject): SessionItem {
+	const item = new SessionItem()
+	item.talkerId = numOf(obj, 'talker_id')
+	item.sessionTs = numOf(obj, 'session_ts')
+	item.unreadCount = numOf(obj, 'unread_count')
+	const lastRaw = objOf(obj, 'last_msg')
+	if (lastRaw != null) {
+		item.lastMsg = parseLastMsg(lastRaw)
+	}
+	return item
+}
+
+function parseChatMsg(obj: UTSJSONObject): ChatMsg {
+	const msg = new ChatMsg()
+	msg.senderUid = numOf(obj, 'sender_uid')
+	msg.receiverId = numOf(obj, 'receiver_id')
+	msg.msgType = numOf(obj, 'msg_type')
+	msg.msgSeqno = numOf(obj, 'msg_seqno')
+	msg.timestamp = numOf(obj, 'timestamp')
+	msg.msgKey = numOf(obj, 'msg_key')
+	msg.msgStatus = numOf(obj, 'msg_status')
+	const rawContent = obj.getString('content')
+	msg.content = parseContent(rawContent == null ? '' : rawContent)
+	return msg
+}
+
+/** 会话列表响应解析（get_sessions 的 data） */
+export function parseSessionData(data: UTSJSONObject): Array<SessionItem> {
+	const list: Array<SessionItem> = []
+	const raw = arrOf(data, 'session_list')
+	for (let i = 0; i < raw.length; i++) {
+		list.push(parseSessionItem(raw[i]))
+	}
+	return list
+}
+
+/** 会话消息响应解析（fetch_session_msgs 的 data） */
+export function parseSessionMsgData(data: UTSJSONObject): Array<ChatMsg> {
+	const list: Array<ChatMsg> = []
+	const raw = arrOf(data, 'messages')
+	for (let i = 0; i < raw.length; i++) {
+		list.push(parseChatMsg(raw[i]))
+	}
+	return list
+}
+
+/** e_infos 解析 */
+export function parseEmoteInfos(data: UTSJSONObject): Array<EmoteInfo> {
+	const list: Array<EmoteInfo> = []
+	const raw = arrOf(data, 'e_infos')
+	for (let i = 0; i < raw.length; i++) {
+		const info = new EmoteInfo()
+		info.text = strOf(raw[i], 'text')
+		info.url = strOf(raw[i], 'url')
+		if (info.text.length > 0 && info.url.length > 0) {
+			list.push(info)
+		}
+	}
+	return list
+}
+
+// ---------------------------------------------------------------- 业务函数
+
+/**
+ * 会话末条预览文本（源 whisper/view.dart SessionItem 回退链，逐项一致）：
+ * msgStatus==1 →「你撤回了一条消息」；msgType==2 →「[图片]」；
+ * content 空 →「不支持的消息类型」；
+ * 否则 content.text ?? content.content ?? content.title ?? content.reply_content ??「不支持的消息类型」。
+ */
+export function sessionPreview(item: SessionItem): string {
+	const last = item.lastMsg
+	if (last == null) {
+		return '不支持的消息类型'
+	}
+	if (last.msgStatus == 1) {
+		return '你撤回了一条消息'
+	}
+	if (last.msgType == MsgType.pic) {
+		return '[图片]'
+	}
+	const content = last.content
+	if (content == null) {
+		return '不支持的消息类型'
+	}
+	const text = strOf(content, 'text')
+	if (text.length > 0) {
+		return text
+	}
+	const inner = strOf(content, 'content')
+	if (inner.length > 0) {
+		return inner
+	}
+	const title = strOf(content, 'title')
+	if (title.length > 0) {
+		return title
+	}
+	const reply = strOf(content, 'reply_content')
+	if (reply.length > 0) {
+		return reply
+	}
+	return '不支持的消息类型'
+}
+
+/**
+ * 文本消息分段：把正文按 e_infos 里的 [表情码] 切成 文本段/表情段，
+ * 供 msg-bubble 逐段出组件（uts 无富文本 span，等价源 splitMapJoin 方案）。
+ * eInfos 无命中时整段按文本返回。
+ */
+export class MsgSegment {
+	/** text 纯文本 / emote 表情图 */
+	type: string = 'text'
+	text: string = ''
+	url: string = ''
+}
+
+export function splitEmoteText(text: string, eInfos: Array<EmoteInfo>): Array<MsgSegment> {
+	const segments: Array<MsgSegment> = []
+	if (text.length == 0) {
+		return segments
+	}
+	if (eInfos.length == 0) {
+		const seg = new MsgSegment()
+		seg.type = 'text'
+		seg.text = text
+		segments.push(seg)
+		return segments
+	}
+	let rest = text
+	while (rest.length > 0) {
+		const open = rest.indexOf('[')
+		if (open < 0) {
+			const tail = new MsgSegment()
+			tail.type = 'text'
+			tail.text = rest
+			segments.push(tail)
+			break
+		}
+		const close = rest.indexOf(']', open)
+		if (close < 0) {
+			const tail = new MsgSegment()
+			tail.type = 'text'
+			tail.text = rest
+			segments.push(tail)
+			break
+		}
+		const token = rest.substring(open, close + 1)
+		let matched: EmoteInfo | null = null
+		for (let i = 0; i < eInfos.length; i++) {
+			if (eInfos[i].text == token) {
+				matched = eInfos[i]
+				break
+			}
+		}
+		if (open > 0) {
+			const before = new MsgSegment()
+			before.type = 'text'
+			before.text = rest.substring(0, open)
+			segments.push(before)
+		}
+		if (matched != null) {
+			const emoteSeg = new MsgSegment()
+			emoteSeg.type = 'emote'
+			emoteSeg.text = token
+			emoteSeg.url = (matched as EmoteInfo).url
+			segments.push(emoteSeg)
+		} else {
+			// 无映射的表情码按原文显示（源同款：children.add(TextSpan(emojiKey))）
+			const plain = new MsgSegment()
+			plain.type = 'text'
+			plain.text = token
+			segments.push(plain)
+		}
+		rest = rest.substring(close + 1)
+	}
+	return segments
+}
+
+// ---------------------------------------------------------------- 通知条目（回复我的 / 收到的赞 / 系统通知）
+
+/**
+ * 通知游标（源 `lib/models/msg/reply.dart#Cursor` 与 `lib/models/msg/like.dart#Cursor` 同构）。
+ * 分页口径：请求带上一页返回的 id + time（snake_case 参数 id / reply_time / like_time），
+ * is_end 为 true 即没有更多。
+ */
+export class NoticeCursor {
+	id: number = 0
+	isEnd: boolean = false
+	time: number = 0
+
+	static from(obj: UTSJSONObject | null): NoticeCursor {
+		const cursor = new NoticeCursor()
+		if (obj == null) {
+			// 游标缺失按「没有更多」处理，避免页面无限触底请求
+			cursor.isEnd = true
+			return cursor
+		}
+		cursor.id = numOf(obj, 'id')
+		cursor.isEnd = boolOf(obj, 'is_end')
+		cursor.time = numOf(obj, 'time')
+		return cursor
+	}
+}
+
+/** 通知发送人（源 ReplyUser / MessageLikeUser 的业务子集：mid / 昵称 / 头像） */
+export class NoticeUser {
+	mid: number = 0
+	nickname: string = ''
+	avatar: string = ''
+
+	static from(obj: UTSJSONObject): NoticeUser {
+		const user = new NoticeUser()
+		user.mid = numOf(obj, 'mid')
+		user.nickname = strOf(obj, 'nickname')
+		user.avatar = strOf(obj, 'avatar')
+		return user
+	}
+}
+
+/** 回复通知的内容源（源 `ReplyContentItem`；只保留渲染用到的字段） */
+export class ReplyNoticeContent {
+	/** video = 对我的视频发表了评论；reply = 回复了我的评论 */
+	type: string = ''
+	sourceContent: string = ''
+	targetReplyContent: string = ''
+	rootReplyContent: string = ''
+	image: string = ''
+	title: string = ''
+	uri: string = ''
+	nativeUri: string = ''
+	/** @人明细：nickname 用于正文高亮切分，mid/avatar 用于点击跳 member */
+	atDetails: Array<NoticeUser> = []
+
+	static from(obj: UTSJSONObject | null): ReplyNoticeContent {
+		const content = new ReplyNoticeContent()
+		if (obj == null) {
+			return content
+		}
+		content.type = strOf(obj, 'type')
+		content.sourceContent = strOf(obj, 'source_content')
+		content.targetReplyContent = strOf(obj, 'target_reply_content')
+		content.rootReplyContent = strOf(obj, 'root_reply_content')
+		content.image = strOf(obj, 'image')
+		content.title = strOf(obj, 'title')
+		content.uri = strOf(obj, 'uri')
+		content.nativeUri = strOf(obj, 'native_uri')
+		const atRaw = arrOf(obj, 'at_details')
+		for (let i = 0; i < atRaw.length; i++) {
+			content.atDetails.push(NoticeUser.from(atRaw[i]))
+		}
+		return content
+	}
+}
+
+/** 回复通知条目（源 `MessageReplyItem`） */
+export class ReplyNoticeItem {
+	id: number = 0
+	count: number = 0
+	isMulti: number = 0
+	replyTime: number = 0
+	user: NoticeUser = new NoticeUser()
+	item: ReplyNoticeContent = new ReplyNoticeContent()
+
+	static from(obj: UTSJSONObject): ReplyNoticeItem {
+		const notice = new ReplyNoticeItem()
+		notice.id = numOf(obj, 'id')
+		notice.count = numOf(obj, 'count')
+		notice.isMulti = numOf(obj, 'is_multi')
+		notice.replyTime = numOf(obj, 'reply_time')
+		const userObj = objOf(obj, 'user')
+		if (userObj != null) {
+			notice.user = NoticeUser.from(userObj)
+		}
+		notice.item = ReplyNoticeContent.from(objOf(obj, 'item'))
+		return notice
+	}
+}
+
+/** 赞通知的内容源（源 `MessageLikeItemItem`） */
+export class LikeNoticeContent {
+	itemId: number = 0
+	pid: number = 0
+	type: string = ''
+	/** 被赞对象名（「赞了我的评论 / 视频」里的「评论 / 视频」） */
+	business: string = ''
+	businessId: number = 0
+	title: string = ''
+	desc: string = ''
+	image: string = ''
+	uri: string = ''
+	nativeUri: string = ''
+
+	static from(obj: UTSJSONObject | null): LikeNoticeContent {
+		const content = new LikeNoticeContent()
+		if (obj == null) {
+			return content
+		}
+		content.itemId = numOf(obj, 'item_id')
+		content.pid = numOf(obj, 'pid')
+		content.type = strOf(obj, 'type')
+		content.business = strOf(obj, 'business')
+		content.businessId = numOf(obj, 'business_id')
+		content.title = strOf(obj, 'title')
+		content.desc = strOf(obj, 'desc')
+		content.image = strOf(obj, 'image')
+		content.uri = strOf(obj, 'uri')
+		content.nativeUri = strOf(obj, 'native_uri')
+		return content
+	}
+}
+
+/** 赞通知条目（源 `MessageLikeItem`；多人聚合条目，users 为点赞人列表） */
+export class LikeNoticeItem {
+	id: number = 0
+	counts: number = 0
+	likeTime: number = 0
+	noticeState: number = 0
+	users: Array<NoticeUser> = []
+	item: LikeNoticeContent = new LikeNoticeContent()
+
+	static from(obj: UTSJSONObject): LikeNoticeItem {
+		const notice = new LikeNoticeItem()
+		notice.id = numOf(obj, 'id')
+		notice.counts = numOf(obj, 'counts')
+		notice.likeTime = numOf(obj, 'like_time')
+		notice.noticeState = numOf(obj, 'notice_state')
+		const usersRaw = arrOf(obj, 'users')
+		for (let i = 0; i < usersRaw.length; i++) {
+			notice.users.push(NoticeUser.from(usersRaw[i]))
+		}
+		notice.item = LikeNoticeContent.from(objOf(obj, 'item'))
+		return notice
+	}
+}
+
+/** 系统通知条目（源 `MessageSystemModel`；content 双形态已归并为 contentText） */
+export class SystemNoticeItem {
+	id: number = 0
+	cursor: number = 0
+	type: number = 0
+	title: string = ''
+	/** content 为 String 时直取；为对象时取 web 字段（源 SystemItem 渲染口径） */
+	contentText: string = ''
+	timeAt: string = ''
+	sourceName: string = ''
+	sourceLogo: string = ''
+
+	static from(obj: UTSJSONObject): SystemNoticeItem {
+		const notice = new SystemNoticeItem()
+		notice.id = numOf(obj, 'id')
+		notice.cursor = numOf(obj, 'cursor')
+		notice.type = numOf(obj, 'type')
+		notice.title = strOf(obj, 'title')
+		notice.timeAt = strOf(obj, 'time_at')
+		const nested = objOf(obj, 'content')
+		if (nested != null) {
+			notice.contentText = strOf(nested, 'web')
+			if (notice.contentText.length == 0) {
+				notice.contentText = strOf(nested, 'message')
+			}
+		} else {
+			// 实测 query_unified_notify 的 content 会以「JSON 字符串」形态返回（"{\"web\":\"…\"}"），
+			// 直接当文本渲染会把花括号与转义符原样显示；此处先尝试解析取 web / message，失败才按原文展示
+			const raw = strOf(obj, 'content')
+			if (raw.length > 1 && raw.substring(0, 1) == '{') {
+				let parsed: UTSJSONObject | null = null
+				try {
+					parsed = JSON.parse<UTSJSONObject>(raw)
+				} catch (e) {
+					parsed = null
+				}
+				if (parsed != null) {
+					const web = strOf(parsed as UTSJSONObject, 'web')
+					const message = strOf(parsed as UTSJSONObject, 'message')
+					notice.contentText = web.length > 0 ? web : message
+				}
+			}
+			if (notice.contentText.length == 0) {
+				notice.contentText = raw
+			}
+		}
+		const source = objOf(obj, 'source')
+		if (source != null) {
+			notice.sourceName = strOf(source, 'name')
+			notice.sourceLogo = strOf(source, 'logo')
+		}
+		return notice
+	}
+}
+
+/** 通知正文切片（text 普通文本 / at @人，点击跳 member） */
+export class NoticeSegment {
+	type: string = 'text'
+	text: string = ''
+	mid: string = ''
+}
+
+/**
+ * 正文按 @人明细切分（源 Text.rich + TapGestureRecognizer 的等价实现）。
+ *
+ * uts 无「富文本内点击」，因此把正文切成 text / at 两类切片，由组件逐片渲染（at 片外包 text 承接点击）。
+ * 匹配口径：按 at_details 里的昵称拼 `@昵称` 精确前缀匹配；取最长匹配（昵称互为前缀时不误切）；
+ * 未命中明细的 @ 原样保留为文本，不猜 mid。
+ */
+export function splitNoticeAt(content: string, atDetails: Array<NoticeUser>): Array<NoticeSegment> {
+	const segments: Array<NoticeSegment> = []
+	if (content.length == 0) {
+		return segments
+	}
+	let cursor = 0
+	let buffer = ''
+	while (cursor < content.length) {
+		const at = content.indexOf('@', cursor)
+		if (at < 0) {
+			buffer = buffer + content.substring(cursor)
+			break
+		}
+		let matched: NoticeUser | null = null
+		let matchLength = 0
+		for (let i = 0; i < atDetails.length; i++) {
+			const user = atDetails[i]
+			if (user.nickname.length == 0) {
+				continue
+			}
+			const token = '@' + user.nickname
+			if (at + token.length > content.length) {
+				continue
+			}
+			if (content.substring(at, at + token.length) == token && token.length > matchLength) {
+				matched = user
+				matchLength = token.length
+			}
+		}
+		if (matched == null) {
+			// 非明细内的 @：作为普通文本保留，从下一个字符继续找
+			buffer = buffer + content.substring(cursor, at + 1)
+			cursor = at + 1
+			continue
+		}
+		buffer = buffer + content.substring(cursor, at)
+		if (buffer.length > 0) {
+			const textSeg = new NoticeSegment()
+			textSeg.type = 'text'
+			textSeg.text = buffer
+			segments.push(textSeg)
+			buffer = ''
+		}
+		const atSeg = new NoticeSegment()
+		atSeg.type = 'at'
+		atSeg.text = content.substring(at, at + matchLength)
+		atSeg.mid = (matched as NoticeUser).mid.toString()
+		segments.push(atSeg)
+		cursor = at + matchLength
+	}
+	if (buffer.length > 0) {
+		const tailSeg = new NoticeSegment()
+		tailSeg.type = 'text'
+		tailSeg.text = buffer
+		segments.push(tailSeg)
+	}
+	return segments
+}
+
+/** 取 uri 末段作为 bvid（源 item.uri.split('/').last 同口径） */
+export function bvidFromUri(uri: string): string {
+	if (uri.length == 0) {
+		return ''
+	}
+	const slash = uri.lastIndexOf('/')
+	return slash >= 0 ? uri.substring(slash + 1) : uri
+}
+

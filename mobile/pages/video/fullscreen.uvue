@@ -1,0 +1,1186 @@
+<template>
+	<view class="fs">
+		<video
+			id="fs-video"
+			class="fs-video"
+			:src="src"
+			:controls="false"
+			:autoplay="true"
+			:initial-time="startTime"
+			:header="headerObj"
+			:show-loading="true"
+			:show-center-play-btn="false"
+			:show-play-btn="false"
+			:show-fullscreen-btn="false"
+			:show-progress="false"
+			object-fit="contain"
+			@loadedmetadata="onLoadedMetadata"
+			@play="onPlay"
+			@pause="onPause"
+			@timeupdate="onTimeUpdate"
+			@ended="onEnded"
+			@error="onError"
+		>
+			<!-- 起播前封面（源 isShowCover）；点击它所在区域=起播（见 resolveTap 的兜底分支） -->
+			<view v-if="coverShown && cover.length > 0" class="fs-cover">
+				<network-img :src="cover" width="100%" height="100%"></network-img>
+				<view class="fs-cover-mask"></view>
+				<view class="fs-cover-hint">
+					<text class="fs-cover-hint-text">点击播放</text>
+				</view>
+			</view>
+
+			<!-- 手势层：铺满画面。控制层与各类 HUD 都是它的子节点，
+			     子节点的触摸会冒泡到这一层，由页面统一判定单击/双击/长按/拖动 -->
+			<!-- 弹幕层（与详情页同一组件；源全屏是弹幕消费主场景）。刻意放在手势层之前，
+			     让手势层压在它上面接手势，弹幕 canvas 不抢触摸 -->
+			<view class="fs-dm" :style="dmLayerStyle">
+				<danmaku-layer
+					:cid="danmakuCid"
+					:playing="playing"
+					:progress-ms="dmProgressMs"
+					:enabled="dmEnabled"
+					:show-area="dmShowArea"
+					:opacity="dmOpacity"
+					:font-scale="dmFontScale"
+					:duration-sec="dmDuration"
+					:stroke-width="dmStrokeWidth"
+					:block-types="dmBlockTypes"
+				></danmaku-layer>
+			</view>
+			<!-- 手势层：铺满画面。控制层与各类 HUD 都是它的子节点，
+			     子节点的触摸会冒泡到这一层，由页面统一判定单击/双击/长按/拖动 -->
+			<view
+				class="fs-gesture"
+				@touchstart="onTouchStart"
+				@touchmove="onTouchMove"
+				@touchend="onTouchEnd"
+				@touchcancel="onTouchEnd"
+			>
+				<!-- 拖动/提示 HUD（居中） -->
+				<view v-if="hudText.length > 0" class="fs-hud">
+					<view class="fs-hud-box">
+						<text class="fs-hud-text">{{ hudText }}</text>
+					</view>
+				</view>
+
+				<!-- 双击快进/快退/播放暂停指示 -->
+				<view v-if="flashText.length > 0" class="fs-flash">
+					<view class="fs-flash-box">
+						<text class="fs-flash-text">{{ flashText }}</text>
+					</view>
+				</view>
+
+				<!-- 播放失败：明确错误 + 重试，不静默黑屏 -->
+				<view v-if="errorText.length > 0" class="fs-error">
+					<text class="fs-error-text">{{ errorText }}</text>
+					<view class="fs-error-retry" @click="retry">
+						<text class="fs-error-retry-text">点击重试</text>
+					</view>
+				</view>
+
+				<fullscreen-controls
+					v-if="controlsVisible || locked"
+					:playing="playing"
+					:position="position"
+					:duration="duration"
+					:locked="locked"
+					:title="title"
+					:rate="baseRate"
+					:danmaku-enabled="dmEnabled"
+					@play-pause="togglePlay"
+					@seek="seekTo"
+					@lock="onLockChange"
+					@exit="exitPage"
+					@rate="onRateChange"
+					@toggle-danmaku="onToggleDanmaku"
+				></fullscreen-controls>
+			</view>
+		</video>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onReady, onUnload, onBackPress } from '@dcloudio/uni-app'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import FullscreenControls from '../../components/player/fullscreen-controls.uvue'
+import { timeFormat } from '../../utils/format.uts'
+import { statusBarHeight, safeAreaBottom } from '../../utils/safeArea.uts'
+import { UA_DESKTOP, REFERER } from '../../utils/constants.uts'
+import { fetchPlayUrl, selectPlaySrc, selectPlayBackup } from '../../api/play.uts'
+import { PlayResult } from '../../models/video-detail.uts'
+import { SK, getBool, getNumber } from '../../utils/storage.uts'
+import DanmakuLayer from '../../components/player/danmaku-layer.uvue'
+import {
+	getDanmakuBlockType, getDanmakuShowArea, getDanmakuOpacity, getDanmakuFontScale,
+	getDanmakuDuration, getDanmakuStrokeWidth
+} from '../../utils/storage.uts'
+
+/**
+ * 全屏播放页（源头：`lib/plugin/pl_player/view.dart` 577-705 手势层
+ * + `header_control.dart` 1164-1367 头部控制 + `utils/fullscreen.dart` 横屏/沉浸式；
+ * 结构见 设计_视频详情域 §三「全屏时离开滚动流」、§五 `pages/video/fullscreen.uvue`）。
+ *
+ * 入参（父会话按此跳转，参数名固定）：
+ *   bvid / cid / src(视频地址，仅取流失败时兜底) / cover / title / startTime(秒) / danmakuCid(缺省=cid)
+ *
+ * 取流：本页按 bvid/cid **自取一份新地址**（qn 与详情页一致，fetchPlayUrl 内部固定 80），
+ *   不复用详情页那一份——同一 durl 被两个播放器实例同时占用会被 CDN 判 403
+ *   （真机实测：详情页播正常、本页复用详情页地址时报 Response code: 403）。
+ *   取流失败时退回传入的 src；主地址播放失败再切接口返回的 backup_url（只切一次）。
+ * 出参（返回上一页时）：`uni.$emit('player:fullscreen-exit', { position: 秒 })` + `uni.navigateBack()`。
+ *   位置在三种退出路径上都会回传：①控制层返回键 ②系统返回键/侧滑（onBackPress）
+ *   ③页面被直接销毁（onUnload 兜底，不重复回传）。
+ *
+ * 手势（自实现 touchstart/touchmove/touchend，不用组件内置手势）：
+ *   单击 → 显隐控制层（显示后 3s 自动隐藏）；起播前单击 = 起播（web 端自动播放被拦截时的兜底）
+ *   双击 → 左 1/3 快退 10s、中 1/3 播放/暂停、右 1/3 快进 10s；200ms 内连点按倍数累加
+ *   横向拖动 → 90 秒/屏宽 换算目标位置，松手 seek，拖动中显示「mm:ss / 总时长」
+ *   纵向拖动 → 左 1/3 亮度、右 1/3 音量（未接入原生插件，只给提示）、中间区上下滑切换全屏
+ *   长按 → 临时 2.0X，松手恢复
+ *
+ * 端差异：横屏与状态栏隐藏走 `page.setPageStyle`（uni-app x 不再支持 plus API，
+ *   `plus.screen.lockOrientation` 在 uni-app x 下不可用），整段用 `#ifdef APP` 包住，
+ *   web/小程序端不调用、退化为普通竖屏也不报错。亮度同理走 `#ifdef APP`。
+ *
+ * 已知限制：音量调节未接入（源码走 flutter_volume_controller 插件，本工程无对应 uts 插件）；
+ *   App 端横屏需路由登记 pageOrientation（见交付说明）。
+ *
+ * 弹幕：与详情页共用 components/player/danmaku-layer（源全屏是弹幕主场景），
+ *   进度由本页 timeupdate 转毫秒喂给弹幕层；弹幕开关与 6 项渲染参数读设置键（与详情页同源）。
+ */
+const bvid = ref<string>('')
+const cid = ref<number>(0)
+const danmakuCid = ref<number>(0)
+const src = ref<string>('')
+/** 备用播放地址（接口返回的 backup_url）：主地址失败时切一次 */
+const backupSrc = ref<string>('')
+const cover = ref<string>('')
+const title = ref<string>('')
+/** 起播位置（秒），来自详情页播放进度 */
+const startTime = ref<number>(0)
+
+const playing = ref<boolean>(false)
+const position = ref<number>(0)
+const duration = ref<number>(0)
+const controlsVisible = ref<boolean>(true)
+const locked = ref<boolean>(false)
+/** 用户选定倍速（长按临时倍速不改这里）；初值读 SK.playSpeedDefault（倍速设置子页维护） */
+const baseRate = ref<number>(getNumber(SK.playSpeedDefault, 1.0))
+const coverShown = ref<boolean>(false)
+const errorText = ref<string>('')
+const hudText = ref<string>('')
+const flashText = ref<string>('')
+const brightness = ref<number>(0.5)
+
+// ---- 弹幕层（与详情页同源配置：开关 + 渲染 6 键）
+const dmEnabled = ref<boolean>(getBool(SK.enableShowDanmaku, false))
+const dmShowArea = ref<number>(getDanmakuShowArea())
+const dmOpacity = ref<number>(getDanmakuOpacity())
+const dmFontScale = ref<number>(getDanmakuFontScale())
+const dmDuration = ref<number>(getDanmakuDuration())
+const dmStrokeWidth = ref<number>(getDanmakuStrokeWidth())
+const dmBlockTypes = ref<Array<number>>(getDanmakuBlockType())
+/** 弹幕层进度（毫秒）：本页 timeupdate 给的是秒 */
+const dmProgressMs = computed((): number => Math.floor(position.value * 1000))
+const dmLayerStyle = computed((): string => 'position:absolute;left:0;top:0;right:0;bottom:0;z-index:1;')
+
+/** 弹幕开关：与详情页 Tab 栏「弹」共用 SK.enableShowDanmaku（写回后弹幕层 watch 即时启停） */
+function onToggleDanmaku() {
+	dmEnabled.value = !dmEnabled.value
+	uni.setStorageSync(SK.enableShowDanmaku, dmEnabled.value)
+	showHud(dmEnabled.value ? '弹幕已开启' : '弹幕已关闭')
+}
+
+const AUTO_HIDE_MS = 3000
+const TAP_WINDOW_MS = 220 // 需求口径 200ms + 20ms 定时器/事件派发容差
+// 长按阈值 500ms：350ms 时普通 adb 点击（按下~抬起约 100-400ms）会被判成长按，
+// 真机截图里凭空出现「2.0X 倍速播放中」；移动即取消长按的逻辑见 onTouchMove
+const LONG_PRESS_MS = 500
+
+const MOVE_SLOP = 8
+const SEEK_SEC_PER_SCREEN = 90
+const SCREEN_SWIPE_MIN = 60
+const DOUBLE_TAP_SEEK_SEC = 10
+
+let controlsTimer = -1
+let hudTimer = -1
+let flashTimer = -1
+let tapTimer = -1
+let longPressTimer = -1
+
+let touchStartX = 0
+let touchStartY = 0
+let lastY = 0
+let baseSec = 0
+let baseBright = 0.5
+let moved = false
+let ignoreTouch = false
+let gestureKind = ''
+let tapCount = 0
+let lastTapMs = 0
+let tapZone = ''
+let longPressFired = false
+/** 手指是否仍按在屏幕上（长按判定的必要条件，抬手即置 false） */
+let touchActive = false
+let prevRate = 1.0
+/** 横向拖动中：这期间 timeupdate 不覆盖 position，否则 HUD 上的时间会被播放进度抢回去 */
+let draggingSeek = false
+
+let curWinW = 390
+let curWinH = 844
+
+/** 详情页传入的地址（取流失败时兜底；为空则取流失败直接落错误态） */
+let fallbackSrc = ''
+/** 主地址失败是否已切过 backup_url（只切一次，免得两个都不行时来回跳） */
+let triedBackup = false
+let fetchingPlayUrl = false
+/** 切备用源后待定位的秒数（-1 = 用 startTime） */
+let resumeSeek = -1
+
+let exiting = false
+let restored = false
+let positionEmitted = false
+let brightnessTouched = false
+let originalBrightness = -1
+let brightnessSupported = false
+// #ifdef APP
+brightnessSupported = true
+// #endif
+
+// 播放器不走平台 cookie jar，防盗链头必须自带（口径同 player-stage / 源 playerInit）
+const headerObj: UTSJSONObject = {}
+headerObj.set('referer', REFERER)
+headerObj.set('user-agent', UA_DESKTOP)
+
+function refreshViewport() {
+	try {
+		const info = uni.getWindowInfo()
+		curWinW = info.windowWidth
+		curWinH = info.windowHeight
+	} catch (e) {
+		// 取不到就保留上一次的值（首帧已用 390x844 兜底）
+	}
+}
+
+function videoContext(): VideoContext | null {
+	try {
+		return uni.createVideoContext('fs-video')
+	} catch (e) {
+		console.log('[fullscreen] createVideoContext failed')
+		return null
+	}
+}
+
+function clampSec(value: number): number {
+	let target = value
+	if (target < 0) {
+		target = 0
+	}
+	const total = duration.value
+	if (total > 0 && target > total) {
+		target = total
+	}
+	return target
+}
+
+function clamp01(value: number): number {
+	if (value < 0) {
+		return 0
+	}
+	if (value > 1) {
+		return 1
+	}
+	return value
+}
+
+/**
+ * src 兼容两种传参形态：已解码的原始地址，或整串被 encodeURIComponent 过的地址。
+ * 只有「整串以 http%3A / https%3A 开头」才解码一次——正常视频地址不会命中，不会误伤签名串里的转义。
+ */
+function normalizeSrc(raw: string): string {
+	if (raw.substring(0, 7) == 'http%3A' || raw.substring(0, 8) == 'https%3A') {
+		try {
+			return decodeURIComponent(raw)
+		} catch (e) {
+			return raw
+		}
+	}
+	return raw
+}
+
+function touchOf(event: TouchEvent): Touch | null {
+	if (event.touches.length > 0) {
+		return event.touches[0]
+	}
+	if (event.changedTouches.length > 0) {
+		return event.changedTouches[0]
+	}
+	return null
+}
+
+/** 顶部留白：竖屏要避开状态栏；横屏全屏下状态栏已隐藏（enterImmersive 设了 hideStatusBar），不再预留 */
+function safeTopInset(): number {
+	if (curWinW > curWinH) {
+		return 0
+	}
+	return statusBarHeight()
+}
+
+/** 触摸点是否落在控制条区域（顶部 44+状态栏 / 底部 22+40+6+安全区）——落在上面就交给控件自己处理 */
+function inControlBar(pageY: number): boolean {
+	const topBlock = 44 + safeTopInset()
+	const bottomBlock = 22 + 40 + 6 + safeAreaBottom()
+	return pageY <= topBlock || pageY >= curWinH - bottomBlock
+}
+
+function zoneOf(pageX: number): string {
+	if (pageX < curWinW / 3) {
+		return 'left'
+	}
+	if (pageX > curWinW * 2 / 3) {
+		return 'right'
+	}
+	return 'center'
+}
+
+function clearControlsTimer() {
+	if (controlsTimer >= 0) {
+		clearTimeout(controlsTimer)
+		controlsTimer = -1
+	}
+}
+
+function clearTapTimer() {
+	if (tapTimer >= 0) {
+		clearTimeout(tapTimer)
+		tapTimer = -1
+	}
+}
+
+function cancelLongPress() {
+	if (longPressTimer >= 0) {
+		clearTimeout(longPressTimer)
+		longPressTimer = -1
+	}
+}
+
+function clearAllTimers() {
+	clearControlsTimer()
+	clearTapTimer()
+	cancelLongPress()
+	if (hudTimer >= 0) {
+		clearTimeout(hudTimer)
+		hudTimer = -1
+	}
+	if (flashTimer >= 0) {
+		clearTimeout(flashTimer)
+		flashTimer = -1
+	}
+}
+
+/** 显示后 3s 自动隐藏（锁定态与暂停态不自动隐藏） */
+function scheduleHide() {
+	clearControlsTimer()
+	if (!controlsVisible.value || locked.value) {
+		return
+	}
+	controlsTimer = setTimeout(() => {
+		controlsTimer = -1
+		if (!locked.value) {
+			controlsVisible.value = false
+		}
+	}, AUTO_HIDE_MS)
+}
+
+function showControls() {
+	controlsVisible.value = true
+	scheduleHide()
+}
+
+function toggleControls() {
+	if (locked.value) {
+		return
+	}
+	if (controlsVisible.value) {
+		clearControlsTimer()
+		controlsVisible.value = false
+	} else {
+		showControls()
+	}
+}
+
+function showHud(text: string) {
+	hudText.value = text
+	if (hudTimer >= 0) {
+		clearTimeout(hudTimer)
+		hudTimer = -1
+	}
+}
+
+function hudClearLater(delay: number) {
+	if (hudTimer >= 0) {
+		clearTimeout(hudTimer)
+	}
+	hudTimer = setTimeout(() => {
+		hudTimer = -1
+		hudText.value = ''
+	}, delay)
+}
+
+function showFlash(text: string) {
+	flashText.value = text
+	if (flashTimer >= 0) {
+		clearTimeout(flashTimer)
+	}
+	flashTimer = setTimeout(() => {
+		flashTimer = -1
+		flashText.value = ''
+	}, 600)
+}
+
+function applyRate(rate: number) {
+	const ctx = videoContext()
+	if (ctx == null) {
+		return
+	}
+	try {
+		ctx.playbackRate(rate)
+	} catch (e) {
+		console.log('[fullscreen] playbackRate failed rate=' + rate.toString())
+	}
+}
+
+function togglePlay() {
+	const ctx = videoContext()
+	if (ctx == null) {
+		return
+	}
+	if (playing.value) {
+		ctx.pause()
+	} else {
+		ctx.play()
+	}
+	scheduleHide()
+}
+
+function seekTo(sec: number) {
+	const target = clampSec(sec)
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.seek(target)
+	}
+	position.value = target
+	scheduleHide()
+}
+
+function onRateChange(rate: number) {
+	baseRate.value = rate
+	applyRate(rate)
+	showHud(rate.toString() + 'X 倍速')
+	hudClearLater(800)
+	scheduleHide()
+}
+
+function onLockChange(target: boolean) {
+	locked.value = target
+	if (target) {
+		clearControlsTimer()
+		controlsVisible.value = false
+	} else {
+		showControls()
+	}
+}
+
+/**
+ * 取流：按 bvid/cid 现取一份新地址（qn 由 fetchPlayUrl 内部固定 80，与详情页一致）。
+ * 取不到时退回详情页传入的 src；两者都没有才落错误态——不静默黑屏。
+ */
+async function loadPlayUrl() {
+	if (fetchingPlayUrl) {
+		return
+	}
+	if (bvid.value.length == 0 || cid.value <= 0) {
+		if (fallbackSrc.length > 0) {
+			src.value = fallbackSrc
+			console.log('[fullscreen] no bvid/cid, use passed src')
+			return
+		}
+		errorText.value = '缺少视频参数（bvid/cid），请返回重新进入'
+		console.log('[fullscreen] no bvid/cid and no src')
+		return
+	}
+	fetchingPlayUrl = true
+	showHud('正在获取播放地址…')
+	const result: PlayResult = await fetchPlayUrl(bvid.value, cid.value, false)
+	fetchingPlayUrl = false
+	const data = result.data
+	let url = ''
+	let backup = ''
+	if (result.status && data != null && data.durl.length > 0) {
+		url = data.durl[0].url
+		backup = data.durl[0].backupUrl
+	}
+	if (url.length == 0) {
+		console.log('[fullscreen] playurl fail cid=' + cid.value.toString() + ' msg=' + result.message +
+			' fallback=' + (fallbackSrc.length > 0 ? 'yes' : 'no'))
+		if (fallbackSrc.length > 0) {
+			url = fallbackSrc
+		} else {
+			hudText.value = ''
+			errorText.value = result.message.length > 0 ? result.message : '播放地址获取失败'
+			return
+		}
+	}
+	hudText.value = ''
+	triedBackup = false
+	// 与详情页同一套地址选择（api/play.uts#selectPlaySrc）：CDN 优选后主地址才是可播的，
+	// 直接用接口主地址会在部分 CDN 节点上 `Source error`（真机实测 code=300001）
+	backupSrc.value = selectPlayBackup(url, backup)
+	src.value = selectPlaySrc(url, backup)
+	// autoplay 属性只在 video 元素初始化时生效；本页 src 是异步取回的，
+	// src 挂上时必须显式起播（真机实测：只靠 autoplay 会偶发停在封面和「点击播放」）
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.play()
+	}
+	console.log('[fullscreen] playurl ok cid=' + cid.value.toString() + ' urlLen=' + url.length.toString() +
+		' backup=' + (backup.length > 0 ? 'yes' : 'no'))
+}
+
+function retry() {
+	errorText.value = ''
+	// 地址级失败（403/签名过期/已切过备用源仍失败）：重新取一份新地址，取不到再落错误态
+	if (src.value.length == 0 || triedBackup) {
+		triedBackup = false
+		backupSrc.value = ''
+		src.value = ''
+		loadPlayUrl()
+		return
+	}
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.play()
+	}
+}
+
+/** 亮度：仅 App 端可用（web/小程序无对应能力，按提示降级，不显示假的百分比） */
+function readBrightness() {
+	if (!brightnessSupported) {
+		return
+	}
+	// #ifdef APP
+	uni.getScreenBrightness({
+		success: (res) => {
+			brightness.value = res.value
+			originalBrightness = res.value
+		},
+		fail: (err) => {
+			console.log('[fullscreen] getScreenBrightness failed')
+		}
+	})
+	// #endif
+}
+
+function applyBrightness(value: number) {
+	if (!brightnessSupported) {
+		return
+	}
+	brightnessTouched = true
+	brightness.value = value
+	// #ifdef APP
+	uni.setScreenBrightness({
+		value: value,
+		success: () => {},
+		fail: (err) => {
+			console.log('[fullscreen] setScreenBrightness failed')
+		}
+	})
+	// #endif
+}
+
+function restoreBrightness() {
+	if (!brightnessTouched || originalBrightness < 0) {
+		return
+	}
+	brightnessTouched = false
+	// #ifdef APP
+	uni.setScreenBrightness({
+		value: originalBrightness,
+		success: () => {},
+		fail: (err) => {
+			console.log('[fullscreen] restore brightness failed')
+		}
+	})
+	// #endif
+}
+
+/**
+ * 横屏 + 沉浸式（隐藏状态栏）：页面级 pageStyle，退出时还原。
+ * uni-app x 已不支持 plus API（`plus.screen.lockOrientation` 不可用），页面方向由
+ * pages.json/UniPage 的 pageOrientation 控制；web 端整段跳过（由浏览器决定方向）。
+ */
+// #ifdef APP
+function applyPageStyle(landscape: boolean) {
+	try {
+		const stack = getCurrentPages()
+		if (stack.length == 0) {
+			return
+		}
+		const page = stack[stack.length - 1]
+		const style: UTSJSONObject = {}
+		style.set('pageOrientation', landscape ? 'landscape' : 'portrait')
+		style.set('hideStatusBar', landscape)
+		page.setPageStyle(style)
+	} catch (e) {
+		console.log('[fullscreen] setPageStyle failed')
+	}
+}
+// #endif
+
+function enterImmersive() {
+	// #ifdef APP
+	applyPageStyle(true)
+	// #endif
+}
+
+function restoreSystem() {
+	if (restored) {
+		return
+	}
+	restored = true
+	// #ifdef APP
+	applyPageStyle(false)
+	restoreBrightness()
+	// #endif
+}
+
+function emitPosition() {
+	if (positionEmitted) {
+		return
+	}
+	positionEmitted = true
+	const payload: UTSJSONObject = {}
+	payload.set('position', position.value)
+	uni.$emit('player:fullscreen-exit', payload)
+}
+
+function exitPage() {
+	if (exiting) {
+		return
+	}
+	exiting = true
+	clearAllTimers()
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.pause()
+	}
+	emitPosition()
+	// 出栈放到下一个事件循环并在 onBackPress 里放行（见该钩子注释）：
+	// 程序化 navigateBack 也会经过本页 onBackPress，捕获返回 true 就会被判为 cancel。
+	setTimeout(() => {
+		const stack = getCurrentPages()
+		if (stack.length > 1) {
+			uni.navigateBack({
+				delta: 1,
+				fail: (err) => {
+					// 出栈失败必须留痕：否则页面停在原地、返回键与退出按钮全部失效
+					console.log('[fullscreen] navigateBack fail: ' + err.errMsg)
+				}
+			})
+			return
+		}
+		// 深链直接进全屏（栈里只有本页）时回到首页，避免停在原地（口径同详情页 onBack）
+		uni.reLaunch({ url: '/pages/main/main' })
+	}, 60)
+}
+
+function onTouchStart(event: TouchEvent) {
+	const touch = touchOf(event)
+	if (touch == null) {
+		return
+	}
+	refreshViewport()
+	touchActive = true
+	touchStartX = touch.pageX
+	touchStartY = touch.pageY
+	lastY = touch.pageY
+	moved = false
+	ignoreTouch = false
+	gestureKind = ''
+	longPressFired = false
+	// 锁定态与错误态不接受页面手势（解锁按钮/重试按钮由各自控件接管，事件照常送达）
+	if (locked.value || errorText.value.length > 0) {
+		ignoreTouch = true
+		return
+	}
+	// 控制条区域内的触摸交给控件自身，避免「点播放键顺带显隐控制层 / 拖动进度条触发快进快退」
+	if (controlsVisible.value && inControlBar(touch.pageY)) {
+		ignoreTouch = true
+		return
+	}
+	baseSec = position.value
+	baseBright = brightness.value
+	startLongPress()
+}
+
+function startLongPress() {
+	cancelLongPress()
+	longPressTimer = setTimeout(() => {
+		longPressTimer = -1
+		// 手指已抬起（抬手时 onTouchEnd 会取消定时器，这里是双保险）：点按不能算长按。
+		// 真机实测：抬手不取消定时器时，普通一次点击在阈值到点后仍会触发 2.0X 且不恢复
+		if (!touchActive || moved || ignoreTouch || locked.value) {
+			return
+		}
+		longPressFired = true
+		prevRate = baseRate.value
+		// 长按倍速（SK.playSpeedLongPressDefault；开「动态长按倍速」时按当前倍速双倍）
+		const longRate = getBool(SK.enableAutoLongPressSpeed, false)
+			? Math.round(prevRate * 2 * 100) / 100
+			: getNumber(SK.playSpeedLongPressDefault, 2.0)
+		applyRate(longRate)
+		showHud(longRate.toString() + 'X 倍速播放中')
+	}, LONG_PRESS_MS)
+}
+
+function onTouchMove(event: TouchEvent) {
+	if (ignoreTouch || locked.value) {
+		return
+	}
+	const touch = touchOf(event)
+	if (touch == null) {
+		return
+	}
+	const dx = touch.pageX - touchStartX
+	const dy = touch.pageY - touchStartY
+	lastY = touch.pageY
+	if (!moved) {
+		if (Math.abs(dx) < MOVE_SLOP && Math.abs(dy) < MOVE_SLOP) {
+			return
+		}
+		moved = true
+		cancelLongPress()
+		if (Math.abs(dx) > Math.abs(dy)) {
+			gestureKind = 'seek'
+			draggingSeek = true
+		} else {
+			const zone = zoneOf(touchStartX)
+			if (zone == 'left') {
+				gestureKind = 'brightness'
+			} else if (zone == 'right') {
+				gestureKind = 'volume'
+			} else {
+				gestureKind = 'screen'
+			}
+		}
+	}
+	if (gestureKind == 'seek') {
+		const target = clampSec(baseSec + dx / curWinW * SEEK_SEC_PER_SCREEN)
+		position.value = target
+		showHud(timeFormat(target) + ' / ' + timeFormat(duration.value))
+	} else if (gestureKind == 'brightness') {
+		if (!brightnessSupported) {
+			showHud('当前端不支持亮度调节')
+			return
+		}
+		const value = clamp01(baseBright - dy / (curWinH * 3))
+		applyBrightness(value)
+		showHud('亮度 ' + Math.round(value * 100).toString() + '%')
+	} else if (gestureKind == 'volume') {
+		// 音量走原生插件（源 flutter_volume_controller），本工程未接入：只提示，不假装能调
+		showHud('音量调节未接入（需原生插件）')
+	} else {
+		if (dy > SCREEN_SWIPE_MIN) {
+			showHud('松开退出全屏')
+		} else if (dy < -SCREEN_SWIPE_MIN) {
+			showHud('已经是全屏')
+		}
+	}
+}
+
+function onTouchEnd(event: TouchEvent) {
+	// 抬手即作废长按判定：不清定时器的话，普通点按也会在阈值到点后被判成长按
+	touchActive = false
+	cancelLongPress()
+	if (ignoreTouch) {
+		ignoreTouch = false
+		return
+	}
+	if (locked.value) {
+		return
+	}
+	if (longPressFired) {
+		longPressFired = false
+		applyRate(prevRate)
+		showHud('倍速恢复 ' + prevRate.toString() + 'X')
+		hudClearLater(600)
+		return
+	}
+	if (!moved) {
+		registerTap()
+		return
+	}
+	if (gestureKind == 'seek') {
+		draggingSeek = false
+		seekTo(clampSec(position.value))
+	} else if (gestureKind == 'screen') {
+		const dy = lastY - touchStartY
+		if (dy > SCREEN_SWIPE_MIN) {
+			exitPage()
+			return
+		}
+	}
+	gestureKind = ''
+	hudClearLater(500)
+}
+
+/** 单击/双击统一在 220ms 窗口结束时判定，连点按次数累加 */
+function registerTap() {
+	const now = Date.now()
+	if (lastTapMs > 0 && now - lastTapMs <= TAP_WINDOW_MS) {
+		tapCount = tapCount + 1
+	} else {
+		tapCount = 1
+	}
+	lastTapMs = now
+	tapZone = zoneOf(touchStartX)
+	clearTapTimer()
+	tapTimer = setTimeout(() => {
+		tapTimer = -1
+		resolveTap()
+	}, TAP_WINDOW_MS)
+}
+
+function resolveTap() {
+	const count = tapCount
+	tapCount = 0
+	if (count <= 1) {
+		// 起播前（封面还在）单击=起播：web 端自动播放常被浏览器拦截，需要一次用户手势
+		if (!playing.value && coverShown.value) {
+			togglePlay()
+			return
+		}
+		toggleControls()
+		return
+	}
+	// 双击快退/快进开关（SK.enableQuickDouble）：关闭时双击退化为播放/暂停
+	if (!getBool(SK.enableQuickDouble, true)) {
+		const willPlay = !playing.value
+		togglePlay()
+		showFlash(willPlay ? '播放' : '暂停')
+		return
+	}
+	if (tapZone == 'left') {
+		const step = DOUBLE_TAP_SEEK_SEC * (count - 1)
+		seekTo(position.value - step)
+		showFlash('-' + step.toString() + 's')
+	} else if (tapZone == 'right') {
+		const step = DOUBLE_TAP_SEEK_SEC * (count - 1)
+		seekTo(position.value + step)
+		showFlash('+' + step.toString() + 's')
+	} else {
+		const willPlay = !playing.value
+		togglePlay()
+		showFlash(willPlay ? '播放' : '暂停')
+	}
+}
+
+function onLoadedMetadata() {
+	// 切备用源时定位到切换瞬间的位置；首次起播用详情页带来的 startTime
+	const target = resumeSeek >= 0 ? resumeSeek : startTime.value
+	resumeSeek = -1
+	const ctx = videoContext()
+	if (ctx != null) {
+		if (target > 0) {
+			position.value = target
+			ctx.seek(target)
+		}
+		// 元数据就绪后兜底起播：src 异步到达时 autoplay 属性可能已被消费，只 setSrc 不会播
+		if (!playing.value) {
+			ctx.play()
+		}
+	}
+}
+
+function onPlay() {
+	playing.value = true
+	errorText.value = ''
+	coverShown.value = false
+	scheduleHide()
+}
+
+function onPause() {
+	playing.value = false
+	// 暂停时把控制层亮出来（仍有 3s 自动隐藏，口径同「显示后 3s 自动隐藏」）
+	showControls()
+}
+
+function onTimeUpdate(event: UniVideoTimeUpdateEvent) {
+	const detail = event.detail
+	if (!draggingSeek) {
+		position.value = detail.currentTime
+	}
+	if (detail.duration > 0) {
+		duration.value = detail.duration
+	}
+}
+
+function onEnded() {
+	playing.value = false
+	// 自动退出（SK.enableAutoExit）：播完直接回详情页（源 detail/view.dart 同款）
+	if (getBool(SK.enableAutoExit, false)) {
+		console.log('[fullscreen] auto exit on ended (SK.enableAutoExit)')
+		exitPage()
+		return
+	}
+	// 播完亮出控制层，方便重播/退出（同样 3s 后自动隐藏）
+	showControls()
+}
+
+function onError(event: UniVideoErrorEvent) {
+	if (src.value.length == 0) {
+		// 取流中（src 还没挂上）不算失败，不误报
+		return
+	}
+	console.log('[fullscreen] video error code=' + event.detail.errCode.toString() + ' msg=' + event.detail.errMsg)
+	// 主地址（常见为 PCDN 节点）失败时切接口给的备用 CDN 再试一次，切换后定位到当时的位置
+	if (!triedBackup && backupSrc.value.length > 0) {
+		triedBackup = true
+		resumeSeek = position.value
+		// 换源后播放状态机重来：否则 onLoadedMetadata 里 `!playing` 判假，新源不起播（停在「点击播放」）
+		playing.value = false
+		console.log('[fullscreen] switch to backup url')
+		src.value = backupSrc.value
+		errorText.value = ''
+		return
+	}
+	errorText.value = '播放失败'
+}
+
+onLoad((options) => {
+	enterImmersive()
+	if (options == null) {
+		errorText.value = '缺少播放参数（bvid/cid 或 src）'
+		return
+	}
+	// 先解析 bvid/cid：本页按它自取一份新地址（src 只作取流失败的兜底）
+	const rawBvid = options['bvid']
+	if (rawBvid != null) {
+		bvid.value = rawBvid as string
+	}
+	const rawCid = options['cid']
+	if (rawCid != null) {
+		const parsedCid = parseInt(rawCid as string)
+		cid.value = isNaN(parsedCid) ? 0 : parsedCid
+	}
+	const rawSrc = options['src']
+	if (rawSrc != null && (rawSrc as string).length > 0) {
+		fallbackSrc = normalizeSrc(rawSrc as string)
+	}
+	const rawCover = options['cover']
+	if (rawCover != null) {
+		cover.value = rawCover as string
+	}
+	coverShown.value = cover.value.length > 0
+	const rawTitle = options['title']
+	if (rawTitle != null && (rawTitle as string).length > 0) {
+		title.value = rawTitle as string
+	} else {
+		title.value = '视频'
+	}
+	const rawStart = options['startTime']
+	if (rawStart != null) {
+		// startTime 为播放进度秒数（详情页已按整秒上报），取整即可；无小数则解析为 0
+		const parsedStart = parseInt(rawStart as string)
+		startTime.value = isNaN(parsedStart) ? 0 : parsedStart
+		position.value = startTime.value
+	}
+	// 弹幕 cid 缺省时与 cid 相同（弹幕层按该 cid 拉分段）
+	const rawDanmakuCid = options['danmakuCid']
+	if (rawDanmakuCid != null) {
+		const parsedDanmaku = parseInt(rawDanmakuCid as string)
+		danmakuCid.value = isNaN(parsedDanmaku) ? cid.value : parsedDanmaku
+	} else {
+		danmakuCid.value = cid.value
+	}
+	// 自取新地址（详情页那一份已被本页释放，不复用）；无 bvid/cid 时按兜底 src 播
+	loadPlayUrl()
+})
+
+onReady(() => {
+	refreshViewport()
+	readBrightness()
+	scheduleHide()
+	console.log('[fullscreen] bvid=' + bvid.value + ' cid=' + cid.value.toString() +
+		' danmakuCid=' + danmakuCid.value.toString())
+})
+
+onBackPress(() => {
+	if (exiting) {
+		// 已在退出流程中：放行系统默认返回。
+		// 程序化 navigateBack 也会经过本钩子，这里若继续 return true 会被判为 cancel，
+		// 页面停在原地且 exiting 已置位 → 返回键与退出按钮全部失效（真机实测）。
+		return false
+	}
+	exitPage()
+	return true
+})
+
+onUnload(() => {
+	clearAllTimers()
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.pause()
+	}
+	// 侧滑/系统返回也可能直接销毁页面：位置照回传（positionEmitted 保证只发一次）
+	emitPosition()
+	restoreSystem()
+})
+</script>
+
+<style>
+	.fs {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		background-color: #000000;
+	}
+
+	.fs-video {
+		flex: 1;
+		width: 100%;
+		/* 封面/手势层是 video 的子节点，必须让 video 成为定位祖先 */
+		position: relative;
+	}
+
+	.fs-cover {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+	}
+
+	.fs-cover-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.2);
+	}
+
+	.fs-cover-hint {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 96px;
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+	}
+
+	.fs-cover-hint-text {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.85);
+	}
+
+	.fs-gesture {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+	}
+
+	.fs-hud {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.fs-hud-box {
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+		border-radius: 8px;
+		background-color: rgba(0, 0, 0, 0.66);
+	}
+
+	.fs-hud-text {
+		font-size: 15px;
+		color: #FFFFFF;
+	}
+
+	.fs-flash {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.fs-flash-box {
+		width: 92px;
+		height: 62px;
+		border-radius: 10px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		background-color: rgba(0, 0, 0, 0.55);
+	}
+
+	.fs-flash-text {
+		font-size: 17px;
+		color: #FFFFFF;
+	}
+
+	.fs-error {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		background-color: rgba(0, 0, 0, 0.62);
+	}
+
+	.fs-error-text {
+		font-size: 14px;
+		color: #FFFFFF;
+	}
+
+	.fs-error-retry {
+		margin-top: 10px;
+		padding-left: 14px;
+		padding-right: 14px;
+		height: 34px;
+		border-radius: 17px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		background-color: rgba(255, 255, 255, 0.18);
+	}
+
+	.fs-error-retry-text {
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+</style>

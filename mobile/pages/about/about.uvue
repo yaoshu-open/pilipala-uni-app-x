@@ -1,0 +1,416 @@
+<template>
+	<view class="ab" :style="pageStyle">
+		<app-navbar title="关于" :show-back="true"></app-navbar>
+
+		<scroll-view class="ab-scroll" direction="vertical">
+			<view class="ab-body" :style="bodyStyle">
+				<!-- 品牌区：Logo + 应用名 + 版本胶囊（1:1 基线；Logo 为自绘简化版——工程无 logo 资产，登记差异） -->
+				<view class="ab-brand">
+					<image class="ab-logo" src="/static/images/logo_android_2.png" mode="aspectFit"></image>
+					<text class="ab-name" :style="nameStyle">PiliPala</text>
+					<view class="ab-version-tag">
+						<text class="ab-version-text" :style="versionTextStyle">{{ versionText }}</text>
+					</view>
+				</view>
+
+				<!-- 行清单（1:1 基线顺序；trailing 值/箭头两态） -->
+				<view class="ab-rows" :style="rowsStyle">
+					<view class="ab-row" @click="onOpenSource">
+						<text class="ab-row-title" :style="titleStyle">开源地址</text>
+						<text class="ab-row-value" :style="valueStyle" :max-lines="1">github.com/guozhigq/pilipala</text>
+					</view>
+					<view class="ab-row" @click="onWebsite">
+						<text class="ab-row-title" :style="titleStyle">访问官网</text>
+						<text class="ab-row-value" :style="valueStyle" :max-lines="1">https://pilipalanet.mysxl.cn</text>
+					</view>
+					<view class="ab-row" @click="onPanDownload">
+						<text class="ab-row-title" :style="titleStyle">网盘下载</text>
+						<text class="ab-row-value" :style="valueStyle">提取码：pili</text>
+					</view>
+					<view class="ab-row" @click="onFeedback">
+						<text class="ab-row-title" :style="titleStyle">问题反馈</text>
+						<text class="ab-row-arrow" :style="arrowStyle">›</text>
+					</view>
+					<view class="ab-row" @click="onCommunity">
+						<text class="ab-row-title" :style="titleStyle">交流社区</text>
+						<text class="ab-row-arrow" :style="arrowStyle">›</text>
+					</view>
+					<view class="ab-row" @click="onSponsor">
+						<text class="ab-row-title" :style="titleStyle">赞助</text>
+						<text class="ab-row-arrow" :style="arrowStyle">›</text>
+					</view>
+					<!-- 错误日志：源 about/index.dart 该行跳 /logs（P10 日志页已交付） -->
+					<view class="ab-row" @click="onOpenLogs">
+						<text class="ab-row-title" :style="titleStyle">错误日志</text>
+						<text class="ab-row-arrow" :style="arrowStyle">›</text>
+					</view>
+					<view class="ab-row" @click="onClearCache">
+						<view class="ab-row-col">
+							<text class="ab-row-title" :style="titleStyle">清除缓存</text>
+							<text class="ab-row-sub" :style="valueStyle">本地缓存 {{ cacheSizeText }}</text>
+						</view>
+					</view>
+				</view>
+			</view>
+		</scroll-view>
+
+		<!-- 交流社区弹层（源同款：QQ群复制 / TG频道复制；页面级 onBackPress 接管） -->
+		<view v-if="communityVisible" class="ab-sheet-mask" @click="closeCommunity">
+			<view class="ab-sheet" :style="sheetStyle">
+				<view class="ab-sheet-item" @click.stop="onCopyQQ">
+					<text class="ab-sheet-title" :style="titleStyle">QQ群</text>
+					<text class="ab-row-value" :style="valueStyle">616150809</text>
+				</view>
+				<view class="ab-sheet-item" @click.stop="onCopyTG">
+					<text class="ab-sheet-title" :style="titleStyle">TG频道</text>
+					<text class="ab-sheet-value" :style="valueStyle" :max-lines="1">https://t.me/+lm_oOVmF0RJiODk1</text>
+				</view>
+				<view class="ab-sheet-cancel" @click.stop="closeCommunity">
+					<text class="ab-sheet-cancel-text" :style="titleStyle">取消</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import { pageBackground, cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { CK } from '../../utils/storage.uts'
+
+/**
+ * 关于页（源头：`lib/pages/about/index.dart`）。
+ *
+ * 与源码/基线的对齐与差异：
+ *  - 版本号读 manifest（uni.getAppBaseInfo().appVersion），不写死；取不到时如实显示「版本获取失败」。
+ *  - G6 已拍板不迁移更新检查：版本胶囊只展示，无 New 徽章、无下载弹层（源 Badge/FilledButton 逻辑不搬）。
+ *  - 外部链接（开源/官网/反馈/网盘/TG）：uni-app x 内置 API 无「系统浏览器打开」（需 openSchema uts 插件，
+ *    源 url_launcher externalApplication 无等价）——统一降级为**内置 webview 页打开**（用户仍能看到页面），
+ *    webview 页 ⋮ 菜单再提供「复制链接」；赞助 alipayqr:// scheme 无法在无插件条件下唤起，降级复制赞助链接。
+ *  - 清除缓存：源 CacheManage 清图片磁盘缓存；新端 network-img 无磁盘缓存（内存组件），
+ *    可清的只有 storage 缓存类键——真实计算（getStorageInfoSync 全量占用）+ 正向清单真实清除
+ *    （不碰设置键与登录键：cookie 前缀键、cookie_domains、userInfoCache、accessKey、wbiKeys、timeStamp）。
+ *  - 错误日志行：跳 P10 日志页 /pages/setting/logs（源 about/index.dart 同款）。
+ */
+
+const GITHUB_URL: string = 'https://github.com/guozhigq/pilipala'
+const ISSUES_URL: string = 'https://github.com/guozhigq/pilipala/issues'
+const WEBSITE_URL: string = 'https://pilipalanet.mysxl.cn'
+const PAN_URL: string = 'https://www.123pan.com/s/9sVqVv-flu0A.html'
+const TG_URL: string = 'https://t.me/+lm_oOVmF0RJiODk1'
+const QQ_GROUP: string = '616150809'
+/** 支付宝赞助码链接（源 aPay 的 alipayqr scheme 降级为口令链接复制） */
+const SPONSOR_URL: string = 'https://qr.alipay.com/fkx14623ddwl1ping3ddd73'
+
+const versionText = ref<string>('V…')
+const cacheSizeText = ref<string>('计算中…')
+const communityVisible = ref<boolean>(false)
+
+const primary = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const bodyStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+// 基线为无卡片裸行（旧版清单直接在页面底色上）；卡片底会多出一层色块，故置透明
+const rowsStyle = computed((): string => 'background-color:transparent;')
+const nameStyle = computed((): string => 'color:' + textPrimary() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const valueStyle = computed((): string => 'color:' + textSecondary() + ';')
+const arrowStyle = computed((): string => 'color:' + withAlpha(textSecondary(), 0.7) + ';')
+/** 版本胶囊：主色浅底 + 主色文字（基线浅米黄底棕金字的等价实现，跟主题色走） */
+const versionTextStyle = computed((): string => 'color:' + primary + ';')
+
+const sheetStyle = computed((): string => 'background-color:' + cardBackground() + ';padding-bottom:' + safeAreaBottom().toString() + 'px;')
+
+/** 复制链接并统一提示 */
+function copyLink(url: string, tip: string) {
+	uni.setClipboardData({
+		data: url,
+		success: (_) => {
+			uni.showToast({ title: tip, icon: 'none' })
+		}
+	})
+}
+
+/** 外部链接统一出口：内置 webview 页打开（无系统浏览器 API；见文件头差异说明） */
+function openWebview(url: string, title: string) {
+	uni.navigateTo({
+		url: '/pages/webview/webview?url=' + encodeURIComponent(url) + '&type=webview&pageTitle=' + encodeURIComponent(title),
+		fail: (_e) => {
+			uni.showToast({ title: '页面打开失败，请重试', icon: 'none' })
+		}
+	})
+}
+
+function loadVersion() {
+	try {
+		const info = uni.getAppBaseInfo()
+		const v = info.appVersion
+		if (v == null || v.length == 0) {
+			versionText.value = '版本获取失败'
+			console.log('[about] appVersion empty')
+			return
+		}
+		versionText.value = 'V' + v
+	} catch (e) {
+		versionText.value = '版本获取失败'
+		console.log('[about] getAppBaseInfo error')
+		console.log(e)
+	}
+}
+
+/** storage 占用（KB → 可读文本；>1M 用 M，否则 KB） */
+function formatSize(kb: number): string {
+	if (kb >= 1024) {
+		return (Math.round(kb / 102.4) / 10).toString() + 'M'
+	}
+	return Math.round(kb).toString() + 'K'
+}
+
+function loadCacheSize() {
+	try {
+		const info = uni.getStorageInfoSync()
+		cacheSizeText.value = formatSize(info.currentSize)
+	} catch (e) {
+		cacheSizeText.value = '获取失败'
+		console.log('[about] storage info error')
+		console.log(e)
+	}
+}
+
+// ---------------------------------------------------------------- 行为（源 AboutController 同款语义）
+
+function onOpenSource() {
+	openWebview(GITHUB_URL, '开源地址')
+}
+
+function onWebsite() {
+	openWebview(WEBSITE_URL, '访问官网')
+}
+
+/** 网盘下载：源同款先复制提取码，再复制网盘链接 */
+function onPanDownload() {
+	uni.setClipboardData({
+		data: 'pili',
+		success: (_) => {
+			uni.showToast({ title: '提取码 pili 已复制', icon: 'none', duration: 900 })
+			setTimeout(() => {
+				openWebview(PAN_URL, '网盘下载')
+			}, 900)
+		}
+	})
+}
+
+function onFeedback() {
+	openWebview(ISSUES_URL, '问题反馈')
+}
+
+function onCommunity() {
+	communityVisible.value = true
+}
+
+function closeCommunity() {
+	communityVisible.value = false
+}
+
+function onCopyQQ() {
+	uni.setClipboardData({
+		data: QQ_GROUP,
+		success: (_) => {
+			uni.showToast({ title: 'QQ群号已复制', icon: 'none' })
+		}
+	})
+}
+
+/** TG：源同款先复制链接再拉起浏览器——无系统浏览器 API，复制后改内置 webview 打开 */
+function onCopyTG() {
+	uni.setClipboardData({
+		data: TG_URL,
+		success: (_) => {
+			uni.showToast({ title: 'TG频道已复制，即将打开', icon: 'none', duration: 900 })
+			setTimeout(() => {
+				openWebview(TG_URL, 'TG频道')
+			}, 900)
+		}
+	})
+}
+
+/** 赞助：源 alipayqr:// scheme 拉起支付宝——无外开 API，降级复制赞助链接 */
+function onSponsor() {
+	copyLink(SPONSOR_URL, '赞助链接已复制，可粘贴到支付宝打开')
+}
+
+/**
+ * 清除缓存：正向清单真实清除（缓存类键），设置/登录键不动。
+ * 清后重算占用并 toast 实际清除项数——不虚报「已全部清理」。
+ */
+/** 错误日志：跳日志页（P10 pages/setting/logs） */
+function onOpenLogs() {
+	uni.navigateTo({
+		url: '/pages/setting/logs',
+		fail: (_e) => {
+			uni.showToast({ title: '日志页打开失败，请重试', icon: 'none' })
+		}
+	})
+}
+
+function onClearCache() {
+	const cacheKeys: Array<string> = [CK.historyWord, CK.videoBox, CK.historyPause, CK.videoFit]
+	let removed = 0
+	for (let i = 0; i < cacheKeys.length; i++) {
+		try {
+			const existed = uni.getStorageSync(cacheKeys[i])
+			if (existed != null && existed.toString().length > 0) {
+				uni.removeStorageSync(cacheKeys[i])
+				removed++
+			}
+		} catch (e) {
+			console.log('[about] remove cache key fail ' + cacheKeys[i])
+		}
+	}
+	loadCacheSize()
+	uni.showToast({ title: removed > 0 ? '已清除 ' + removed.toString() + ' 项缓存' : '没有可清除的缓存', icon: 'none' })
+}
+
+// 浮层返回接管：交流社区弹层开 → 先关弹层（页面级钩子，写在组件内无效）
+onBackPress(() => {
+	if (communityVisible.value) {
+		closeCommunity()
+		return true
+	}
+	return false
+})
+
+onLoad((_options) => {
+	loadVersion()
+	loadCacheSize()
+})
+</script>
+
+<style>
+	.ab {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.ab-scroll {
+		flex: 1;
+	}
+	.ab-body {
+		display: flex;
+		flex-direction: column;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	/* 品牌区：居中（1:1 基线：Logo → 应用名 → 版本胶囊） */
+	.ab-brand {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-top: 36px;
+		padding-bottom: 36px;
+	}
+	.ab-logo {
+		width: 150px;
+		height: 150px;
+	}
+	.ab-name {
+		font-size: 17px;
+		font-weight: 500;
+		margin-top: 12px;
+	}
+	.ab-version-tag {
+		margin-top: 8px;
+		padding-left: 14px;
+		padding-right: 14px;
+		padding-top: 4px;
+		padding-bottom: 4px;
+		border-radius: 12px;
+		background-color: #F2EDE4;
+	}
+	.ab-version-text {
+		font-size: 12px;
+	}
+	/* 行清单：卡片底 + 行高 52（基线行距宽松，无分割线靠留白） */
+	.ab-rows {
+		display: flex;
+		flex-direction: column;
+		border-radius: 12px;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.ab-row {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.ab-row-col {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		min-height: 56px;
+	}
+	.ab-row-title {
+		font-size: 15px;
+	}
+	.ab-row-value {
+		font-size: 12px;
+		max-width: 220px;
+	}
+	.ab-row-sub {
+		font-size: 12px;
+		margin-top: 2px;
+	}
+	.ab-row-arrow {
+		font-size: 18px;
+	}
+	/* 交流社区弹层 */
+	.ab-sheet-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+	}
+	.ab-sheet {
+		display: flex;
+		flex-direction: column;
+		border-top-left-radius: 14px;
+		border-top-right-radius: 14px;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.ab-sheet-item {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.ab-sheet-title {
+		font-size: 15px;
+	}
+	.ab-sheet-value {
+		font-size: 12px;
+		max-width: 240px;
+	}
+	.ab-sheet-cancel {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.ab-sheet-cancel-text {
+		font-size: 15px;
+	}
+</style>

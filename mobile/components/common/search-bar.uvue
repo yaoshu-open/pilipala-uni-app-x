@@ -1,0 +1,143 @@
+<template>
+	<view class="sb" :style="rootStyle">
+		<view class="sb-bar">
+			<view class="sb-back" @click="onBack">
+				<text class="sb-back-icon" :style="iconStyle">←</text>
+			</view>
+			<view class="sb-field">
+				<input
+					class="sb-input"
+					:style="inputStyle"
+					:value="keyword"
+					:focus="autofocus"
+					:placeholder="placeholder"
+					placeholder-class="sb-placeholder"
+					confirm-type="search"
+					@input="onInput"
+					@confirm="onConfirm"
+				/>
+				<view v-if="keyword.length > 0" class="sb-clear" @click="onClearTap">
+					<p-icon name="clear-outlined" :size="22" :color="iconColor"></p-icon>
+				</view>
+			</view>
+			<view class="sb-search" @click="onConfirm">
+				<p-icon name="search" :size="22" :color="iconColor"></p-icon>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import PIcon from '../p-icon/p-icon.uvue'
+import { cardBackground, textPrimary } from '../../utils/theme.uts'
+import { statusBarPaddingTop } from '../../utils/safeArea.uts'
+
+/**
+ * 通用搜索头（源头：`lib/pages/fav_search/view.dart`、`lib/pages/history_search/view.dart`
+ * 的 AppBar.title=TextField 结构：返回箭头 + 无边框输入框 + 行尾清除 + 右侧搜索按钮）。
+ *
+ * - fav-search / history-search（簇B）与 follow-search / member-search（簇A/C）共用；
+ * - 输入框真可输入（focus 默认弹出键盘，confirm-type=search）；
+ * - 清除按钮语义（源 onClear 同款）：已有关键词 → 清空关键词；无关键词 → 返回上级。
+ *   无关键词时的返回由 emit('back') 交页面决定（栈内返回/回首页）。
+ */
+const props = defineProps({
+	placeholder: { type: String, default: '搜索' },
+	/** 进入页面即弹键盘（源 autofocus: true） */
+	autofocus: { type: Boolean, default: true }
+})
+
+const emit = defineEmits(['submit', 'back'])
+
+const keyword = ref<string>('')
+
+const rootStyle: string = 'background-color:' + cardBackground() + ';' + statusBarPaddingTop(0)
+const iconStyle = computed((): string => 'color:' + textPrimary() + ';')
+const iconColor: string = textPrimary()
+const inputStyle = computed((): string => 'color:' + textPrimary() + ';')
+
+function onInput(event: UniInputEvent) {
+	keyword.value = event.detail.value
+}
+
+function onConfirm() {
+	emit('submit', keyword.value)
+}
+
+function onClearTap() {
+	if (keyword.value.length > 0) {
+		keyword.value = ''
+	} else {
+		emit('back')
+	}
+}
+
+function onBack() {
+	emit('back')
+}
+
+/** 供页面清空搜索词（如父页重置） */
+function clearKeyword() {
+	keyword.value = ''
+}
+
+defineExpose({ clearKeyword })
+</script>
+
+<style>
+	.sb {
+		background-color: #FFFFFF;
+	}
+	.sb-bar {
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-right: 10px;
+	}
+	.sb-back {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sb-back-icon {
+		font-size: 24px;
+		line-height: 24px;
+	}
+	.sb-field {
+		flex: 1;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.sb-input {
+		flex: 1;
+		height: 40px;
+		font-size: 16px;
+	}
+	.sb-placeholder {
+		color: #9A9CA5;
+		font-size: 16px;
+	}
+	.sb-clear {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sb-search {
+		width: 44px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+</style>

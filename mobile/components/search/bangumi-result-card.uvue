@@ -1,0 +1,150 @@
+<template>
+	<view class="brc" @click="onTap">
+		<view class="brc-cover-box">
+			<network-img :src="item.cover" width="111px" height="148px" radius="10px"></network-img>
+			<view class="brc-badge">
+				<p-badge :text="badgeText" type="primary" size="small" :font-size="10"></p-badge>
+			</view>
+		</view>
+		<view class="brc-body">
+			<view class="brc-title">
+				<template v-for="(seg, index) in item.titleSegs" :key="index">
+					<text v-if="seg.type == 'em'" class="brc-title-seg brc-title-em" :style="emStyle">{{ seg.text }}</text>
+					<text v-else class="brc-title-seg" :style="titleStyle">{{ seg.text }}</text>
+				</template>
+			</view>
+			<text class="brc-score" :style="metaStyle">评分:{{ scoreText }}</text>
+			<view class="brc-meta-row">
+				<text class="brc-meta" :style="metaStyle">{{ item.areas }}</text>
+				<text class="brc-meta" :style="metaStyle"> · </text>
+				<text class="brc-meta" :style="metaStyle">{{ pubtimeText }}</text>
+			</view>
+			<view class="brc-meta-row">
+				<text class="brc-meta" :style="metaStyle" :max-lines="1">{{ item.styles }}</text>
+				<text class="brc-meta" :style="metaStyle"> · </text>
+				<text class="brc-meta" :style="metaStyle" :max-lines="1">{{ item.indexShow }}</text>
+			</view>
+			<view class="brc-btn-spacer"></view>
+			<view class="brc-btn" :style="btnStyle" @click.stop="onTap">
+				<text class="brc-btn-text">{{ buttonText }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import PBadge from '../p-badge/p-badge.uvue'
+import { SearchMBangumiItem } from '../../models/search.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 番剧/影视结果卡（源头：search_panel/widgets/media_bangumi_panel.dart；media_ft 影视共用 media 结构）。
+ * 结构：封面 111×148（圆角 10 + 右上类型角标）+ 右列（标题 1 行 em 高亮加粗 → 评分 →
+ * 地区·开播时间 → 风格·集数 → 观看按钮 32）。
+ * 角标文案由页面传入：番剧 tab 用源 ternary（mediaType==1 番剧/国创），影视 tab 传「影视」。
+ * 卡片与按钮点击均 emit('tap')——页面路由到番剧详情（pages/bangumi-intro）。
+ */
+const props = defineProps({
+	item: { type: Object, default: null },
+	badgeText: { type: String, default: '' }
+})
+
+const emit = defineEmits(['tap'])
+
+const item = computed((): SearchMBangumiItem => props.item as SearchMBangumiItem)
+const primary: string = themeColor(currentThemeIndex())
+
+const titleStyle = 'color:' + textPrimary() + ';'
+const emStyle = 'color:' + primary + ';'
+const metaStyle = 'color:' + textSecondary() + ';'
+const btnStyle = 'background-color:' + primary + ';'
+
+const scoreText = computed((): string => item.value.score.toString())
+const pubtimeText = computed((): string => item.value.pubtime == 0 ? '' : dateFormat(item.value.pubtime, 'list'))
+const buttonText = computed((): string => item.value.buttonText.length > 0 ? item.value.buttonText : '观看')
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	.brc {
+		display: flex;
+		flex-direction: row;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 7px;
+		padding-bottom: 7px;
+	}
+	.brc-cover-box {
+		position: relative;
+		flex-shrink: 0;
+	}
+	.brc-badge {
+		position: absolute;
+		top: 6px;
+		right: 4px;
+	}
+	.brc-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-top: 4px;
+		padding-bottom: 4px;
+		overflow: hidden;
+	}
+	.brc-title {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+		max-height: 20px;
+		overflow: hidden;
+	}
+	.brc-title-seg {
+		font-size: 14px;
+		line-height: 20px;
+		font-weight: bold;
+	}
+	.brc-title-em {
+		font-weight: bold;
+	}
+	.brc-score {
+		font-size: 12px;
+		margin-top: 12px;
+	}
+	.brc-meta-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 2px;
+	}
+	.brc-meta {
+		font-size: 12px;
+		flex-shrink: 0;
+	}
+	.brc-btn-spacer {
+		height: 10px;
+	}
+	.brc-btn {
+		height: 32px;
+		padding-left: 18px;
+		padding-right: 18px;
+		border-radius: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		background-color: #5CB67B;
+		align-self: flex-start;
+	}
+	.brc-btn-text {
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+</style>

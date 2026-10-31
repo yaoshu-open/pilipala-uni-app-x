@@ -1,0 +1,630 @@
+<template>
+	<view class="wd" :style="pageStyle">
+		<!-- 顶栏：返回 + 对方头像昵称（点击跳 member）+ ⋮ 更多菜单（源 view.dart AppBar 自定义 title） -->
+		<view class="wd-nav" :style="navStyle">
+			<view class="wd-nav-back" @click="onBack">
+				<p-icon name="arrow-back" :size="24" :color="textPrimary()"></p-icon>
+			</view>
+			<view class="wd-nav-peer" @click="onPeerTap">
+				<network-img
+					class="wd-nav-avatar"
+					:src="face"
+					width="34px"
+					height="34px"
+					radius="17px"
+				></network-img>
+				<text class="wd-nav-name" :style="navNameStyle" :max-lines="1">{{ name }}</text>
+			</view>
+			<view class="wd-nav-more" @click="onToggleMenu">
+				<p-icon name="more-vert-outlined" :size="20" :color="textPrimary()"></p-icon>
+			</view>
+		</view>
+
+		<!-- 消息流：时间正序、最新在底，scroll-top 锚底（源 reverse ListView 等价；
+			接口一次拉取 size=20（源无 loadmore） -->
+		<scroll-view class="wd-msgs" :scroll-top="scrollTop">
+			<view v-if="state == 'error'" class="wd-fill">
+				<p-http-error :message="errorText" @retry="reload"></p-http-error>
+			</view>
+			<view v-if="state != 'error'">
+				<view v-for="(msg, index) in messages" :key="msgKey(msg, index)">
+					<msg-bubble
+						:msg="msg"
+						:e-infos="eInfos"
+						:is-owner="msg.senderUid == myMid"
+						:pic-list="picList"
+					></msg-bubble>
+				</view>
+				<view class="wd-msgs-tail"></view>
+			</view>
+		</scroll-view>
+
+		<!-- 底部输入栏：表情钮 + 输入框 45 圆角 40 + 发送（源 view.dart bottom bar） -->
+		<view class="wd-input-bar" :style="inputBarStyle">
+			<view class="wd-emote-btn" @click="onToggleEmote">
+				<p-icon name="emoji-emotions-outlined" :size="22" :color="textSecondary()"></p-icon>
+			</view>
+			<view class="wd-input-wrap">
+				<input
+					class="wd-input"
+					:style="inputStyle"
+					:value="text"
+					placeholder="文明发言 ～"
+					placeholder-class="wd-placeholder"
+					confirm-type="send"
+					@input="onInput"
+					@confirm="onSend"
+					@focus="onInputFocus"
+				/>
+			</view>
+			<view class="wd-send" @click="onSend">
+				<p-icon name="send" :size="24" :color="textSecondary()"></p-icon>
+			</view>
+		</view>
+
+		<!-- 表情面板：输入栏下方（源 AnimatedSize 位序：msgs / 输入栏 / 面板），
+			复用 components/reply/emote-panel（引用不改） -->
+		<view v-if="showEmote" class="wd-emote" :style="emoteBoxStyle">
+			<emote-panel business="reply" @choose="onEmoteChoose"></emote-panel>
+		</view>
+
+		<!-- ⋮ 菜单：仅「关闭会话」 -->
+		<view v-if="menuVisible" class="wd-menu-mask" @click="onCloseMenu">
+			<view class="wd-menu" :style="menuStyle" @click.stop="noop">
+				<view class="wd-menu-item" @click.stop="onRemoveTap">
+					<text class="wd-menu-item-text" :style="menuTextStyle">关闭会话</text>
+				</view>
+			</view>
+		</view>
+
+		<!-- 关闭会话确认弹层（源 AlertDialog：确认清空会话内容并移除会话？） -->
+		<view v-if="confirmRemove" class="wd-confirm-mask" @click="onCancelRemove">
+			<view class="wd-confirm" :style="confirmStyle" @click.stop="noop">
+				<text class="wd-confirm-title" :style="navNameStyle">提示</text>
+				<text class="wd-confirm-content" :style="secondaryStyle">确认清空会话内容并移除会话？</text>
+				<view class="wd-confirm-actions">
+					<view class="wd-confirm-btn" @click.stop="onCancelRemove">
+						<text class="wd-confirm-cancel" :style="secondaryStyle">取消</text>
+					</view>
+					<view class="wd-confirm-btn" @click.stop="onConfirmRemove">
+						<text class="wd-confirm-ok" :style="primaryTextStyle">确认</text>
+					</view>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onBackPress } from '@dcloudio/uni-app'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import MsgBubble from '../../components/message/msg-bubble.uvue'
+import EmotePanel from '../../components/reply/emote-panel.uvue'
+import { fetchSessionMsg, ackSessionMsg, sendMsg, removeSession } from '../../api/message.uts'
+import { ChatMsg, EmoteInfo } from '../../models/message.uts'
+import { userState } from '../../stores/user.uts'
+import { refreshLoginState, ensureLoginState } from '../../composables/useLogin.uts'
+import {
+	pageBackground, cardBackground, textPrimary, textSecondary,
+	themeColor, currentThemeIndex
+} from '../../utils/theme.uts'
+import { statusBarPaddingTop, statusBarHeight, safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 私信会话详情（源头：`lib/pages/whisper_detail/{view,controller}.dart`）。
+ *
+ *  - 顶栏：返回 + 对方头像 34/昵称（点击跳 member）+ ⋮ 菜单「关闭会话」；
+ *  - 消息流：接口一次拉取 size=20（源无 loadmore；has_more 语义源未消费——新端按源一次拉取，
+ *    加载更多入口保留但无实现即不触发，与源行为一致）；
+ *    数据反转后时间正序渲染 + scroll-top 锚底（源 reverse ListView 等价）；
+ *  - 已读上报：进入页且消息非空即 update_ack（写接口 csrf 前置失败态）；
+ *    失败 toast 一次不阻塞浏览（任务口径，源为完全静默）；
+ *  - 发送：未登录 toast「请先登录」；空内容 toast「请输入内容」；凭据缺失统一失败态、
+ *    输入内容保留可重试；成功后本地追加消息 + 锚底 + uni.$emit 回写会话列表末条（源 refreshLastMsg）；
+ *  - 关闭会话：确认弹层 → remove_session → toast「操作成功」+ uni.$emit 移除条目 + 返回；
+ *  - 返回键优先级：菜单 → 确认弹层 → 表情面板 → 正常返回（页面级 onBackPress）。
+ */
+const primary = themeColor(currentThemeIndex())
+
+const talkerId = ref<number>(0)
+const peerMid = ref<number>(0)
+const name = ref<string>('')
+const face = ref<string>('')
+
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const messages = ref<Array<ChatMsg>>([])
+const eInfos = ref<Array<EmoteInfo>>([])
+const picList = ref<Array<string>>([])
+const scrollTop = ref<number>(0)
+
+const text = ref<string>('')
+const sending = ref<boolean>(false)
+const showEmote = ref<boolean>(false)
+const menuVisible = ref<boolean>(false)
+const confirmRemove = ref<boolean>(false)
+/** 已读失败只 toast 一次（不阻塞浏览） */
+let ackFailedToasted: boolean = false
+let lastSendAt: number = 0
+
+const myMid = computed((): number => userState.info.mid)
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const navStyle = computed((): string => 'background-color:' + cardBackground() + ';' + statusBarPaddingTop(0))
+const navNameStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const menuTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const inputStyle = computed((): string => 'color:' + textPrimary() + ';')
+const menuStyle = computed((): string => 'background-color:' + cardBackground() + ';margin-top:' + (statusBarHeight() + 60).toString() + 'px;')
+const confirmStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+/** 源 EdgeInsets.fromLTRB(8, 12, 12, toolbarType == '' ? safeBottom + 6 : 6) */
+const inputBarStyle = computed((): string => {
+	const bottom = showEmote.value ? 0 : safeAreaBottom()
+	return 'background-color:' + cardBackground() + ';padding-bottom:' + (bottom + 6).toString() + 'px;'
+})
+/** 表情面板高度：源 emoteHeight 默认 230，键盘首现后取键盘高度（App 端面板与键盘互斥，固定 230） */
+const emoteBoxStyle = computed((): string => {
+	const bottom = safeAreaBottom()
+	return 'height:' + (230 + bottom).toString() + 'px;padding-bottom:' + bottom.toString() + 'px;background-color:' + cardBackground() + ';'
+})
+
+function msgKey(msg: ChatMsg, index: number): string {
+	return msg.msgSeqno.toString() + '-' + index.toString()
+}
+
+// ---------------------------------------------------------------- 数据加载
+
+async function loadFirst(retried: boolean = false) {
+	const res = await fetchSessionMsg(talkerId.value)
+	if (!res.status) {
+		// -101：cookie 有效但内存登录态尚未恢复（冷启动 nav 未返回）→ 静默校正后重试一次
+		if (res.code == -101 && !retried) {
+			const ok = await refreshLoginState()
+			if (ok) {
+				return await loadFirst(true)
+			}
+		}
+		state.value = 'error'
+		errorText.value = res.message
+		return
+	}
+	applyMessages(res.messages, res.eInfos)
+	state.value = 'ready'
+	scrollToBottom()
+	// 进入页且消息非空即上报已读（源 ackSessionMsg）；失败 toast 一次不阻塞
+	if (res.messages.length > 0) {
+		ackRead(res.messages)
+	}
+}
+
+/**
+ * 消息应用：接口倒序（最新在前）→ 反转为时间正序（最新在尾），等价源 reverse 渲染；
+ * picList 收集图片消息 url 供预览（源 controller picList，reversed 对应正序）。
+ */
+function applyMessages(raw: Array<ChatMsg>, infos: Array<EmoteInfo>) {
+	const ordered: Array<ChatMsg> = []
+	const pics: Array<string> = []
+	for (let i = raw.length - 1; i >= 0; i--) {
+		const msg = raw[i]
+		ordered.push(msg)
+		if (msg.msgType == 2 && msg.content != null) {
+			const url = (msg.content as UTSJSONObject).getString('url')
+			if (url != null && (url as string).length > 0) {
+				pics.push(url as string)
+			}
+		}
+	}
+	messages.value = ordered
+	eInfos.value = infos
+	picList.value = pics
+}
+
+function scrollToBottom() {
+	// 大值锚底；内容不足一屏时无效也无妨
+	scrollTop.value = scrollTop.value + 100000
+}
+
+function reload() {
+	state.value = 'loading'
+	loadFirst()
+}
+
+// ---------------------------------------------------------------- 已读上报
+
+async function ackRead(list: Array<ChatMsg>) {
+	if (list.length == 0) {
+		return
+	}
+	// ack_seqno 取列表末位（时间最旧一条）的 msgSeqno——源 messageList.last.msgSeqno 照搬
+	const ackSeqno = list[list.length - 1].msgSeqno
+	const res = await ackSessionMsg(talkerId.value, ackSeqno)
+	if (!res.status && !ackFailedToasted) {
+		ackFailedToasted = true
+		uni.showToast({ title: res.message, icon: 'none' })
+	}
+}
+
+// ---------------------------------------------------------------- 发送
+
+function onInput(event: UniInputEvent) {
+	text.value = event.detail.value
+}
+
+function onInputFocus() {
+	// 键盘与表情面板互斥（源 toolbarType 状态机：聚焦即收面板）
+	if (showEmote.value) {
+		showEmote.value = false
+	}
+}
+
+function onToggleEmote() {
+	if (showEmote.value) {
+		showEmote.value = false
+	} else {
+		showEmote.value = true
+		uni.hideKeyboard()
+	}
+}
+
+function onEmoteChoose(token: string) {
+	if (token.length == 0) {
+		return
+	}
+	text.value = text.value + token
+}
+
+async function onSend() {
+	if (sending.value) {
+		return
+	}
+	if (!userState.isLogin) {
+		uni.showToast({ title: '请先登录', icon: 'none' })
+		return
+	}
+	const message = text.value.trim()
+	if (message.length == 0) {
+		uni.showToast({ title: '请输入内容', icon: 'none' })
+		return
+	}
+	const now = Date.now()
+	if (now - lastSendAt < 200) {
+		return
+	}
+	lastSendAt = now
+	sending.value = true
+	const receiver = peerMid.value > 0 ? peerMid.value : talkerId.value
+	const res = await sendMsg(myMid.value, receiver, message)
+	sending.value = false
+	if (!res.status) {
+		// 失败态：toast 原因，输入内容保留可重试（不假成功）
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	// 成功：本地追加消息 + 锚底 + 清空输入；回写会话列表末条（源 insert(0) + refreshLastMsg）
+	const local = new ChatMsg()
+	local.msgSeqno = res.msgKey
+	local.msgKey = res.msgKey
+	local.senderUid = myMid.value
+	local.receiverId = receiver
+	local.msgType = 1
+	local.msgStatus = 0
+	local.timestamp = Math.floor(Date.now() / 1000)
+	const contentObj: UTSJSONObject = {}
+	contentObj.set('content', res.content.length > 0 ? res.content : message)
+	local.content = contentObj
+	messages.value.push(local)
+	scrollToBottom()
+	text.value = ''
+	const payload: UTSJSONObject = {}
+	payload.set('talkerId', talkerId.value)
+	payload.set('content', message)
+	uni.$emit('whisper:refresh-last', payload)
+}
+
+// ---------------------------------------------------------------- 顶栏交互
+
+function onBack() {
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+/** 对方头像昵称点击跳 member（源 GestureDetector → /member?mid=） */
+function onPeerTap() {
+	if (peerMid.value <= 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/member/member?mid=' + peerMid.value.toString() })
+}
+
+function onToggleMenu() {
+	menuVisible.value = !menuVisible.value
+}
+
+function onCloseMenu() {
+	menuVisible.value = false
+}
+
+function noop() {
+}
+
+function onRemoveTap() {
+	menuVisible.value = false
+	confirmRemove.value = true
+}
+
+function onCancelRemove() {
+	confirmRemove.value = false
+}
+
+async function onConfirmRemove() {
+	confirmRemove.value = false
+	const res = await removeSession(talkerId.value)
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	uni.showToast({ title: '操作成功', icon: 'none' })
+	const payload: UTSJSONObject = {}
+	payload.set('talkerId', talkerId.value)
+	uni.$emit('whisper:remove-session', payload)
+	onBack()
+}
+
+// ---------------------------------------------------------------- 生命周期
+
+onLoad((options) => {
+	const rawTalker = options != null ? options['talkerId'] : null
+	const rawMid = options != null ? options['mid'] : null
+	// talkerId 缺失时回退 mid（源 Get.parameters 兜底链）
+	if (rawTalker != null && (rawTalker as string).length > 0) {
+		const parsed = parseInt(rawTalker as string)
+		talkerId.value = isNaN(parsed) ? 0 : parsed
+	} else if (rawMid != null && (rawMid as string).length > 0) {
+		const parsedMid = parseInt(rawMid as string)
+		talkerId.value = isNaN(parsedMid) ? 0 : parsedMid
+	}
+	if (rawMid != null && (rawMid as string).length > 0) {
+		const parsedPeer = parseInt(rawMid as string)
+		peerMid.value = isNaN(parsedPeer) ? 0 : parsedPeer
+	}
+	const rawName = options != null ? options['name'] : null
+	name.value = rawName == null ? '' : decodeURIComponent(rawName as string)
+	const rawFace = options != null ? options['face'] : null
+	face.value = rawFace == null ? '' : decodeURIComponent(rawFace as string)
+	ensureLoginState().then(() => {
+		loadFirst()
+	})
+})
+
+onBackPress((): boolean => {
+	// 返回键优先级：菜单 → 确认弹层 → 表情面板（源 toolbarType 收起 + 弹层关闭）
+	if (menuVisible.value) {
+		menuVisible.value = false
+		return true
+	}
+	if (confirmRemove.value) {
+		confirmRemove.value = false
+		return true
+	}
+	if (showEmote.value) {
+		showEmote.value = false
+		return true
+	}
+	return false
+})
+</script>
+
+<style>
+	.wd {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* 导航行高 56（源 AppBar 工具栏高；基线实测头像 34 于行内居中） */
+	.wd-nav {
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	/* 返回：56 触控区（基线 arrow_back 24 居中于 28dp） */
+	.wd-nav-back {
+		width: 56px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.wd-nav-peer {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.wd-nav-avatar {
+		flex-shrink: 0;
+	}
+	.wd-nav-name {
+		flex: 1;
+		font-size: 16px;
+		font-weight: 500;
+		margin-left: 10px;
+	}
+	/* 更多：48 触控区 + 右留白 14（源 PopupMenuButton 48 + SizedBox(14)；基线实测图标中心 373dp） */
+	.wd-nav-more {
+		width: 48px;
+		height: 56px;
+		margin-right: 14px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.wd-msgs {
+		flex: 1;
+	}
+	.wd-fill {
+		display: flex;
+		flex-direction: column;
+	}
+	.wd-msgs-tail {
+		height: 20px;
+	}
+	/* 表情面板：与键盘互斥的弹层（高度对齐 reply-input 弹层形态） */
+	.wd-emote {
+		height: 230px;
+		display: flex;
+		flex-direction: column;
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(128, 128, 128, 0.18);
+	}
+	/* 输入栏：表情钮 + 输入框 45 圆角 40 + 发送钮（源 bottom bar 常量） */
+	/* 输入栏：源 EdgeInsets.fromLTRB(8, 12, 12, bottom+6) + 上边框 1px grey 0.15 */
+	.wd-input-bar {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 8px;
+		padding-right: 12px;
+		padding-top: 12px;
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(128, 128, 128, 0.15);
+	}
+	/* 表情钮 36×36（源 ToolbarIconButton） */
+	.wd-emote-btn {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.wd-input-wrap {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-left: 4px;
+		margin-right: 4px;
+	}
+	/* 输入框：高 45 圆角 40、底色 outline 5%、字号 titleMedium 16、水平内边距 16（源常量） */
+	.wd-input {
+		flex: 1;
+		height: 45px;
+		border-radius: 40px;
+		background-color: rgba(128, 128, 128, 0.05);
+		font-size: 16px;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.wd-placeholder {
+		color: #9BA1AC;
+		font-size: 16px;
+	}
+	/* 发送钮 48×48（源 IconButton 默认触控区，图标 24） */
+	.wd-send {
+		width: 48px;
+		height: 48px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	/* ⋮ 菜单 */
+	.wd-menu-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.1);
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+	}
+	.wd-menu {
+		margin-right: 12px;
+		border-radius: 8px;
+		display: flex;
+		flex-direction: column;
+		padding-top: 4px;
+		padding-bottom: 4px;
+	}
+	.wd-menu-item {
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 12px;
+		padding-bottom: 12px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.wd-menu-item-text {
+		font-size: 14px;
+	}
+	/* 确认弹层 */
+	.wd-confirm-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.wd-confirm {
+		width: 300px;
+		border-radius: 12px;
+		display: flex;
+		flex-direction: column;
+		padding-left: 24px;
+		padding-right: 24px;
+		padding-top: 20px;
+		padding-bottom: 12px;
+	}
+	.wd-confirm-title {
+		font-size: 16px;
+		font-weight: 500;
+	}
+	.wd-confirm-content {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 12px;
+	}
+	.wd-confirm-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+		margin-top: 8px;
+	}
+	.wd-confirm-btn {
+		height: 44px;
+		padding-left: 16px;
+		padding-right: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.wd-confirm-cancel {
+		font-size: 14px;
+	}
+	.wd-confirm-ok {
+		font-size: 14px;
+	}
+</style>

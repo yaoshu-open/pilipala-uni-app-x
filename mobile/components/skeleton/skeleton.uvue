@@ -1,0 +1,94 @@
+<template>
+	<view class="skeleton">
+		<slot></slot>
+		<view class="skeleton-shimmer" :style="shimmerStyle">
+			<view class="skeleton-shimmer-core" :style="coreStyle"></view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { isDarkMode } from '../../utils/theme.uts'
+
+/**
+ * 骨架屏微光容器。
+ *
+ * 视觉出处：`lib/common/skeleton/skeleton.dart`
+ *  - Shimmer 周期 1000ms，动画区间 -0.5 → 1.5（unbounded repeat，等价于高光带从左侧屏外扫到右侧屏外）；
+ *    梯度 stops [0.1, 0.3, 0.5, 0.7]、方向 Alignment(-1,-0.3) → (1,0.9)；
+ *  - 子元素占位色 = `colorScheme.onInverseSurface`（见 theme.uts#skeletonBase）。
+ *
+ * 目标端等价说明（平台约束，允许差异）：
+ *  - App 端 css animation/@keyframes 不生效（「移动端规范」§二 第 6 条），改用模块级共享计时器
+ *    驱动 left 百分比扫光：24ms/帧、42 帧走完一轮 ≈ 1000ms，区间 -60% → 160%（带子自身宽 40%）；
+ *  - ShaderMask 渐变换成「半透明高光带 + 内芯」双层近似软边（App 端不支持带角度的渐变写法）；
+ *  - 全体实例共用一个计时器并保持同相位（源为各实例独立 controller，视觉无差别）。
+ *
+ * 坑（P1 实测）：样式字符串必须走 computed。写成一次性 const 时 offset 变化不会重算，
+ * 扫光层定格在初始位置 → 两帧截图 SHA256 完全相同，误判为「扫光层未渲染」。
+ */
+const FRAME_MS: number = 24
+const PERIOD_MS: number = 1000
+const FROM_PERCENT: number = -60
+const TO_PERCENT: number = 160
+const STEP: number = (TO_PERCENT - FROM_PERCENT) / (PERIOD_MS / FRAME_MS)
+
+const offset = ref<number>(FROM_PERCENT)
+let timerId: number | null = null
+let refCount = 0
+
+function tick() {
+	let next = offset.value + STEP
+	if (next >= TO_PERCENT) {
+		next = FROM_PERCENT
+	}
+	offset.value = next
+}
+
+const shimmerStyle = computed((): string => {
+	const alpha = isDarkMode() ? '0.08' : '0.42'
+	return 'left:' + offset.value.toString() + '%;background-color:rgba(255,255,255,' + alpha + ')'
+})
+
+const coreStyle = computed((): string => {
+	const alpha = isDarkMode() ? '0.12' : '0.85'
+	return 'background-color:rgba(255,255,255,' + alpha + ')'
+})
+
+onMounted(() => {
+	refCount = refCount + 1
+	if (timerId == null) {
+		timerId = setInterval(tick, FRAME_MS)
+	}
+})
+
+onUnmounted(() => {
+	refCount = refCount - 1
+	if (refCount <= 0 && timerId != null) {
+		clearInterval(timerId as number)
+		timerId = null
+		refCount = 0
+	}
+})
+</script>
+
+<style>
+	.skeleton {
+		position: relative;
+		overflow: hidden;
+	}
+	.skeleton-shimmer {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 40%;
+	}
+	.skeleton-shimmer-core {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 10%;
+		right: 10%;
+	}
+</style>

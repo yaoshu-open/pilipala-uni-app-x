@@ -1,0 +1,32 @@
+{
+	"id": "pl-cookie",
+	"displayName": "pl-cookie",
+	"version": "1.0.0",
+	"description": "读取与清空平台 CookieManager（登录凭据同步，仅 Android 实现）",
+	"keywords": [
+		"cookie",
+		"uts"
+	],
+	"engines": {
+		"HBuilderX": "^5.21.0"
+	},
+	"uni_modules": {
+		"platforms": {
+			"cloud": {
+				"tcb": "y",
+				"aliyun": "y",
+				"alipay": "y"
+			},
+			"client": {
+				"Vue": {
+					"minVersion": "3.0.0",
+					"maxVersion": ""
+				},
+				"App": {
+					"app-vue": "y",
+					"app-nvue": "y"
+				}
+			}
+		}
+	}
+}

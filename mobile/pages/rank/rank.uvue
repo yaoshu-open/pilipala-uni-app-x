@@ -1,0 +1,188 @@
+<template>
+	<view class="rank">
+		<view class="rank-status" :style="statusStyle"></view>
+		<scroll-view class="rank-tabs" direction="horizontal" :show-scrollbar="false" :scroll-left="scrollLeft">
+			<view class="rank-tabs-row">
+				<view
+					v-for="(tab, index) in tabs"
+					:key="tab.rid.toString()"
+					class="rank-tab"
+					@click="selectTab(index)"
+				>
+					<text class="rank-tab-text" :style="tabTextStyle(index)">{{ tab.label }}</text>
+					<view v-if="activeTab == index" class="rank-tab-indicator" :style="indicatorStyle"></view>
+				</view>
+			</view>
+		</scroll-view>
+		<view class="rank-content">
+			<view v-for="(tab, index) in tabs" :key="tab.rid.toString()" class="rank-page" v-show="activeTab == index">
+				<zone-page :rid="tab.rid" :active="activeTab == index"></zone-page>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import ZonePage from './zone/zone.uvue'
+import { themeColor, currentThemeIndex, textSecondary } from '../../utils/theme.uts'
+import { statusBarSpacerStyle } from '../../utils/safeArea.uts'
+import { rankTopSeq, rankRefreshSeq, tapTwice } from '../../stores/tabSignal.uts'
+
+/**
+ * 排行榜（源头：lib/pages/rank/view.dart + models/common/rank_type.dart）。
+ *
+ * 顶部 15 个分区（横向可滚动、居中排列）：选中为主色文字 + 底部指示条（Material3 TabBar 等价）。
+ * 分区内容常驻保活，首次切入才请求（懒加载）。
+ * 注：真机基线安装包（1.0.27）比仓库源码基线（1.0.25）多「国创相关」分区，
+ * 源码已移除该分区，此处按源码实现，差异登记在迁移清单 compare 段。
+ */
+
+class RankTab {
+	label: string = ''
+	rid: number = 0
+}
+
+const TABS: Array<RankTab> = ((): Array<RankTab> => {
+	const list: Array<RankTab> = []
+	const conf: Array<Array<string>> = [
+		['全站', '0'], ['动画', '1005'], ['音乐', '1003'], ['舞蹈', '1004'],
+		['游戏', '1008'], ['知识', '1010'], ['科技', '1012'], ['运动', '1018'],
+		['汽车', '1013'], ['美食', '1020'], ['动物圈', '1024'], ['鬼畜', '1007'],
+		['时尚', '1014'], ['娱乐', '1002'], ['影视', '1001']
+	]
+	for (let i = 0; i < conf.length; i++) {
+		const tab = new RankTab()
+		tab.label = conf[i][0]
+		tab.rid = parseInt(conf[i][1])
+		list.push(tab)
+	}
+	return list
+})()
+
+const tabs = TABS
+const activeTab = ref<number>(0)
+const primary = themeColor(currentThemeIndex())
+
+const statusStyle = computed((): string => statusBarSpacerStyle())
+const indicatorStyle = computed((): string => 'background-color:' + primary + ';')
+
+/**
+ * 分区栏横向滚动定位（源头行为：TabBar isScrollable + TabAlignment.center，
+ * 进入与切换分区时把选中项滚到视野内；首项贴左，与旧版基线一致）。
+ * App 端不做逐项测量：标签宽度按「字号 × 字数 + 左右各 10 边距」估算（字号 14）。
+ */
+const TAB_CHAR_WIDTH: number = 14
+const TAB_SIDE_MARGIN: number = 20
+const ROW_PADDING: number = 12
+const windowWidth = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowWidth
+	} catch (e) {
+		return 390
+	}
+})()
+const scrollLeft = ref<number>(0)
+
+function tabWidthOf(label: string): number {
+	return label.length * TAB_CHAR_WIDTH + TAB_SIDE_MARGIN
+}
+
+function centerActiveTab() {
+	let acc = ROW_PADDING
+	for (let i = 0; i < activeTab.value; i++) {
+		acc = acc + tabWidthOf(tabs[i].label)
+	}
+	const center = acc + tabWidthOf(tabs[activeTab.value].label) / 2
+	const offset = center - windowWidth / 2
+	const next = offset < 0 ? 0 : Math.round(offset)
+	// 值不变不会触发滚动：先错开 1px 再落位
+	if (scrollLeft.value == next) {
+		scrollLeft.value = next + 1
+		setTimeout(() => {
+			scrollLeft.value = next
+		}, 16)
+		return
+	}
+	scrollLeft.value = next
+}
+
+function tabTextStyle(index: number): string {
+	const color = activeTab.value == index ? primary : textSecondary()
+	const weight = activeTab.value == index ? 'bold' : 'normal'
+	return 'color:' + color + ';font-weight:' + weight + ';'
+}
+
+function selectTab(index: number) {
+	if (activeTab.value == index) {
+		const refresh = tapTwice('rank:' + index.toString())
+		if (refresh) {
+			rankRefreshSeq.value = rankRefreshSeq.value + 1
+		} else {
+			rankTopSeq.value = rankTopSeq.value + 1
+		}
+		return
+	}
+	activeTab.value = index
+	centerActiveTab()
+}
+
+/** 主 tab 点击「排行榜」时，zone 组件各自监听信号并只响应 active 的那一个 */
+watch(rankTopSeq, (value: number) => {
+	// 由 zone 自行消费，此处仅保证信号变化被观察（不重复转发）
+})
+</script>
+
+<style>
+	.rank {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.rank-status {
+		width: 100%;
+	}
+	.rank-tabs {
+		height: 42px;
+		margin-top: 4px;
+	}
+	.rank-tabs-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-start;
+		height: 42px;
+		padding-left: 12px;
+		padding-right: 12px;
+	}
+	.rank-tab {
+		height: 42px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		margin-left: 10px;
+		margin-right: 10px;
+		flex-shrink: 0;
+	}
+	.rank-tab-text {
+		font-size: 14px;
+	}
+	.rank-tab-indicator {
+		width: 20px;
+		height: 3px;
+		border-radius: 2px;
+		margin-top: 4px;
+	}
+	.rank-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.rank-page {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+</style>

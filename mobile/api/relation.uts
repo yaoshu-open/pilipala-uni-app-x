@@ -1,0 +1,383 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { wbiGet } from '../utils/wbi.uts'
+import { Params } from '../utils/params.uts'
+import { arrOf, objOf } from '../utils/json.uts'
+import { FollowItem, FansItem, BlackItem, RelationTag, PageResult, TagPageResult } from '../models/relation.uts'
+import { ActionResult } from '../models/video-detail.uts'
+
+/**
+ * 关系域接口层（源头：lib/http/follow.dart、lib/http/black.dart、
+ * lib/http/member.dart 的 followUpTags/followUpGroup/getfollowSearch）。
+ *
+ * 约定与 api/video.uts 一致：内部 `xxxRaw` 请求+解析，导出函数 try/catch 兜底，
+ * 解析异常落失败结果（message=数据解析异常），绝不让异常穿透到页面。
+ *
+ * 写操作（取关/移除黑名单）统一前置 csrf 校验：getCsrf() 为空时明确失败
+ * （toast 文案「登录凭据缺失，请重新登录后再试」由页面透传），不发无凭据请求、不假成功。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+/** 未登录错误码（页面据此把重试按钮改为「去登录」） */
+export const RELATION_CODE_NOT_LOGIN: number = -101
+
+// ---------------------------------------------------------------- 读：关注列表
+
+/** 全部关注（源 FollowHttp.followings：他人形态与回退单列表共用） */
+async function fetchFollowingsRaw(vmid: number, pn: number, ps: number): Promise<PageResult<FollowItem>> {
+	const result = new PageResult<FollowItem>()
+	const params = new Params()
+	params.setNum('vmid', vmid)
+	params.setNum('pn', pn)
+	params.setNum('ps', ps)
+	params.set('order', 'desc')
+	params.set('order_type', 'attention')
+	const res = await apiGet('/x/relation/followings', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	result.total = numOfStrict(data, 'total')
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(FollowItem.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+function numOfStrict(obj: UTSJSONObject, key: string): number {
+	const value = obj.getNumber(key)
+	return value == null ? 0 : value
+}
+
+export async function fetchFollowings(vmid: number, pn: number, ps: number): Promise<PageResult<FollowItem>> {
+	try {
+		return await fetchFollowingsRaw(vmid, pn, ps)
+	} catch (e) {
+		console.log('[relation] fetchFollowings error vmid=' + vmid.toString())
+		console.log(e)
+		const failed = new PageResult<FollowItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 读：粉丝列表
+
+async function fetchFansRaw(vmid: number, pn: number, ps: number): Promise<PageResult<FansItem>> {
+	const result = new PageResult<FansItem>()
+	const params = new Params()
+	params.setNum('vmid', vmid)
+	params.setNum('pn', pn)
+	params.setNum('ps', ps)
+	params.set('order', 'desc')
+	params.set('order_type', 'attention')
+	const res = await apiGet('/x/relation/fans', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	result.total = numOfStrict(data, 'total')
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(FansItem.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchFans(vmid: number, pn: number, ps: number): Promise<PageResult<FansItem>> {
+	try {
+		return await fetchFansRaw(vmid, pn, ps)
+	} catch (e) {
+		console.log('[relation] fetchFans error vmid=' + vmid.toString())
+		console.log(e)
+		const failed = new PageResult<FansItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 读：关注分组
+
+/** 查询分组（源 MemberHttp.followUpTags：本人形态的 tab 数据源） */
+async function fetchFollowTagsRaw(): Promise<TagPageResult<RelationTag>> {
+	const result = new TagPageResult<RelationTag>()
+	const res = await apiGet('/x/relation/tags')
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const list = arrOf(res, 'data')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(RelationTag.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchFollowTags(): Promise<TagPageResult<RelationTag>> {
+	try {
+		return await fetchFollowTagsRaw()
+	} catch (e) {
+		console.log('[relation] fetchFollowTags error')
+		console.log(e)
+		const failed = new TagPageResult<RelationTag>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 某分组下的关注（源 MemberHttp.followUpGroup：/x/relation/tag） */
+async function fetchFollowGroupRaw(mid: number, tagid: number, pn: number, ps: number): Promise<TagPageResult<FollowItem>> {
+	const result = new TagPageResult<FollowItem>()
+	const params = new Params()
+	params.setNum('mid', mid)
+	params.setNum('tagid', tagid)
+	params.setNum('pn', pn)
+	params.setNum('ps', ps)
+	const res = await apiGet('/x/relation/tag', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	// 实测 B 站 /x/relation/tag 响应：data 直接是用户对象数组（空分组为 []），无 {list} 包装
+	// （旧源 MemberHttp.followUpGroup 同形态）；空数组走「成功 0 条」→ 页面空态「没有数据」
+	const rawArr = res.getArray('data')
+	if (rawArr != null) {
+		for (let i = 0; i < rawArr.length; i++) {
+			const item = rawArr[i]
+			if (item != null) {
+				result.items.push(FollowItem.from(item as UTSJSONObject))
+			}
+		}
+		result.status = true
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(FollowItem.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchFollowGroup(mid: number, tagid: number, pn: number, ps: number): Promise<TagPageResult<FollowItem>> {
+	try {
+		return await fetchFollowGroupRaw(mid, tagid, pn, ps)
+	} catch (e) {
+		console.log('[relation] fetchFollowGroup error tagid=' + tagid.toString())
+		console.log(e)
+		const failed = new TagPageResult<FollowItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 读：关注搜索
+
+/** 搜索自己的关注（源 MemberHttp.getfollowSearch：WBI 签名） */
+async function fetchFollowSearchRaw(vmid: number, name: string, pn: number, ps: number): Promise<PageResult<FollowItem>> {
+	const result = new PageResult<FollowItem>()
+	const params = new Params()
+	params.setNum('vmid', vmid)
+	params.setNum('pn', pn)
+	params.setNum('ps', ps)
+	params.set('order', 'desc')
+	params.set('order_type', 'attention')
+	params.set('gaia_source', 'main_web')
+	params.set('name', name)
+	params.setNum('web_location', 333.999)
+	const res = await wbiGet('/x/relation/followings/search', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	result.total = numOfStrict(data, 'total')
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(FollowItem.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchFollowSearch(vmid: number, name: string, pn: number, ps: number): Promise<PageResult<FollowItem>> {
+	try {
+		return await fetchFollowSearchRaw(vmid, name, pn, ps)
+	} catch (e) {
+		console.log('[relation] fetchFollowSearch error name=' + name)
+		console.log(e)
+		const failed = new PageResult<FollowItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 读：黑名单
+
+/**
+ * 黑名单列表（源 BlackHttp.blackList）。
+ * 源请求附 csrf 参数；设计 §十口径：先按读-登录态实现（不附 csrf），
+ * 接口要求凭据时返回非 0 code，页面给真实错误态。
+ */
+async function fetchBlacksRaw(pn: number, ps: number): Promise<PageResult<BlackItem>> {
+	const result = new PageResult<BlackItem>()
+	const params = new Params()
+	params.setNum('pn', pn)
+	params.setNum('ps', ps)
+	params.setNum('re_version', 0)
+	const res = await apiGet('/x/relation/blacks', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '请求异常'
+		return result
+	}
+	result.total = numOfStrict(data, 'total')
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(BlackItem.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchBlacks(pn: number, ps: number): Promise<PageResult<BlackItem>> {
+	try {
+		return await fetchBlacksRaw(pn, ps)
+	} catch (e) {
+		console.log('[relation] fetchBlacks error')
+		console.log(e)
+		const failed = new PageResult<BlackItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 写：关系操作
+
+/**
+ * 关系操作（源 Api.relationMod = /x/relation/modify）。
+ * act：1 关注 / 2 取关 / 5 拉黑 / 6 解除拉黑；re_src 源码取值：关注链 11、移除黑名单 116。
+ * csrf 取不到 → 明确失败（不发自请求）；未登录 code=-101 透传给页面。
+ */
+async function relationModifyRaw(fid: number, act: number, reSrc: number): Promise<ActionResult> {
+	const result = new ActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[relation] csrf empty act=' + act.toString())
+		return result
+	}
+	const body = new Params()
+	body.setNum('fid', fid)
+	body.setNum('act', act)
+	body.setNum('re_src', reSrc)
+	body.set('jsonp', 'jsonp')
+	body.set('csrf', csrf)
+	const res = await apiPost('/x/relation/modify', body.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[relation] modify fail act=' + act.toString() + ' code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+/** 取消关注（act=2） */
+export async function unfollowUser(fid: number): Promise<ActionResult> {
+	try {
+		return await relationModifyRaw(fid, 2, 11)
+	} catch (e) {
+		console.log('[relation] unfollowUser error fid=' + fid.toString())
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '网络异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 移出黑名单（act=6，源 BlackHttp.removeBlack 同参数集） */
+export async function removeBlack(fid: number): Promise<ActionResult> {
+	try {
+		return await relationModifyRaw(fid, 6, 116)
+	} catch (e) {
+		console.log('[relation] removeBlack error fid=' + fid.toString())
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '网络异常，请稍后重试'
+		return failed
+	}
+}

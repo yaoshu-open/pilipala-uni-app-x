@@ -1,0 +1,106 @@
+<template>
+	<view class="ffc" @click="onTap">
+		<view class="ffc-cover" :style="coverStyle">
+			<network-img :src="cover" width="100%" height="100%" radius="10px"></network-img>
+		</view>
+		<view class="ffc-body">
+			<text class="ffc-title" :style="titleStyle" :max-lines="1">{{ title }}</text>
+			<text class="ffc-count" :style="secondaryStyle">{{ countText }}</text>
+			<view class="ffc-spacer"></view>
+			<text class="ffc-privacy" :style="secondaryStyle">{{ privacyText }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 收藏夹卡（源头：`lib/pages/fav/widgets/item.dart` FavItem）。
+ *
+ * 结构（源常量：StyleString.safeSpace=12 / cardSpace=8 / aspectRatio=16:10）：
+ *  - 行内边距 LTRB(12, 7, 12, 7)，卡高 = 半宽 / 1.6，半宽 = (屏宽 - 24 - cardSpace*6) / 2；
+ *  - 左封面 16:10 圆角 10 + 右文字列（padding LTRB(10, 2, 6, 10)）：
+ *    夹名 w500 →「N个内容」次要色 → 弹性空隙 →「公开/私密」（attr ∈ [23,1] 为私密，源同款判定）；
+ *  - 单列行卡形态（整行占满），由页面容器直接排列。
+ * Hero 转场无等价（P3 已登记差异），封面为静态 network-img。
+ */
+const props = defineProps({
+	cover: { type: String, default: '' },
+	title: { type: String, default: '' },
+	mediaCount: { type: Number, default: 0 },
+	attr: { type: Number, default: 0 }
+})
+
+const emit = defineEmits(['tap'])
+
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const countText = computed((): string => props.mediaCount.toString() + '个内容')
+
+const privacyText = computed((): string => props.attr == 23 || props.attr == 1 ? '私密' : '公开')
+
+/** 半宽与卡高（源 LayoutBuilder 公式的组件内等价：读窗口宽一次） */
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		const half = (info.windowWidth - 24 - 48) / 2
+		return Math.round(half / 1.6)
+	} catch (e) {
+		return 106
+	}
+})()
+
+const coverStyle = computed((): string => {
+	const width = Math.round(cardHeight * 1.6)
+	return 'width:' + width.toString() + 'px;height:' + cardHeight.toString() + 'px;'
+})
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	.ffc {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 7px;
+		margin-bottom: 7px;
+	}
+	.ffc-cover {
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.ffc-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		padding-left: 10px;
+		padding-top: 2px;
+		padding-right: 6px;
+		padding-bottom: 10px;
+	}
+	.ffc-title {
+		font-size: 14px;
+		font-weight: 500;
+		line-height: 20px;
+	}
+	.ffc-count {
+		font-size: 11px;
+		margin-top: 2px;
+	}
+	.ffc-spacer {
+		flex: 1;
+	}
+	.ffc-privacy {
+		font-size: 11px;
+	}
+</style>

@@ -1,0 +1,168 @@
+<template>
+	<view class="page">
+		<text class="title">凭据探测（开发用）</text>
+		<view class="row">
+			<view class="btn" @click="probe">
+				<text class="btn-text">重新探测</text>
+			</view>
+			<view class="btn btn-danger" @click="clearJar">
+				<text class="btn-text">清空平台 jar</text>
+			</view>
+		</view>
+		<scroll-view class="log" direction="vertical">
+			<text class="log-text">{{ logText }}</text>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, onMounted } from 'vue'
+import { getCookie, clearAllCookies } from '../../uni_modules/pl-cookie'
+import { cookieDebug } from '../../utils/cookie.uts'
+import { apiGet, getCsrf } from '../../utils/request.uts'
+
+/**
+ * 登录凭据探测页。
+ * 只输出「是否存在 + 值长度」，不打印 cookie 值本身（凭据不得落日志）。
+ */
+const logText = ref<string>('')
+
+function append(line: string) {
+	logText.value = logText.value + line + '\n'
+	console.log('[COOKIE] ' + line)
+}
+
+/** 从 cookie 串里取某个 name 的值；不存在返回空串 */
+function pairValue(raw: string, name: string): string {
+	const parts = raw.split(';')
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i].trim()
+		const eq = part.indexOf('=')
+		if (eq <= 0) {
+			continue
+		}
+		const key = part.substring(0, eq).trim()
+		if (key == name) {
+			return part.substring(eq + 1).trim()
+		}
+	}
+	return ''
+}
+
+function mark(raw: string, name: string): string {
+	const value = pairValue(raw, name)
+	if (value.length == 0) {
+		return name + '=无'
+	}
+	return name + '=有(' + value.length.toString() + ')'
+}
+
+async function probe() {
+	logText.value = ''
+	const api = 'https://api.bilibili.com'
+	const passport = 'https://passport.bilibili.com'
+
+	append('— 平台 jar（CookieManager） —')
+	let platform = ''
+	try {
+		platform = getCookie(api)
+	} catch (e) {
+		append('getCookie THREW: ' + e.toString())
+	}
+	append('api 域 len=' + platform.length.toString())
+	append(mark(platform, 'SESSDATA') + ' | ' + mark(platform, 'bili_jct') + ' | ' + mark(platform, 'DedeUserID'))
+	const passportJar = getCookie(passport)
+	append('passport 域 len=' + passportJar.length.toString())
+
+	append('— 应用层镜像（cookie.uts） —')
+	const mirror = cookieDebug('bilibili.com')
+	append('镜像 len=' + mirror.length.toString())
+	append(mark(mirror, 'SESSDATA') + ' | ' + mark(mirror, 'bili_jct'))
+
+	append('— csrf / 登录态 —')
+	const csrf = getCsrf()
+	append('getCsrf len=' + csrf.length.toString())
+	const res = await apiGet('/x/web-interface/nav')
+	if (res == null) {
+		append('nav null')
+		return
+	}
+	const code = res.getNumber('code')
+	const data = res.getJSON('data')
+	const isLogin = data != null ? data.getBoolean('isLogin') : null
+	const uname = data != null ? data.getString('uname') : null
+	append('nav code=' + (code == null ? '?' : code.toString()) +
+		' isLogin=' + (isLogin == null ? 'null' : isLogin.toString()) +
+		' uname=' + (uname == null ? '' : uname as string))
+}
+
+function clearJar() {
+	clearAllCookies()
+	append('已调用 clearAllCookies + flush')
+	probe()
+}
+
+onMounted(() => {
+	probe()
+})
+</script>
+
+<style>
+.page {
+	flex: 1;
+	flex-direction: column;
+	padding-left: 12px;
+	padding-right: 12px;
+	padding-top: 12px;
+	padding-bottom: 12px;
+	background-color: #ffffff;
+}
+
+.title {
+	font-size: 16px;
+	font-weight: bold;
+	color: #18191c;
+	margin-bottom: 10px;
+}
+
+.row {
+	flex-direction: row;
+	margin-bottom: 10px;
+}
+
+.btn {
+	height: 34px;
+	padding-left: 14px;
+	padding-right: 14px;
+	border-radius: 8px;
+	background-color: #00aeec;
+	align-items: center;
+	justify-content: center;
+	margin-right: 10px;
+}
+
+.btn-danger {
+	background-color: #e45c5c;
+}
+
+.btn-text {
+	font-size: 13px;
+	color: #ffffff;
+}
+
+.log {
+	flex: 1;
+	background-color: #f6f7f8;
+	border-radius: 8px;
+	padding-left: 10px;
+	padding-right: 10px;
+	padding-top: 10px;
+	padding-bottom: 10px;
+}
+
+.log-text {
+	font-size: 12px;
+	color: #333333;
+	line-height: 19px;
+}
+</style>

@@ -1,0 +1,367 @@
+<template>
+	<view class="rcmd">
+		<view v-if="state == 'error'" class="rcmd-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+		<view v-else-if="state == 'empty'" class="rcmd-fill">
+			<view class="rcmd-empty">
+				<text class="rcmd-empty-text" :style="secondaryStyle">暂无推荐内容</text>
+			</view>
+		</view>
+		<list-view v-if="state == 'loading'" class="rcmd-list">
+			<list-item v-for="n in skeletonRows" :key="'sk-' + n.toString()" :type="2">
+				<view class="rcmd-row">
+					<view v-for="(cell, ci) in skeletonCells" :key="'skc-' + ci.toString()" class="rcmd-cell" :style="cellStyle">
+						<skeleton-video-card-v :img-height="coverHeightText"></skeleton-video-card-v>
+					</view>
+				</view>
+			</list-item>
+		</list-view>
+		<list-view
+			v-if="state != 'loading'"
+			class="rcmd-list"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:scroll-top="scrollTop"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+			@scroll="onListScroll"
+		>
+			<list-item v-for="row in rows" :key="row.key" :type="1">
+				<view class="rcmd-row">
+					<view v-for="(cell, ci) in row.cells" :key="row.key + '-' + ci.toString()" class="rcmd-cell" :style="cellStyle">
+						<p-video-card-v
+							v-if="cell.hasData"
+							:pic="cell.item.pic"
+							:title="cell.item.title"
+							:duration="cell.item.duration"
+							:view-count="cell.item.stat.view"
+							:danmu-count="cell.item.stat.danmu"
+							:pubdate="cell.item.pubdate"
+							:owner-name="cell.item.owner.name"
+							:rcmd-reason="cell.item.rcmdReason"
+							:goto-type="cell.item.goto"
+							:is-followed="cell.item.isFollowed"
+							:cover-height="coverHeight"
+							@tap="openDetail(cell.item.bvid, cell.item.cid, cell.item.goto)"
+						></p-video-card-v>
+						<view v-else class="rcmd-cell-fill"></view>
+					</view>
+				</view>
+			</list-item>
+			<list-item :key="'footer'" :type="2">
+				<view class="rcmd-footer"></view>
+			</list-item>
+		</list-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch, onMounted } from 'vue'
+import PVideoCardV from '../../components/p-video-card-v/p-video-card-v.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonVideoCardV from '../../components/skeleton/skeleton-video-card-v.uvue'
+import { fetchRcmd, fetchRcmdApp } from '../../api/video.uts'
+import { RecVideoItem, ListResult } from '../../models/video.uts'
+import { rcmdTopSeq, rcmdRefreshSeq, collapseSignal } from '../../stores/tabSignal.uts'
+import { navigateTo } from '../../utils/routes.uts'
+import { textSecondary } from '../../utils/theme.uts'
+import { SK, getBool, getNumber, getString } from '../../utils/storage.uts'
+
+/**
+ * 推荐流（源头：lib/pages/rcmd/view.dart）。
+ *
+ * 双列网格：list-view 每行一个 list-item（行内两张卡），保证蒸汽模式复用生效；
+ * 分页：距底 200px 内触发（scrolltolower），加载中不重复请求；
+ * 下拉刷新：refresher 组件内置；刷新与分页互斥（刷新时丢弃分页请求结果）。
+ * 自动补足：首屏不足 10 条且本页返回多于 1 条时自动再取一页（源同款防稀疏逻辑）。
+ */
+
+/** 网格单元：占位（无数据）与真实条目同构，保证每行列数恒定、末行不被 space-between 拉开 */
+class GridCell {
+	item: RecVideoItem = new RecVideoItem()
+	hasData: boolean = false
+}
+
+class CardRow {
+	cells: Array<GridCell> = []
+	key: string = ''
+}
+
+const PAGE_SIZE: number = 20
+const MIN_FIRST_SCREEN: number = 10
+
+/**
+ * 设置消费（P10 接线，源头 `lib/pages/rcmd/controller.dart`）：
+ *  - defaultRcmdType：web → web 推荐流；app → app 推荐流（带 access_key）；notLogin → app 流（空 key）；
+ *  - customRows：首页网格列数（1~5，源 crossAxisCount）；
+ *  - enableSaveLastData：下拉刷新保留上次内容（把新数据插到列表头而不是整体替换）。
+ */
+const rcmdType = ref<string>(getString(SK.defaultRcmdType, 'web'))
+const columns = ref<number>(clampColumns(getNumber(SK.customRows, 2)))
+const saveLastData = ref<boolean>(getBool(SK.enableSaveLastData, false))
+
+function clampColumns(value: number): number {
+	const raw = Math.round(value)
+	if (raw < 1) {
+		return 1
+	}
+	if (raw > 5) {
+		return 5
+	}
+	return raw
+}
+
+const items = ref<Array<RecVideoItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const refreshing = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const freshIdx = ref<number>(0)
+const scrollTop = ref<number>(0)
+const skeletonRows = ref<number>(5)
+
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+/** 列宽 = (屏宽 − 页左右边距 24 − 列间距 8×(列数−1)) / 列数；列数随 SK.customRows 变化 */
+const CELL_GAP: number = 8
+const cellWidth = computed((): number => {
+	let windowWidth = 390
+	try {
+		windowWidth = uni.getWindowInfo().windowWidth
+	} catch (e) {
+		windowWidth = 390
+	}
+	const cols = columns.value
+	const width = (windowWidth - 24 - CELL_GAP * (cols - 1)) / cols
+	return Math.round(width)
+})
+
+const coverHeight = computed((): number => Math.round(cellWidth.value / 1.6))
+const coverHeightText = computed((): string => coverHeight.value.toString() + 'px')
+const cellStyle = computed((): string => {
+	// 末列不留 gap（space-between 负责间隔），宽度按列数重算
+	return 'width:' + cellWidth.value.toString() + 'px;'
+})
+
+/** 骨架行：与内容行同列数，避免加载态与就绪态列宽跳变 */
+const skeletonCells = computed((): Array<number> => {
+	const list: Array<number> = []
+	for (let i = 0; i < columns.value; i++) {
+		list.push(i)
+	}
+	return list
+})
+
+const rows = computed((): Array<CardRow> => {
+	const list: Array<CardRow> = []
+	const source = items.value
+	const cols = columns.value
+	let index = 0
+	while (index < source.length) {
+		const row = new CardRow()
+		row.key = source[index].id.toString() + '-' + source[index].bvid
+		for (let c = 0; c < cols; c++) {
+			const cell = new GridCell()
+			if (index + c < source.length) {
+				cell.item = source[index + c]
+				cell.hasData = true
+			}
+			row.cells.push(cell)
+		}
+		list.push(row)
+		index = index + cols
+	}
+	return list
+})
+
+function appendItems(source: Array<RecVideoItem>) {
+	for (let i = 0; i < source.length; i++) {
+		items.value.push(source[i])
+	}
+}
+
+/** 按推荐类型分流取流（SK.defaultRcmdType：web / app / notLogin） */
+async function fetchPage(index: number): Promise<ListResult<RecVideoItem>> {
+	if (rcmdType.value == 'web') {
+		return await fetchRcmd(index, PAGE_SIZE)
+	}
+	// notLogin = 空 access_key（源 loginStatus=false）
+	return await fetchRcmdApp(index, rcmdType.value != 'notLogin')
+}
+
+/**
+ * 首屏/刷新。
+ * @param prepend 保留上次内容（SK.enableSaveLastData）：新数据插到列表头而非整体替换
+ */
+async function loadFirst(times: number, prepend: boolean) {
+	const res: ListResult<RecVideoItem> = await fetchPage(0)
+	if (!res.status) {
+		state.value = 'error'
+		errorText.value = res.message
+		return
+	}
+	if (prepend && saveLastData.value) {
+		const merged: Array<RecVideoItem> = []
+		for (let i = 0; i < res.items.length; i++) {
+			merged.push(res.items[i])
+		}
+		for (let j = 0; j < items.value.length; j++) {
+			merged.push(items.value[j])
+		}
+		items.value = merged
+	} else {
+		items.value = []
+		appendItems(res.items)
+	}
+	freshIdx.value = 1
+	// 首屏过稀时继续取，最多 3 轮，避免死循环
+	if (res.items.length > 1 && items.value.length < MIN_FIRST_SCREEN && times < 3) {
+		const more = await fetchPage(freshIdx.value)
+		if (more.status) {
+			appendItems(more.items)
+			freshIdx.value = freshIdx.value + 1
+		}
+	}
+	state.value = items.value.length > 0 ? 'ready' : 'empty'
+}
+
+async function onRefresh() {
+	if (state.value == 'loading') {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	await loadFirst(0, true)
+	refreshing.value = false
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value || refreshing.value) {
+		return
+	}
+	loadingMore.value = true
+	const res = await fetchPage(freshIdx.value)
+	if (res.status) {
+		appendItems(res.items)
+		freshIdx.value = freshIdx.value + 1
+	}
+	loadingMore.value = false
+}
+
+function reload() {
+	state.value = 'loading'
+	loadFirst(0, false)
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+/**
+ * 滚动方向 → 收起信号（hideSearchBar / hideTabBar 的输入源）。
+ * 4px 死区防抖动；到顶强制展开（源：回顶时顶栏/底栏回位）。
+ */
+let lastListScrollTop: number = 0
+
+function onListScroll(event: UniScrollEvent) {
+	const top = event.detail.scrollTop
+	const delta = top - lastListScrollTop
+	lastListScrollTop = top
+	if (top <= 0) {
+		collapseSignal.value = 0
+		return
+	}
+	if (delta > 4 && collapseSignal.value != 1) {
+		collapseSignal.value = 1
+	} else if (delta < -4 && collapseSignal.value != 0) {
+		collapseSignal.value = 0
+	}
+}
+
+function scrollToTop() {
+	// 值不变不会触发滚动，先置 1 再置 0
+	scrollTop.value = 1
+	setTimeout(() => {
+		scrollTop.value = 0
+	}, 16)
+}
+
+function openDetail(bvid: string, cid: number, gotoType: string) {
+	if (gotoType != 'av') {
+		uni.showToast({ title: '该内容类型在后续批次接入', icon: 'none' })
+		return
+	}
+	// P4 详情页已就绪：bvid + cid（cid 缺失时详情页按 pages[0].cid 兜底）
+	let query = 'bvid=' + bvid
+	if (cid > 0) {
+		query = query + '&cid=' + cid.toString()
+	}
+	navigateTo('/pages/video/video', query)
+}
+
+watch(rcmdTopSeq, (value: number) => {
+	if (value > 0) {
+		scrollToTop()
+	}
+})
+
+watch(rcmdRefreshSeq, (value: number) => {
+	if (value > 0) {
+		onRefresh()
+	}
+})
+
+onMounted(() => {
+	loadFirst(0, false)
+})
+</script>
+
+<style>
+	.rcmd {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 12px;
+		margin-right: 12px;
+		padding-top: 12px;
+	}
+	.rcmd-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.rcmd-empty {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.rcmd-empty-text {
+		font-size: 14px;
+	}
+	.rcmd-list {
+		flex: 1;
+	}
+	.rcmd-row {
+		display: flex;
+		flex-direction: row;
+		justify-content: space-between;
+		padding-top: 4px;
+		padding-bottom: 4px;
+	}
+	.rcmd-cell {
+		display: flex;
+		flex-direction: column;
+	}
+	.rcmd-cell-fill {
+		width: 100%;
+	}
+	.rcmd-gap {
+		width: 8px;
+	}
+	.rcmd-footer {
+		height: 60px;
+	}
+</style>

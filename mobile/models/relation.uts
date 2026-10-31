@@ -1,0 +1,124 @@
+import { strOf, numOf, objOf } from '../utils/json.uts'
+
+/**
+ * 关系域模型（源头：lib/models/follow/result.dart、lib/models/fans/result.dart、
+ * lib/models/user/black.dart、lib/models/member/tags.dart）。
+ * 字段名与源 json 键一致；解析统一走 utils/json.uts 防御式取值。
+ */
+
+/** 关注条目（源 FollowItemModel：/x/relation/followings、/x/relation/tag、followings/search 共用） */
+export class FollowItem {
+	mid: number = 0
+	attribute: number = 0
+	special: number = 0
+	uname: string = ''
+	face: string = ''
+	/** 源把空签名兜底为「还没有签名」 */
+	sign: string = ''
+	/** official_verify.type：-1 无 / 0 个人认证 / 1 企业认证；desc 为认证说明 */
+	verifyType: number = -1
+	verifyDesc: string = ''
+	/**
+	 * 直播中角标数据源（基线 follow 页头像右下蓝色闪电）。
+	 * 标准关注列表接口不保证返回该字段，缺省 0 = 不显示角标（诚实渲染，不脑补直播态）。
+	 */
+	liveStatus: number = 0
+
+	static from(obj: UTSJSONObject): FollowItem {
+		const item = new FollowItem()
+		item.mid = numOf(obj, 'mid')
+		item.attribute = numOf(obj, 'attribute')
+		item.special = numOf(obj, 'special')
+		item.uname = strOf(obj, 'uname')
+		item.face = strOf(obj, 'face')
+		const sign = strOf(obj, 'sign')
+		item.sign = sign.length == 0 ? '还没有签名' : sign
+		const verify = objOf(obj, 'official_verify')
+		if (verify != null) {
+			item.verifyType = numOf(verify, 'type')
+			item.verifyDesc = strOf(verify, 'desc')
+		}
+		item.liveStatus = numOf(obj, 'live_status')
+		return item
+	}
+}
+
+/** 粉丝条目（源 FansItemModel：+mtime 拉黑时间，粉丝页未消费） */
+export class FansItem {
+	mid: number = 0
+	attribute: number = 0
+	special: number = 0
+	uname: string = ''
+	face: string = ''
+	sign: string = ''
+	verifyType: number = -1
+	verifyDesc: string = ''
+
+	static from(obj: UTSJSONObject): FansItem {
+		const item = new FansItem()
+		item.mid = numOf(obj, 'mid')
+		item.attribute = numOf(obj, 'attribute')
+		item.special = numOf(obj, 'special')
+		item.uname = strOf(obj, 'uname')
+		item.face = strOf(obj, 'face')
+		const sign = strOf(obj, 'sign')
+		item.sign = sign.length == 0 ? '还没有签名' : sign
+		const verify = objOf(obj, 'official_verify')
+		if (verify != null) {
+			item.verifyType = numOf(verify, 'type')
+			item.verifyDesc = strOf(verify, 'desc')
+		}
+		return item
+	}
+}
+
+/** 黑名单条目（源 BlackListItem） */
+export class BlackItem {
+	mid: number = 0
+	uname: string = ''
+	face: string = ''
+	/** 拉黑时间（秒级时间戳） */
+	mtime: number = 0
+
+	static from(obj: UTSJSONObject): BlackItem {
+		const item = new BlackItem()
+		item.mid = numOf(obj, 'mid')
+		item.uname = strOf(obj, 'uname')
+		item.face = strOf(obj, 'face')
+		item.mtime = numOf(obj, 'mtime')
+		return item
+	}
+}
+
+/** 关注分组 tab（源 MemberTagItemModel：/x/relation/tags；tagid -10=特别关注、0=默认分组） */
+export class RelationTag {
+	tagid: number = 0
+	name: string = ''
+	count: number = 0
+	tip: string = ''
+
+	static from(obj: UTSJSONObject): RelationTag {
+		const item = new RelationTag()
+		item.tagid = numOf(obj, 'tagid')
+		item.name = strOf(obj, 'name')
+		item.count = numOf(obj, 'count')
+		item.tip = strOf(obj, 'tip')
+		return item
+	}
+}
+
+/** 分页列表结果（对齐源 {status, data, msg, code}；followings/fans/blacks 共用，携带 total） */
+export class PageResult<T> {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	items: Array<T> = []
+	total: number = 0
+}
+
+/** 分组列表结果（/x/relation/tag 返回裸数组，无 total） */
+export class TagPageResult<T> {
+	status: boolean = false
+	message: string = ''
+	items: Array<T> = []
+}

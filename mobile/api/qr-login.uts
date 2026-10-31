@@ -1,0 +1,133 @@
+import { apiGet, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { PASSPORT_BASE } from '../utils/constants.uts'
+import { refreshLoginState } from '../composables/useLogin.uts'
+
+/**
+ * 扫码登录接口层（web 扫码登录协议，passport.bilibili.com）。
+ *
+ * 链路：generate 取 {url, qrcode_key} → 本地编码二维码展示 → 3s 轮询 poll。
+ * poll 在扫码确认后返回 code=0 且**响应头带 Set-Cookie**（SESSDATA/bili_jct/
+ * DedeUserID 等）——本层用 apiGet 发请求，Set-Cookie 由 request.uts 的
+ * safeHandle 解析并写入 cookie 镜像（utils/cookie.uts），随后 getCsrf()
+ * 即可读到 bili_jct，全部写接口（关注/收藏/点赞/评论/弹幕/私信）的 csrf
+ * 凭据随之解锁。平台 jar 同步持有同一份 cookie（平台自管，请求自动携带）。
+ *
+ * 约定与 api/relation.uts 一致：失败落结果对象不抛异常，绝不让异常穿透到页面。
+ */
+
+/** poll 内层业务状态码（data.code）：扫码确认成功 */
+export const QR_STATUS_SUCCESS: number = 0
+/** 未扫码 / 未确认（86100：尚未扫描） */
+export const QR_STATUS_WAITING: number = 86100
+/** 已扫码待确认（86090：手机上点了扫一扫） */
+export const QR_STATUS_SCANNED: number = 86090
+/** 二维码已过期（86038：需重新 generate） */
+export const QR_STATUS_EXPIRED: number = 86038
+/** 网络失败 / 外层 code 异常 / data 解析失败（本层兜底值） */
+export const QR_STATUS_ERROR: number = -1
+
+/** generate 结果 */
+export class QrGenerateResult {
+	ok: boolean = false
+	/** 二维码内容（B 站登录页 URL，本地编码渲染，禁止发往外部二维码服务） */
+	url: string = ''
+	/** 轮询凭据（与 url 一一对应） */
+	qrcodeKey: string = ''
+	message: string = ''
+}
+
+/** 取新二维码会话：GET /x/passport-login/web/qrcode/generate */
+export async function generateQrCode(): Promise<QrGenerateResult> {
+	const result = new QrGenerateResult()
+	try {
+		const res = await apiGet(PASSPORT_BASE + '/x/passport-login/web/qrcode/generate')
+		if (res == null) {
+			result.message = '网络异常，请稍后重试'
+			return result
+		}
+		const code = res.getNumber('code')
+		if (code == null || code != 0) {
+			result.message = '二维码接口返回异常（code=' + (code == null ? 'null' : code.toString()) + '）'
+			return result
+		}
+		const data = res.getJSON('data')
+		if (data == null) {
+			result.message = '二维码数据异常'
+			return result
+		}
+		const url = data.getString('url')
+		const key = data.getString('qrcode_key')
+		result.url = url == null ? '' : url
+		result.qrcodeKey = key == null ? '' : key
+		if (result.url.length == 0 || result.qrcodeKey.length == 0) {
+			result.message = '二维码数据不完整'
+			return result
+		}
+		result.ok = true
+	} catch (e) {
+		console.log('[qr-login] generate error')
+		console.log(e)
+		result.message = '二维码生成失败'
+	}
+	return result
+}
+
+/** poll 结果：status 为内层业务码，SUCCESS 时 cookieCaptured 标记 csrf 凭据是否已入镜像 */
+export class QrPollResult {
+	status: number = QR_STATUS_ERROR
+	/** bili_jct 是否已可通过 getCsrf() 读到（写接口凭据解锁的直接证据） */
+	cookieCaptured: boolean = false
+	message: string = ''
+}
+
+/**
+ * 轮询扫码状态：GET /x/passport-login/web/qrcode/poll?qrcode_key=...
+ * 成功（status=0）时 Set-Cookie 已在 apiGet 内写入 cookie 镜像——这里只做
+ * 验证（getCsrf 非空 = bili_jct 已入镜像）并触发一次用户信息刷新
+ * （refreshLoginState 走 nav 接口，cookie 由平台 jar 自动携带）。
+ */
+export async function pollQrCode(qrcodeKey: string): Promise<QrPollResult> {
+	const result = new QrPollResult()
+	if (qrcodeKey.length == 0) {
+		result.message = '二维码会话为空'
+		return result
+	}
+	try {
+		const params = new Params()
+		params.set('qrcode_key', qrcodeKey)
+		const res = await apiGet(PASSPORT_BASE + '/x/passport-login/web/qrcode/poll', params)
+		if (res == null) {
+			result.message = '网络异常'
+			return result
+		}
+		const outer = res.getNumber('code')
+		if (outer == null || outer != 0) {
+			result.message = '轮询接口返回异常（code=' + (outer == null ? 'null' : outer.toString()) + '）'
+			return result
+		}
+		const data = res.getJSON('data')
+		if (data == null) {
+			result.message = '轮询数据异常'
+			return result
+		}
+		const inner = data.getNumber('code')
+		result.status = inner == null ? QR_STATUS_ERROR : inner
+		if (result.status == QR_STATUS_SUCCESS) {
+			// 镜像捕获由 request 层 safeHandle 完成（此处请求即捕获通道）；
+			// getCsrf() 从 cookie 镜像按域查询 bili_jct，非空即写接口凭据已就绪
+			result.cookieCaptured = getCsrf().length > 0
+			if (!result.cookieCaptured) {
+				// 不静默：登录成功了但 csrf 凭据没进镜像（镜像链路异常），如实落标记供页面提示
+				console.log('[qr-login] poll SUCCESS 但镜像未捕获 bili_jct（getCsrf 为空）')
+			}
+			// 登录成功：刷新一次用户信息（nav 带平台 jar cookie，落内存态 + 缓存）
+			await refreshLoginState()
+		}
+	} catch (e) {
+		console.log('[qr-login] poll error')
+		console.log(e)
+		result.message = '轮询请求失败'
+	}
+	return result
+}

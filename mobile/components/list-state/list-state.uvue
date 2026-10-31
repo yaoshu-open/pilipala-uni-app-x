@@ -1,0 +1,89 @@
+<template>
+	<view class="list-state">
+		<view v-if="state === 'loading'" class="list-state-box">
+			<view class="list-state-dot-row">
+				<view class="list-state-dot list-state-dot-a"></view>
+				<view class="list-state-dot list-state-dot-b"></view>
+				<view class="list-state-dot list-state-dot-c"></view>
+			</view>
+			<text class="list-state-text">加载中</text>
+		</view>
+		<view v-else-if="state === 'empty'" class="list-state-box">
+			<text class="list-state-title">暂无内容</text>
+			<text class="list-state-text">{{ emptyText }}</text>
+		</view>
+		<view v-else class="list-state-box">
+			<text class="list-state-title">加载失败</text>
+			<text class="list-state-text">{{ errorText }}</text>
+			<button class="list-state-btn" @click="onRetry">重试</button>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+const props = defineProps({
+	state: { type: String, default: 'loading' },
+	emptyText: { type: String, default: '' },
+	errorText: { type: String, default: '请检查网络后重试' }
+})
+
+const emit = defineEmits(['retry'])
+
+function onRetry() {
+	emit('retry')
+}
+</script>
+
+<style>
+	.list-state {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding-top: 120rpx;
+		padding-bottom: 120rpx;
+	}
+	.list-state-box {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+	.list-state-dot-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.list-state-dot {
+		width: 14rpx;
+		height: 14rpx;
+		border-radius: 7rpx;
+		background-color: #C3C8D2;
+		margin-left: 6rpx;
+		margin-right: 6rpx;
+	}
+	.list-state-dot-a {
+		opacity: 1;
+	}
+	.list-state-dot-b {
+		opacity: 0.6;
+	}
+	.list-state-dot-c {
+		opacity: 0.3;
+	}
+	.list-state-title {
+		font-size: 30rpx;
+		color: #4A4F57;
+		margin-top: 16rpx;
+	}
+	.list-state-text {
+		font-size: 26rpx;
+		color: #8A94A6;
+		margin-top: 10rpx;
+	}
+	.list-state-btn {
+		margin-top: 24rpx;
+		font-size: 26rpx;
+		padding-left: 40rpx;
+		padding-right: 40rpx;
+	}
+</style>

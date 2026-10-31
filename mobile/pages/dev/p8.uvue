@@ -1,0 +1,182 @@
+<template>
+	<view class="p8" :style="pageStyle">
+		<app-navbar title="P8 组件验证" :title-size="22"></app-navbar>
+		<scroll-view class="p8-scroll">
+			<text class="p8-cap" :style="capStyle">会话条目（有昵称 + 未读 8 / 无昵称 / 图片消息）</text>
+			<view v-for="(item, index) in sessions" :key="'s-' + index.toString()">
+				<session-item :item="item"></session-item>
+				<view class="p8-divider"></view>
+			</view>
+
+			<text class="p8-cap" :style="capStyle">私信气泡（己方文本 / 对方文本+表情 / 图片 / 业务通知 / 图片卡片 / 文本提示）</text>
+			<view v-for="(msg, index) in bubbles" :key="'b-' + index.toString()">
+				<msg-bubble :msg="msg" :e-infos="eInfos" :is-owner="msg.senderUid == myMid" :pic-list="picList"></msg-bubble>
+			</view>
+
+			<text class="p8-cap" :style="capStyle">回复通知条目（reply 带根评论文本框 / video 带封面）</text>
+			<reply-notice-item :item="replyItem"></reply-notice-item>
+			<view class="p8-divider"></view>
+			<reply-notice-item :item="replyItemVideo"></reply-notice-item>
+
+			<text class="p8-cap" :style="capStyle">赞通知条目（单人 / 三人聚合）</text>
+			<like-notice-item :item="likeSingle"></like-notice-item>
+			<view class="p8-divider"></view>
+			<like-notice-item :item="likeMulti"></like-notice-item>
+
+			<text class="p8-cap" :style="capStyle">系统通知条目</text>
+			<system-notice-item :item="systemItem"></system-notice-item>
+			<view class="p8-tail"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import SessionItem from '../../components/message/session-item.uvue'
+import MsgBubble from '../../components/message/msg-bubble.uvue'
+import ReplyNoticeItem from '../../components/message/reply-notice-item.uvue'
+import LikeNoticeItem from '../../components/message/like-notice-item.uvue'
+import SystemNoticeItem from '../../components/message/system-notice-item.uvue'
+import {
+	SessionItem as SessionModel, AccountCard, ChatMsg, EmoteInfo,
+	ReplyNoticeItem as ReplyNoticeModel, LikeNoticeItem as LikeNoticeModel,
+	SystemNoticeItem as SystemNoticeModel, LastMsg,
+	parseSessionData, parseSessionMsgData, parseEmoteInfos
+} from '../../models/message.uts'
+import { pageBackground, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * P8 消息域组件验证页（dev 专用，不进业务导航）。
+ *
+ * 存在理由：消息域全部数据依赖登录态，新端当前未登录，真实页面只能呈现未登录错误态；
+ * 气泡 / 条目等「有数据才有形态」的组件无法用真机数据取证。此页用固定 fixture 直接渲染组件，
+ * 供真机截图与旧版基线 / 源码常量逐项对照（同 P3 pages/dev/p3 的做法）。
+ * fixture 只在本页使用，不进 api/models，不影响业务链路。
+ */
+const myMid: number = 900001
+
+const FACE: string = 'https://i0.hdslb.com/bfs/face/member/noface.jpg'
+/** 图片类 fixture 统一用可访问的 B 站 CDN 图（自制哈希 URL 会 404，导致「加载失败」占位，干扰形态核对） */
+const PIC: string = 'https://i0.hdslb.com/bfs/face/member/noface.jpg'
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const capStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+function obj(raw: string): UTSJSONObject {
+	return JSON.parse<UTSJSONObject>(raw)
+}
+
+function account(mid: number, name: string): AccountCard {
+	const card = new AccountCard()
+	card.mid = mid
+	card.name = name
+	card.face = FACE
+	return card
+}
+
+const sessions = computed((): Array<SessionModel> => {
+	const list = parseSessionData(obj(
+		'{"session_list":[' +
+		'{"talker_id":900002,"session_ts":1761600000,"unread_count":8,' +
+		'"last_msg":{"sender_uid":900002,"msg_type":1,"timestamp":1761600000,"content":""}},' +
+		'{"talker_id":900003,"session_ts":1761500000,"unread_count":0,' +
+		'"last_msg":{"sender_uid":900003,"msg_type":1,"timestamp":1759600000,"content":""}},' +
+		'{"talker_id":900004,"session_ts":1761400000,"unread_count":0,' +
+		'"last_msg":{"sender_uid":900004,"msg_type":2,"timestamp":1759600000,"content":""}}]}'))
+	list[0].accountInfo = account(900002, '哔哩哔哩智能机')
+	list[1].accountInfo = account(900003, '')
+	list[2].accountInfo = account(900004, '图片会话')
+	const first = list[0].lastMsg
+	if (first != null) {
+		(first as LastMsg).content = obj('{"content":"你的账号在新设备或平台登录成功，如非本人操作请及时修改密码"}')
+	}
+	const second = list[1].lastMsg
+	if (second != null) {
+		(second as LastMsg).content = obj('{"content":"这条会话没有昵称，预览固定落在第二行"}')
+	}
+	return list
+})
+
+const eInfos = computed((): Array<EmoteInfo> => {
+	return parseEmoteInfos(obj('{"e_infos":[{"text":"[妙啊]","url":"' + FACE + '"}]}'))
+})
+
+const picList = computed((): Array<string> => {
+	const list: Array<string> = []
+	list.push(PIC)
+	return list
+})
+
+const bubbles = computed((): Array<ChatMsg> => {
+	const list = parseSessionMsgData(obj(
+		'{"messages":[' +
+		'{"sender_uid":900001,"receiver_id":900002,"msg_type":1,"msg_seqno":5,"timestamp":1761600000,"msg_status":0,"content":""},' +
+		'{"sender_uid":900002,"receiver_id":900001,"msg_type":1,"msg_seqno":6,"timestamp":1761600100,"msg_status":0,"content":""},' +
+		'{"sender_uid":900001,"receiver_id":900002,"msg_type":2,"msg_seqno":7,"timestamp":1761600200,"msg_status":0,"content":""},' +
+		'{"sender_uid":900002,"receiver_id":900001,"msg_type":10,"msg_seqno":8,"timestamp":1761600300,"msg_status":0,"content":""},' +
+		'{"sender_uid":900002,"receiver_id":900001,"msg_type":13,"msg_seqno":9,"timestamp":1761600400,"msg_status":0,"content":""},' +
+		'{"sender_uid":900002,"receiver_id":900001,"msg_type":18,"msg_seqno":10,"timestamp":1761600500,"msg_status":0,"content":""}]}'))
+	list[0].content = obj('{"content":"真TM狗币啊 这点银子都拿去骗"}')
+	list[1].content = obj('{"content":"你好[妙啊]世界，这条是对方气泡"}')
+	list[2].content = obj('{"url":"' + PIC + '","width":800,"height":600}')
+	list[3].content = obj('{"title":"系统通知","text":"对方主动回复或关注你前，最多发送1条消息"}')
+	list[4].content = obj('{"pic_url":"' + PIC + '"}')
+	list[5].content = obj('{"content":"[{\\"text\\":\\"文本提示第一行\\"},{\\"text\\":\\"文本提示第二行\\"}]"}')
+	return list
+})
+
+const replyItem = computed((): ReplyNoticeModel => ReplyNoticeModel.from(obj(
+	'{"id":1,"count":1,"is_multi":0,"reply_time":1761600000,' +
+	'"user":{"mid":900005,"nickname":"回复者甲","avatar":"' + FACE + '"},' +
+	'"item":{"type":"reply","source_content":"@回复者乙 这条是回复内容，最多两行，超出部分省略显示，用来验证行数裁剪是否生效",' +
+	'"target_reply_content":"被回复的评论摘要","root_reply_content":"根评论正文内容，最多四行裁剪",' +
+	'"image":"' + PIC + '","title":"视频标题","uri":"bilibili://video/1001","native_uri":"bilibili://video/1001?page=1",' +
+	'"at_details":[{"mid":900006,"nickname":"回复者乙","avatar":"' + FACE + '"}]}}')))
+
+const replyItemVideo = computed((): ReplyNoticeModel => ReplyNoticeModel.from(obj(
+	'{"id":2,"count":1,"is_multi":0,"reply_time":1761500000,' +
+	'"user":{"mid":900007,"nickname":"回复者丙","avatar":"' + FACE + '"},' +
+	'"item":{"type":"video","source_content":"对我的视频发表了评论","target_reply_content":"",' +
+	'"root_reply_content":"","image":"' + PIC + '","title":"视频标题","uri":"bilibili://video/1002","native_uri":"","at_details":[]}}')))
+
+const likeSingle = computed((): LikeNoticeModel => LikeNoticeModel.from(obj(
+	'{"id":3,"counts":1,"like_time":1761600000,"notice_state":0,' +
+	'"users":[{"mid":900008,"nickname":"点赞者甲","avatar":"' + FACE + '"}],' +
+	'"item":{"type":"reply","business":"评论","title":"被赞的评论正文，最多四行裁剪显示","image":"' + PIC + '","uri":"bilibili://video/1003","native_uri":""}}')))
+
+const likeMulti = computed((): LikeNoticeModel => LikeNoticeModel.from(obj(
+	'{"id":4,"counts":12,"like_time":1761500000,"notice_state":0,' +
+	'"users":[{"mid":900009,"nickname":"点赞者乙","avatar":"' + FACE + '"},{"mid":900010,"nickname":"点赞者丙","avatar":"' + FACE + '"},{"mid":900011,"nickname":"点赞者丁","avatar":"' + FACE + '"}],' +
+	'"item":{"type":"video","business":"视频","title":"视频标题","image":"' + PIC + '","uri":"bilibili://video/1004","native_uri":""}}')))
+
+const systemItem = computed((): SystemNoticeModel => SystemNoticeModel.from(obj(
+	'{"id":5,"cursor":1761600000,"type":0,"title":"系统通知标题（16 粗体）","time_at":"2025年10月26日 09:33",' +
+	'"content":{"web":"系统通知正文，14sp / 行距 20，多行时按正文流式铺开，用于核对行距与左右内边距是否与基线一致。"}}')))
+</script>
+
+<style>
+	.p8 {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.p8-scroll {
+		flex: 1;
+	}
+	.p8-cap {
+		font-size: 13px;
+		padding-left: 14px;
+		padding-top: 14px;
+		padding-bottom: 6px;
+	}
+	.p8-divider {
+		height: 1px;
+		background-color: rgba(128, 128, 128, 0.1);
+		margin-left: 14px;
+		margin-right: 14px;
+	}
+	.p8-tail {
+		height: 40px;
+	}
+</style>

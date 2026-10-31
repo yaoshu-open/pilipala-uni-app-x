@@ -1,0 +1,665 @@
+<template>
+	<view class="dyn" :style="pageStyle">
+		<!-- 标题栏：状态栏避让 + 标题/类型分段 + 右上投稿钮（源 AppBar + 基线骨架） -->
+		<view class="dyn-bar" :style="barTopStyle">
+			<view class="dyn-bar-row">
+				<view class="dyn-bar-title" :style="barBgStyle">
+					<text v-if="titleText.length > 0" class="dyn-title" :style="titleTextStyle">{{ titleText }}</text>
+					<view v-if="showSegment" class="dyn-seg" :style="segStyle">
+						<view
+							v-for="(tab, index) in typeTabs"
+							:key="tab.value"
+							class="dyn-seg-item"
+							:class="typeIndex == index ? 'dyn-seg-item-on' : 'dyn-seg-item-off'"
+							:style="typeIndex == index ? segOnStyle : segOffStyle"
+							@click="onSelectType(index)"
+						>
+							<text class="dyn-seg-text" :style="typeIndex == index ? segTextOnStyle : segTextOffStyle">{{ tab.label }}</text>
+						</view>
+					</view>
+				</view>
+				<view class="dyn-post" @click="onPostTap">
+					<text class="dyn-post-text" :style="postStyle">＋</text>
+				</view>
+			</view>
+		</view>
+
+		<!-- 最新关注面板（源 up_panel）：标题行 + live/up 头像横滑（50 圆头像 + Live 角标/更新点 + 昵称） -->
+		<view v-if="upState == 'loading'" class="dyn-upanel">
+			<view class="dyn-up-skel">
+				<view v-for="n in 10" :key="'usk-' + n.toString()" class="dyn-up-skel-item">
+					<skeleton-block width="50px" height="50px" radius="25px"></skeleton-block>
+					<skeleton-block width="45px" height="12px" radius="3px"></skeleton-block>
+				</view>
+			</view>
+		</view>
+		<view v-else-if="upState == 'ready' && upItems.length > 0" class="dyn-upanel" :style="upanelBgStyle">
+			<view class="dyn-upanel-head">
+				<text class="dyn-upanel-title" :style="titleTextStyle">最新关注</text>
+				<view class="dyn-upanel-more" @click="openFollowAll">
+					<text class="dyn-upanel-more-text" :style="secondaryTextStyle">查看全部</text>
+				</view>
+			</view>
+			<scroll-view class="dyn-upanel-scroll" :direction="'horizontal'" :show-scrollbar="false">
+				<view class="dyn-upanel-row">
+					<view class="dyn-upanel-pad"></view>
+					<template v-for="(up, index) in upItems" :key="up.type + '-' + up.mid.toString()">
+						<view
+							class="dyn-up-item"
+							:style="upOpacityStyle(up)"
+							@click="onUpTap(up)"
+							@longpress="onUpLongPress(up)"
+						>
+							<view class="dyn-up-avatar">
+								<network-img :src="up.face" width="50px" height="50px" radius="25px"></network-img>
+								<view v-if="up.type == 'live'" class="dyn-up-live">
+									<p-badge text="Live" type="primary" size="small" :font-size="10"></p-badge>
+								</view>
+								<view v-else-if="up.hasUpdate" class="dyn-up-dot" :style="dotStyle"></view>
+							</view>
+							<text class="dyn-up-name" :style="upNameStyle(up)" :max-lines="1">{{ up.uname }}</text>
+						</view>
+						<view v-if="showUpDivider(index)" class="dyn-up-divider" :style="dividerStyle"></view>
+					</template>
+					<view class="dyn-upanel-pad"></view>
+				</view>
+			</scroll-view>
+			<view class="dyn-upanel-tail" :style="upanelTailStyle"></view>
+		</view>
+
+		<!-- 动态卡流 -->
+		<view v-if="feedState == 'error'" class="dyn-fill">
+			<empty-illus
+				v-if="errorCode == -101"
+				:text="errorText"
+				:pill="true"
+				:retry="true"
+				retry-text="去登录"
+				@retry="goLogin"
+			></empty-illus>
+			<p-http-error v-else :message="errorText" @retry="reloadAll"></p-http-error>
+		</view>
+		<view v-else-if="feedState == 'empty'" class="dyn-fill">
+			<empty-illus text="没有数据"></empty-illus>
+		</view>
+		<scroll-view
+			v-else
+			class="dyn-scroll"
+			:scroll-top="topTick"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:lower-threshold="200"
+			@refresherrefresh="onRefresh"
+			@scrolltolower="onLoadMore"
+		>
+			<view v-if="feedState == 'loading'" class="dyn-list">
+				<view v-for="n in 5" :key="'sk-' + n.toString()">
+					<skeleton-dynamic-card></skeleton-dynamic-card>
+				</view>
+			</view>
+			<view v-else class="dyn-list">
+				<dynamic-panel
+					v-for="(entry, index) in items"
+					:key="entry.idStr.length > 0 ? entry.idStr : index.toString()"
+					:item="entry"
+				></dynamic-panel>
+				<view v-if="loadingMore" class="dyn-footer">
+					<text class="dyn-footer-text" :style="secondaryTextStyle">加载中...</text>
+				</view>
+				<view class="dyn-bottom"></view>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch, onMounted } from 'vue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import PBadge from '../../components/p-badge/p-badge.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import SkeletonDynamicCard from '../../components/skeleton/skeleton-dynamic-card.uvue'
+import DynamicPanel from '../../components/dynamics/dynamic-panel.uvue'
+import { fetchDynamicFeed, fetchFollowUpPanel } from '../../api/dynamics.uts'
+import { DynamicItem } from '../../models/member.uts'
+import { LiveUpItem, FollowUpItem } from '../../models/dynamics.uts'
+import { userState } from '../../stores/user.uts'
+import { getNumber, SK } from '../../utils/storage.uts'
+import { navigateTo, RT } from '../../utils/routes.uts'
+import { statusBarPaddingTop } from '../../utils/safeArea.uts'
+import { dynTopSeq, dynRefreshSeq } from '../../stores/tabSignal.uts'
+import {
+	textPrimary, textSecondary, cardBackground, pageBackground, themeColor, currentThemeIndex, withAlpha, isDarkMode
+} from '../../utils/theme.uts'
+
+/**
+ * 动态主页（源头：`lib/pages/dynamics/{view,controller}.dart`）。
+ *
+ * main 第三 tab 常驻组件（不注册路由，底栏高亮由宿主 main 控制）。
+ * 结构＝标题栏（未登录「动态」/ 选 UP「xx的动态」/ 类型分段 全部·投稿·番剧·专栏 + 右上投稿钮）
+ * → 最新关注面板（portal：live 头像组 + 竖分隔线 + up 头像组横滑，非当前项 0.3 透明）
+ * → 动态卡流（offset+page 双游标、下拉刷新、类型/UP 切换重置分页、尾部空白 40）。
+ *
+ * 行为口径（源 controller）：
+ *  - 默认类型读设置键 defaultDynamicType；
+ *  - 下拉刷新渲染期误触的 onLoad 由 page==1 闸门挡掉；刷新保留当前 type 与 mid；
+ *  - 点 up：type 重置全部、清列表重请求、标题变「xx的动态」；点「全部动态」头像恢复；live 项占位提示（P9）；
+ *  - 长按头像进用户主页；「查看全部」进关注页；
+ *  - 投稿「＋」钮：设计未定义处置 → toast「投稿功能暂未接入」（登记差异）。
+ */
+class TypeTab {
+	label: string = ''
+	value: string = ''
+	constructor(label: string, value: string) {
+		this.label = label
+		this.value = value
+	}
+}
+
+/** 面板项统一渲染模型（live/up 两组拼接；源 up_panel 同款合并遍历） */
+class UpRow {
+	type: string = 'up'
+	face: string = ''
+	uname: string = ''
+	mid: number = 0
+	roomId: number = 0
+	hasUpdate: boolean = false
+
+	constructor(type: string, face: string, uname: string, mid: number, roomId: number, hasUpdate: boolean) {
+		this.type = type
+		this.face = face
+		this.uname = uname
+		this.mid = mid
+		this.roomId = roomId
+		this.hasUpdate = hasUpdate
+	}
+}
+
+const typeTabs: Array<TypeTab> = [
+	new TypeTab('全部', 'all'),
+	new TypeTab('投稿', 'video'),
+	new TypeTab('番剧', 'pgc'),
+	new TypeTab('专栏', 'article')
+]
+
+const primary = themeColor(currentThemeIndex())
+
+const typeIndex = ref<number>(((): number => {
+	const saved = getNumber(SK.defaultDynamicType, 0)
+	return saved >= 0 && saved < typeTabs.length ? saved : 0
+})())
+const items = ref<Array<DynamicItem>>([])
+const feedState = ref<string>('loading')
+const errorText = ref<string>('')
+const errorCode = ref<number>(0)
+const loadingMore = ref<boolean>(false)
+const refreshing = ref<boolean>(false)
+/** 分页：page==1 兼作「下拉刷新渲染期」闸门（源同款） */
+const page = ref<number>(1)
+const offset = ref<string>('')
+const hasMore = ref<boolean>(true)
+let lastLoadAt: number = 0
+
+/** UP 过滤：-1 全部（源 mid 初值） */
+const hostMid = ref<number>(-1)
+const hostName = ref<string>('')
+const upState = ref<string>('loading')
+const upItems = ref<Array<UpRow>>([])
+const liveCount = ref<number>(0)
+const myMid = ref<number>(0)
+
+/** 回顶（类型/UP 切换滚回顶；受控 scroll-top 用微差值保证重复触发） */
+const topTick = ref<number>(0)
+
+const showSegment = computed((): boolean => userState.isLogin && hostMid.value == -1)
+const titleText = computed((): string => {
+	if (!userState.isLogin) {
+		return '动态'
+	}
+	if (hostMid.value != -1 && hostName.value.length > 0) {
+		return hostName.value + '的动态'
+	}
+	return ''
+})
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const barTopStyle = computed((): string => 'background-color:' + cardBackground() + ';' + statusBarPaddingTop(0))
+const barBgStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const titleTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const postStyle = computed((): string => 'color:' + primary + ';')
+
+/** 分段胶囊（基线 P6：高 34 圆角 20，米色底 + 白色凸起选中块） */
+const segStyle = computed((): string => {
+	const base = isDarkMode() ? 'rgba(255,255,255,0.10)' : '#E8E2D2'
+	return 'background-color:' + base + ';'
+})
+const segOnStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const segOffStyle = computed((): string => 'background-color:rgba(0,0,0,0);')
+const segTextOnStyle = computed((): string => 'color:' + textPrimary() + ';')
+const segTextOffStyle = computed((): string => 'color:' + textSecondary() + ';')
+const upanelBgStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const upanelTailStyle = computed((): string => {
+	const base = isDarkMode() ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'
+	return 'background-color:' + base + ';'
+})
+const dotStyle = computed((): string => 'background-color:' + primary + ';')
+const dividerStyle = computed((): string => 'background-color:' + withAlpha(primary, 0.5) + ';')
+
+function upOpacityStyle(up: UpRow): string {
+	const isCurrent = hostMid.value == up.mid || hostMid.value == -1
+	return 'opacity:' + (isCurrent ? '1' : '0.3') + ';'
+}
+
+function upNameStyle(up: UpRow): string {
+	return 'color:' + (hostMid.value == up.mid ? primary : textSecondary()) + ';'
+}
+
+/** live 组与 up 组之间的竖分隔线（源 VerticalDivider） */
+function showUpDivider(index: number): boolean {
+	return liveCount.value > 0 && index == liveCount.value - 1
+}
+
+// ---------------------------------------------------------------- 数据加载
+
+async function loadFeed(mode: string) {
+	if (!userState.isLogin) {
+		feedState.value = 'error'
+		errorCode.value = -101
+		errorText.value = '账号未登录'
+		return
+	}
+	if (mode == 'init') {
+		items.value = []
+		offset.value = ''
+		hasMore.value = true
+		feedState.value = 'loading'
+		errorText.value = ''
+	}
+	const requestPage = mode == 'init' ? 1 : page.value
+	const res = await fetchDynamicFeed(typeTabs[typeIndex.value].value, requestPage, offset.value, hostMid.value)
+	if (mode == 'init') {
+		if (!res.status) {
+			feedState.value = 'error'
+			errorCode.value = res.code
+			errorText.value = res.message.length > 0 ? res.message : '请求异常'
+			return
+		}
+		items.value = res.items
+		offset.value = res.offset
+		hasMore.value = res.hasMore
+		page.value = 2
+		feedState.value = res.items.length > 0 ? 'ready' : 'empty'
+		return
+	}
+	// load / refresh：追加
+	if (!res.status) {
+		uni.showToast({ title: res.message.length > 0 ? res.message : '请求异常', icon: 'none' })
+		return
+	}
+	if (res.items.length == 0) {
+		hasMore.value = false
+		uni.showToast({ title: '没有更多了', icon: 'none' })
+		return
+	}
+	const next = items.value.slice()
+	for (let i = 0; i < res.items.length; i++) {
+		next.push(res.items[i])
+	}
+	items.value = next
+	offset.value = res.offset
+	hasMore.value = res.hasMore
+	page.value = requestPage + 1
+}
+
+async function loadPortal() {
+	if (!userState.isLogin) {
+		upState.value = 'off'
+		return
+	}
+	const res = await fetchFollowUpPanel()
+	if (!res.status || res.panel == null) {
+		// 源同款：面板失败不占位（静默隐藏），主列表不受影响
+		upState.value = 'off'
+		return
+	}
+	const rows: Array<UpRow> = []
+	for (let i = 0; i < res.panel.liveList.length; i++) {
+		const live = res.panel.liveList[i]
+		rows.push(new UpRow('live', live.face, live.uname, live.mid, live.roomId, false))
+	}
+	liveCount.value = rows.length
+	for (let i = 0; i < res.panel.upList.length; i++) {
+		const up = res.panel.upList[i]
+		rows.push(new UpRow('up', up.face, up.uname, up.mid, 0, up.hasUpdate))
+	}
+	myMid.value = res.panel.myMid
+	upItems.value = rows
+	upState.value = 'ready'
+}
+
+function reloadAll() {
+	loadFeed('init')
+	loadPortal()
+}
+
+// ---------------------------------------------------------------- 交互
+
+function onSelectType(index: number) {
+	if (typeIndex.value == index) {
+		return
+	}
+	typeIndex.value = index
+	page.value = 1
+	loadFeed('init')
+	scrollToTop()
+}
+
+function onUpTap(up: UpRow) {
+	if (up.type == 'live') {
+		// 直播间跳转归 P9（设计_动态域 §一 跨批依赖）
+		uni.showToast({ title: '直播域接入后开放', icon: 'none' })
+		return
+	}
+	if (up.mid == hostMid.value) {
+		return
+	}
+	// 源 onTapUp：切 UP 时 type 重置全部、清列表重请求；mid=-1（全部动态）即恢复
+	hostMid.value = up.mid
+	hostName.value = up.mid == -1 ? '' : up.uname
+	typeIndex.value = 0
+	page.value = 1
+	loadFeed('init')
+	scrollToTop()
+	if (up.mid != -1) {
+		uni.showToast({ title: '已筛选 ' + up.uname + ' 的动态', icon: 'none' })
+	}
+}
+
+function onUpLongPress(up: UpRow) {
+	// 源：mid==-1 的「全部动态」不响应长按
+	if (up.mid <= 0) {
+		return
+	}
+	navigateTo(RT.member, 'mid=' + up.mid.toString())
+}
+
+function openFollowAll() {
+	const mid = myMid.value > 0 ? myMid.value : userState.info.mid
+	if (mid <= 0) {
+		return
+	}
+	navigateTo(RT.follow, 'mid=' + mid.toString())
+}
+
+/** 投稿「＋」钮：设计未定义处置（源为 web 容器投稿面板）→ 占位提示（登记） */
+function onPostTap() {
+	uni.showToast({ title: '投稿功能暂未接入', icon: 'none' })
+}
+
+function goLogin() {
+	navigateTo(RT.login)
+}
+
+async function onLoadMore() {
+	if (feedState.value != 'ready' || loadingMore.value || !hasMore.value) {
+		return
+	}
+	// 源闸门：下拉刷新渲染期（page 仍为 1）误触的 onLoad 直接挡掉
+	if (page.value == 1) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadAt < 1000) {
+		return
+	}
+	lastLoadAt = now
+	loadingMore.value = true
+	await loadFeed('load')
+	loadingMore.value = false
+}
+
+async function onRefresh() {
+	if (!userState.isLogin) {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	// 源 onRefresh：page=1 重拉 portal + feed（type/mid 保留）
+	page.value = 1
+	await loadPortal()
+	await loadFeed('init')
+	refreshing.value = false
+}
+
+function scrollToTop() {
+	topTick.value = topTick.value == 0 ? 0.01 : 0
+}
+
+/** 底栏「动态」tab 复点信号：单击回顶 / 500ms 内双击刷新（type 与 mid 保留） */
+watch(dynTopSeq, (value: number) => {
+	if (value == 0) {
+		return
+	}
+	scrollToTop()
+})
+
+watch(dynRefreshSeq, (value: number) => {
+	if (value == 0) {
+		return
+	}
+	page.value = 1
+	loadPortal()
+	loadFeed('init')
+	scrollToTop()
+})
+
+/** 登录态变化：源 userLogin.listen 等价——重拉面板与列表 */
+watch(() => userState.isLogin, () => {
+	reloadAll()
+})
+
+onMounted(() => {
+	reloadAll()
+})
+</script>
+
+<style>
+	.dyn {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.dyn-bar {
+		display: flex;
+		flex-direction: column;
+	}
+	.dyn-bar-row {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 6px;
+	}
+	.dyn-bar-title {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.dyn-title {
+		font-size: 16px;
+		font-weight: 500;
+	}
+	.dyn-seg {
+		height: 34px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		border-radius: 20px;
+		padding-left: 3px;
+		padding-right: 3px;
+	}
+	.dyn-seg-item {
+		height: 28px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		border-radius: 16px;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.dyn-seg-item-on {
+		padding-left: 13px;
+		padding-right: 13px;
+	}
+	.dyn-seg-item-off {
+		padding-left: 13px;
+		padding-right: 13px;
+	}
+	.dyn-seg-text {
+		font-size: 13px;
+	}
+	.dyn-post {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.dyn-post-text {
+		font-size: 26px;
+		font-weight: 300;
+	}
+	.dyn-upanel {
+		display: flex;
+		flex-direction: column;
+	}
+	.dyn-upanel-head {
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.dyn-upanel-title {
+		font-size: 14px;
+	}
+	.dyn-upanel-more {
+		height: 32px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.dyn-upanel-more-text {
+		font-size: 13px;
+	}
+	.dyn-upanel-scroll {
+		height: 90px;
+	}
+	/* 横向 scroll-view 三要素：容器显式 row + 子项不收缩；内容行宽度由子项自然撑开（不锁 100%） */
+	.dyn-upanel-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		height: 90px;
+	}
+	.dyn-upanel-pad {
+		width: 10px;
+		height: 1px;
+		flex-shrink: 0;
+	}
+	.dyn-up-item {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		flex-shrink: 0;
+		padding-left: 5px;
+		padding-right: 5px;
+	}
+	.dyn-up-avatar {
+		position: relative;
+		width: 50px;
+		height: 50px;
+	}
+	.dyn-up-live {
+		position: absolute;
+		top: -4px;
+		left: 0px;
+		right: 0px;
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+	}
+	.dyn-up-dot {
+		position: absolute;
+		top: 0px;
+		right: 0px;
+		width: 8px;
+		height: 8px;
+		border-radius: 4px;
+	}
+	.dyn-up-name {
+		width: 56px;
+		font-size: 12px;
+		margin-top: 4px;
+		text-align: center;
+	}
+	.dyn-up-divider {
+		width: 2px;
+		height: 46px;
+		border-radius: 1px;
+		margin-left: 8px;
+		margin-right: 8px;
+		flex-shrink: 0;
+	}
+	.dyn-upanel-tail {
+		height: 6px;
+	}
+	.dyn-up-skel {
+		height: 90px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.dyn-up-skel-item {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		flex-shrink: 0;
+		margin-left: 10px;
+		margin-right: 10px;
+	}
+	.dyn-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.dyn-scroll {
+		flex: 1;
+	}
+	.dyn-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.dyn-footer {
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+		padding-top: 16px;
+	}
+	.dyn-footer-text {
+		font-size: 13px;
+	}
+	.dyn-bottom {
+		height: 40px;
+	}
+</style>

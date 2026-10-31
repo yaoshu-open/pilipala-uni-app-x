@@ -1,0 +1,80 @@
+<template>
+	<view class="page">
+		<web-view id="wv" :src="url" @load="onWebLoaded" @error="onWebError"></web-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import { rawGet } from '../../utils/request.uts'
+
+/**
+ * web-view ↔ 请求层 cookie 共享可行性验证（P1 关键依赖门禁，不实现登录）。
+ *
+ * 判定三段：
+ *  1. 请求层写入 cookie 后 WebView 是否看得到（截图 /cookies 页面回显）；
+ *  2. WebView 写入 cookie（/cookies/set 302）后请求层是否自动携带（日志 echo）；
+ *  3. 结论落到「是否必须自研 pl-cookie uts 插件」。
+ *
+ * 已知限制（官方文档口径）：uni.createWebViewContext().evalJS(js) 返回 void，
+ * 无法取回脚本执行结果，因此 document.cookie 无法直接回读第三方面页；
+ * 若两段共享不成立，只能走 uni.getElementById(...).getAndroidView() + native CookieManager（需 uts 插件）。
+ */
+const url = ref<string>('https://httpbin.org/cookies')
+
+function log(msg: string) {
+	console.log('[WV] ' + msg)
+}
+
+function onWebLoaded(event: UniWebViewLoadEvent) {
+	log('loaded url=' + event.detail.url)
+}
+
+function onWebError(event: UniWebViewErrorEvent) {
+	log('error ' + event.detail.errMsg + ' url=' + event.detail.url)
+}
+
+async function phase2Echo() {
+	const echo = await rawGet('https://httpbin.org/cookies')
+	if (echo == null) {
+		log('phase2 request echo null')
+		return
+	}
+	const cookies = echo.getJSON('cookies')
+	log('phase2 request echo=' + (cookies != null ? JSON.stringify(cookies) : 'null'))
+}
+
+async function run() {
+	log('=== phase1: 请求层写 cookie → WebView 是否可见 ===')
+	const setRes = await rawGet('https://httpbin.org/response-headers?Set-Cookie=fromreq%3D1%3B%20Path%3D%2F')
+	log('phase1 request set fromreq=1 => ' + (setRes == null ? 'null' : 'ok'))
+	setTimeout(() => {
+		log('phase1 webview -> /cookies')
+		url.value = 'https://httpbin.org/cookies'
+	}, 1500)
+	setTimeout(() => {
+		log('=== phase2: WebView 写 cookie → 请求层是否可见 ===')
+		url.value = 'https://httpbin.org/cookies/set?fromwv=1'
+		log('phase2 webview -> /cookies/set?fromwv=1')
+	}, 7000)
+	setTimeout(() => {
+		phase2Echo()
+	}, 13000)
+	setTimeout(() => {
+		url.value = 'https://httpbin.org/cookies'
+		log('final -> /cookies（截图用）')
+	}, 17000)
+}
+
+onLoad(() => {
+	run()
+})
+</script>
+
+<style>
+	.page {
+		flex: 1;
+		background-color: #FFFFFF;
+	}
+</style>

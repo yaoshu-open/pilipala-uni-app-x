@@ -1,0 +1,786 @@
+/**
+ * 纯 uts 二维码编码器（QR Code Model 2，Byte 模式，纠错 M，版本 1-10）。
+ *
+ * 用途：本地生成 B 站扫码登录二维码——qrcode_url 必须本地渲染，
+ * 禁止调用外部二维码服务/网络图片 API（qrcode_key 泄漏 = 会话劫持）。
+ *
+ * 实现依据 ISO/IEC 18004（QR Code 规范），算法结构参考公认实现
+ * （nayuki/QR-Code-generator 的分块/交织/掩码评分框架）：
+ *  - RS 纠错：GF(256)，本原多项式 0x11D（二维码专用值），生成多项式 ∏(x-α^i)；
+ *  - 格式信息：BCH(15,5)，生成多项式 0x537，编码后整体 XOR 掩码 0x5412；
+ *  - 版本信息（V7+）：BCH(18,6)，生成多项式 0x1F25；
+ *  - 掩码：8 种固定图样 + 四条惩罚规则评分取最低。
+ * 不依赖任何平台 API（无 uni.* / 无 DOM），任何端可复用。
+ *
+ * 确定性：同输入必同输出（掩码评分并列时取编号小的，见选掩码循环）。
+ */
+
+// ---------------- 常量表（ISO/IEC 18004 Table 7-13，纠错 M 档） ----------------
+
+/**
+ * 各版本（下标 0 = V1）ECC 码字数 per block，纠错 M。
+ * 依据 ISO/IEC 18004 Table 13-22：[10,16,26,18,24,16,18,22,22,26]
+ */
+const ECC_M_ECC_PER_BLOCK: number[] = [10, 16, 26, 18, 24, 16, 18, 22, 22, 26]
+
+/** 各版本 ECC 分块数，纠错 M：[1,1,1,2,2,4,4,4,5,5] */
+const ECC_M_NUM_BLOCKS: number[] = [1, 1, 1, 2, 2, 4, 4, 4, 5, 5]
+
+/** 各版本总码字数（数据 + 纠错）：[26,44,70,100,134,172,196,242,292,346] */
+const TOTAL_CODEWORDS: number[] = [26, 44, 70, 100, 134, 172, 196, 242, 292, 346]
+
+/**
+ * 各版本对齐图案中心坐标（V1 无对齐图案）。
+ * 依据 ISO/IEC 18004 Annex E：V2[6,18] … V7 起三坐标。
+ */
+const ALIGNMENT_POSITIONS: number[][] = [
+	[],
+	[6, 18],
+	[6, 22],
+	[6, 26],
+	[6, 30],
+	[6, 34],
+	[6, 22, 38],
+	[6, 24, 42],
+	[6, 26, 46],
+	[6, 28, 50]
+]
+
+/** 支持的版本上限（数据 ≤ 208 字节，B 站登录 URL ≈ 100 字节，V6 附近，余量充足） */
+const MAX_VERSION: number = 10
+
+/** 纠错 M 在格式信息中的 2 bit 编码（L=01 M=00 Q=11 H=10） */
+const ECC_M_FORMAT_BITS: number = 0
+
+// 掩码惩罚规则权重（ISO/IEC 18004 §8.8.2）
+const PENALTY_N1: number = 3   // 连续同色 run ≥5
+const PENALTY_N2: number = 3   // 2×2 同色块
+const PENALTY_N3: number = 40  // 类 finder 的 1:1:3:1:1 模式
+const PENALTY_N4: number = 10  // 暗模块比例偏离 50% 每 5%
+
+// ---------------- GF(256) 运算 ----------------
+
+/**
+ * GF(256) 乘法（本原多项式 0x11D——QR Code 专用，依据 ISO/IEC 18004 §8.7.3 附录 A）。
+ * carry-less 俄罗斯乘法：z 逐位左移，每次移出 bit7 即 XOR 0x11D 归约。
+ */
+function gfMul(x: number, y: number): number {
+	let z: number = 0
+	for (let i = 7; i >= 0; i--) {
+		// z 恒非负且 < 256，>> 7 等价无符号右移
+		z = ((z << 1) ^ ((z >> 7) * 0x11D)) & 0xFF
+		if (((y >> i) & 1) == 1) {
+			z = z ^ x
+		}
+	}
+	return z & 0xFF
+}
+
+/**
+ * RS 生成多项式系数表：g(x) = ∏(x - α^i)，i = 0..degree-1，α = 2。
+ * 系数即 α^0, α^1, … α^(degree-1)（生成多项式根的幂次序列）。
+ */
+function rsDivisor(degree: number): number[] {
+	const result: number[] = []
+	let root: number = 1
+	for (let i = 0; i < degree; i++) {
+		result.push(root)
+		root = gfMul(root, 0x02)
+	}
+	return result
+}
+
+/**
+ * RS 余数：data 多项式 × x^degree 后对 g(x) 的余数（综合除法）。
+ * 环形寄存器实现：factor = 新字节 ^ 寄存器首位，寄存器逐位前移并叠加 factor × 系数。
+ */
+function rsRemainder(data: number[], divisor: number[]): number[] {
+	const result: number[] = []
+	for (let i = 0; i < divisor.length; i++) {
+		result.push(0)
+	}
+	for (let i = 0; i < data.length; i++) {
+		const factor: number = (data[i] ^ result[0]) & 0xFF
+		for (let j = 0; j < result.length - 1; j++) {
+			result[j] = result[j + 1]
+		}
+		result[result.length - 1] = 0
+		for (let j = 0; j < divisor.length; j++) {
+			result[j] = (result[j] ^ gfMul(divisor[j], factor)) & 0xFF
+		}
+	}
+	return result
+}
+
+// ---------------- 位缓冲与数据编码 ----------------
+
+/** 追加式位缓冲（每元素 0/1） */
+class BitBuf {
+	bits: number[] = []
+
+	append(value: number, len: number) {
+		for (let i = len - 1; i >= 0; i--) {
+			this.bits.push((value >> i) & 1)
+		}
+	}
+
+	length(): number {
+		return this.bits.length
+	}
+
+	toBytes(): number[] {
+		const bytes: number[] = []
+		for (let i = 0; i < this.bits.length; i += 8) {
+			let b: number = 0
+			for (let j = 0; j < 8; j++) {
+				b = (b << 1) | this.bits[i + j]
+			}
+			bytes.push(b)
+		}
+		return bytes
+	}
+}
+
+/** UTF-16 string → UTF-8 字节序列（含代理对处理） */
+export function utf8Encode(text: string): number[] {
+	const bytes: number[] = []
+	let i: number = 0
+	while (i < text.length) {
+		let code: number = text.charCodeAt(i)
+		if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
+			const next: number = text.charCodeAt(i + 1)
+			if (next >= 0xDC00 && next <= 0xDFFF) {
+				code = 0x10000 + ((code - 0xD800) << 10) + (next - 0xDC00)
+				i++
+			}
+		}
+		if (code < 0x80) {
+			bytes.push(code)
+		} else if (code < 0x800) {
+			bytes.push(0xC0 | (code >> 6))
+			bytes.push(0x80 | (code & 0x3F))
+		} else if (code < 0x10000) {
+			bytes.push(0xE0 | (code >> 12))
+			bytes.push(0x80 | ((code >> 6) & 0x3F))
+			bytes.push(0x80 | (code & 0x3F))
+		} else {
+			bytes.push(0xF0 | (code >> 18))
+			bytes.push(0x80 | ((code >> 12) & 0x3F))
+			bytes.push(0x80 | ((code >> 6) & 0x3F))
+			bytes.push(0x80 | (code & 0x3F))
+		}
+		i++
+	}
+	return bytes
+}
+
+/** 指定版本（纠错 M）的数据码字数 = 总码字数 - 每块 ECC 数 × 块数 */
+function dataCodewordsOf(version: number): number {
+	return TOTAL_CODEWORDS[version - 1] - ECC_M_ECC_PER_BLOCK[version - 1] * ECC_M_NUM_BLOCKS[version - 1]
+}
+
+/** 指定版本 Byte 模式可容纳的最大字节数（扣除模式 4bit + 计数 8/16bit 开销） */
+function byteCapacityOf(version: number): number {
+	const countBits: number = version <= 9 ? 8 : 16  // V1-9 计数 8bit，V10+ 16bit（ISO/IEC 18004 Table 3）
+	return Math.floor((dataCodewordsOf(version) * 8 - 4 - countBits) / 8)
+}
+
+/** Byte 模式段编码：模式 0100 + 计数 + 数据 + 终止符 + 补位字节，产出数据码字 */
+function encodeDataBytes(bytes: number[], version: number): number[] {
+	const capacityWords: number = dataCodewordsOf(version)
+	const buf = new BitBuf()
+	buf.append(0b0100, 4)  // Byte 模式指示符
+	buf.append(bytes.length, version <= 9 ? 8 : 16)
+	for (let i = 0; i < bytes.length; i++) {
+		buf.append(bytes[i], 8)
+	}
+	// 终止符：至多 4 个 0（容量不足时截短）
+	const capacityBits: number = capacityWords * 8
+	const terminator: number = Math.min(4, capacityBits - buf.length())
+	buf.append(0, terminator)
+	// 字节边界对齐
+	buf.append(0, (8 - (buf.length() % 8)) % 8)
+	// 填充字节 0xEC / 0x11 交替（ISO/IEC 18004 §8.4.9）
+	let pad: number = 0xEC
+	while (buf.length() < capacityBits) {
+		buf.append(pad, 8)
+		pad = pad == 0xEC ? 0x11 : 0xEC
+	}
+	return buf.toBytes()
+}
+
+/** 分块算 RS 纠错并交织（短块补一个占位 0 使块等长，交织时跳过该占位位） */
+function addEccAndInterleave(version: number, data: number[]): number[] {
+	const numBlocks: number = ECC_M_NUM_BLOCKS[version - 1]
+	const blockEccLen: number = ECC_M_ECC_PER_BLOCK[version - 1]
+	const total: number = TOTAL_CODEWORDS[version - 1]
+	const shortBlockLen: number = Math.floor(total / numBlocks)
+	const numShortBlocks: number = numBlocks - total % numBlocks
+	const shortDataLen: number = shortBlockLen - blockEccLen
+	const blocks: number[][] = []
+	const divisor: number[] = rsDivisor(blockEccLen)
+	let k: number = 0
+	for (let i = 0; i < numBlocks; i++) {
+		const dataLen: number = shortDataLen + (i < numShortBlocks ? 0 : 1)
+		const dat: number[] = []
+		for (let j = 0; j < dataLen; j++) {
+			dat.push(data[k + j])
+		}
+		k += dataLen
+		const ecc: number[] = rsRemainder(dat, divisor)
+		const block: number[] = []
+		for (let j = 0; j < dat.length; j++) {
+			block.push(dat[j])
+		}
+		if (i < numShortBlocks) {
+			block.push(0)  // 占位：让短块与长块等长，交织时跳过
+		}
+		for (let j = 0; j < ecc.length; j++) {
+			block.push(ecc[j])
+		}
+		blocks.push(block)
+	}
+	const result: number[] = []
+	for (let idx = 0; idx < blocks[0].length; idx++) {
+		for (let j = 0; j < blocks.length; j++) {
+			// 占位位（idx == 短块数据长）只存在于短块，交织时跳过短块的该位
+			if (idx != shortDataLen || j >= numShortBlocks) {
+				result.push(blocks[j][idx])
+			}
+		}
+	}
+	return result
+}
+
+// ---------------- BCH 编码 ----------------
+
+/**
+ * 格式信息 BCH(15,5)：数据 = ECC 2bit << 3 | 掩码 3bit。
+ * 生成多项式 0x537（x^10+x^8+x^5+x^4+x^2+x+1，ISO/IEC 18004 §8.9），
+ * 编码后与掩码 0x5412 XOR（规范固定值，保证不出现全 0 格式信息）。
+ * 已知值校验：M+mask0 → 0x5412，M+mask1 → 0x5125，M+mask2 → 0x5E7C。
+ */
+function formatInfoBits(mask: number): number {
+	const data: number = (ECC_M_FORMAT_BITS << 3) | mask
+	let rem: number = data
+	for (let i = 0; i < 10; i++) {
+		rem = (rem << 1) ^ ((rem >> 9) * 0x537)
+	}
+	return (((data << 10) | rem) ^ 0x5412) & 0x7FFF
+}
+
+/**
+ * 版本信息 BCH(18,6)（V7+）：生成多项式 0x1F25（ISO/IEC 18004 §8.10）。
+ * 已知值校验：V7 → 0x07C94（规范附录与主流实现公认值）。
+ */
+function versionInfoBits(version: number): number {
+	let rem: number = version
+	for (let i = 0; i < 12; i++) {
+		rem = (rem << 1) ^ ((rem >> 11) * 0x1F25)
+	}
+	return ((version << 12) | rem) & 0x3FFFF
+}
+
+// ---------------- 矩阵构建 ----------------
+
+/** 编码结果：modules[row][col]，true = 暗模块 */
+export class QrCodeResult {
+	modules: boolean[][] = []
+	size: number = 0
+	version: number = 0
+	maskPattern: number = 0
+}
+
+/** 基础矩阵构建态：模块值 + 功能区标记（数据放置跳过功能区） */
+class QrBase {
+	modules: boolean[][] = []
+	isFunction: boolean[][] = []
+	size: number = 0
+	version: number = 0
+}
+
+function newSquare(n: number, v: boolean): boolean[][] {
+	const m: boolean[][] = []
+	for (let y = 0; y < n; y++) {
+		const row: boolean[] = []
+		for (let x = 0; x < n; x++) {
+			row.push(v)
+		}
+		m.push(row)
+	}
+	return m
+}
+
+function setModule(base: QrBase, x: number, y: number, dark: boolean) {
+	base.modules[y][x] = dark
+	base.isFunction[y][x] = true
+}
+
+/** 7×7 探测图形（finder）：中心 (cx,cy)，含外圈 1 模块分隔符共 9×9 区域 */
+function drawFinder(base: QrBase, cx: number, cy: number) {
+	for (let dy = -4; dy <= 4; dy++) {
+		for (let dx = -4; dx <= 4; dx++) {
+			const dist: number = Math.max(Math.abs(dx), Math.abs(dy))
+			const x: number = cx + dx
+			const y: number = cy + dy
+			if (x >= 0 && x < base.size && y >= 0 && y < base.size) {
+				// dist 0/1（中心 3×3 暗）、3（外环暗）；dist 2（亮环）、4（分隔符亮）
+				setModule(base, x, y, dist != 2 && dist != 4)
+			}
+		}
+	}
+}
+
+/** 5×5 校正图形（alignment）：中心 (x,y)，中心 + 外环暗，中间环亮 */
+function drawAlignment(base: QrBase, x: number, y: number) {
+	for (let dy = -2; dy <= 2; dy++) {
+		for (let dx = -2; dx <= 2; dx++) {
+			const dist: number = Math.max(Math.abs(dx), Math.abs(dy))
+			setModule(base, x + dx, y + dy, dist != 1)
+		}
+	}
+}
+
+/** 时序图形：第 6 行/列交替明暗（与 finder 相接部分由 finder 覆盖） */
+function drawTiming(base: QrBase) {
+	for (let i = 8; i < base.size - 8; i++) {
+		setModule(base, i, 6, i % 2 == 0)
+		setModule(base, 6, i, i % 2 == 0)
+	}
+}
+
+/** 格式信息两副本 + 固定暗模块；mask 参与编码（每次掩码尝试后重画） */
+function drawFormatBits(base: QrBase, mask: number) {
+	const bits: number = formatInfoBits(mask)
+	// 副本一：左上 finder 周围（顺时针绕 8 号行/列）
+	for (let i = 0; i <= 5; i++) {
+		setModule(base, 8, i, getBit(bits, i))
+	}
+	setModule(base, 8, 7, getBit(bits, 6))
+	setModule(base, 8, 8, getBit(bits, 7))
+	setModule(base, 7, 8, getBit(bits, 8))
+	for (let i = 9; i < 15; i++) {
+		setModule(base, 14 - i, 8, getBit(bits, i))
+	}
+	// 副本二：右上（前 8 位）+ 左下（后 7 位）
+	for (let i = 0; i < 8; i++) {
+		setModule(base, base.size - 1 - i, 8, getBit(bits, i))
+	}
+	for (let i = 8; i < 15; i++) {
+		setModule(base, 8, base.size - 15 + i, getBit(bits, i))
+	}
+	// 固定暗模块：坐标 (8, 4*version+9)（ISO/IEC 18004 图 25）
+	setModule(base, 8, 4 * base.version + 9, true)
+}
+
+/** 版本信息（V7+）：18bit 两副本，右下 + 左下角 3×6 块 */
+function drawVersionBits(base: QrBase) {
+	if (base.version < 7) {
+		return
+	}
+	const bits: number = versionInfoBits(base.version)
+	for (let i = 0; i < 18; i++) {
+		const a: number = base.size - 11 + i % 3
+		const b: number = Math.floor(i / 3)
+		setModule(base, a, b, getBit(bits, i))
+		setModule(base, b, a, getBit(bits, i))
+	}
+}
+
+function getBit(x: number, i: number): boolean {
+	return ((x >> i) & 1) != 0
+}
+
+/**
+ * 按放置规则把交织后的码字逐位写入非功能区：
+ * 从右下起两列一组蛇形向上/向下，跳过第 6 列（时序列）。
+ */
+function drawCodewords(base: QrBase, data: number[]) {
+	let i: number = 0
+	for (let right = base.size - 1; right >= 1; right -= 2) {
+		if (right == 6) {
+			right = 5
+		}
+		for (let vert = 0; vert < base.size; vert++) {
+			for (let j = 0; j < 2; j++) {
+				const x: number = right - j
+				const upward: boolean = ((right + 1) & 2) == 0
+				const y: number = upward ? base.size - 1 - vert : vert
+				if (!base.isFunction[y][x] && i < data.length * 8) {
+					base.modules[y][x] = ((data[i >> 3] >> (7 - (i & 7))) & 1) != 0
+					i++
+				}
+			}
+		}
+	}
+}
+
+/** 8 种掩码函数（ISO/IEC 18004 Table 10），坐标 (x=列, y=行) */
+function maskBit(mask: number, y: number, x: number): boolean {
+	if (mask == 0) {
+		return (x + y) % 2 == 0
+	}
+	if (mask == 1) {
+		return y % 2 == 0
+	}
+	if (mask == 2) {
+		return x % 3 == 0
+	}
+	if (mask == 3) {
+		return (x + y) % 3 == 0
+	}
+	if (mask == 4) {
+		return (Math.floor(x / 3) + Math.floor(y / 2)) % 2 == 0
+	}
+	if (mask == 5) {
+		return x * y % 2 + x * y % 3 == 0
+	}
+	if (mask == 6) {
+		return (x * y % 2 + x * y % 3) % 2 == 0
+	}
+	return ((x + y) % 2 + x * y % 3) % 2 == 0
+}
+
+/** 对全部非功能位应用掩码（数据位 XOR 掩码图样） */
+function applyMask(base: QrBase, mask: number) {
+	for (let y = 0; y < base.size; y++) {
+		for (let x = 0; x < base.size; x++) {
+			if (!base.isFunction[y][x] && maskBit(mask, y, x)) {
+				base.modules[y][x] = !base.modules[y][x]
+			}
+		}
+	}
+}
+
+// ---------------- 掩码惩罚评分（ISO/IEC 18004 §8.8.2 四规则） ----------------
+
+/** 行/列向量化的 run 评分（规则 1） */
+function runPenalty(line: boolean[]): number {
+	let penalty: number = 0
+	let runColor: boolean = line.length > 0 ? line[0] : false
+	let runLen: number = 0
+	for (let i = 0; i < line.length; i++) {
+		if (line[i] == runColor) {
+			runLen++
+			if (runLen == 5) {
+				penalty += PENALTY_N1
+			} else if (runLen > 5) {
+				penalty += 1
+			}
+		} else {
+			runColor = line[i]
+			runLen = 1
+		}
+	}
+	return penalty
+}
+
+/** 规则 3：类 finder 模式（1:1:3:1:1 明暗比），一侧 4 模块全亮（越界视为亮） */
+function finderLikePenalty(line: boolean[]): number {
+	const n: number = line.length
+	if (n < 7) {
+		return 0
+	}
+	let count: number = 0
+	for (let j = 0; j + 7 <= n; j++) {
+		// 核心 7 位 = 1011101
+		if (line[j] && !line[j + 1] && line[j + 2] && line[j + 3] && line[j + 4] && !line[j + 5] && line[j + 6]) {
+			let leftLight: boolean = true
+			for (let k = j - 4; k < j; k++) {
+				if (k < 0) {
+					continue  // 越界视为亮
+				}
+				if (line[k]) {
+					leftLight = false
+					break
+				}
+			}
+			let rightLight: boolean = true
+			for (let k = j + 7; k < j + 11; k++) {
+				if (k >= n) {
+					continue  // 越界视为亮
+				}
+				if (line[k]) {
+					rightLight = false
+					break
+				}
+			}
+			if (leftLight || rightLight) {
+				count++
+			}
+		}
+	}
+	return count * PENALTY_N3
+}
+
+function penaltyScore(modules: boolean[][], size: number): number {
+	let penalty: number = 0
+	// 规则 1 + 3：行
+	for (let y = 0; y < size; y++) {
+		const row: boolean[] = []
+		for (let x = 0; x < size; x++) {
+			row.push(modules[y][x])
+		}
+		penalty += runPenalty(row)
+		penalty += finderLikePenalty(row)
+	}
+	// 规则 1 + 3：列
+	for (let x = 0; x < size; x++) {
+		const col: boolean[] = []
+		for (let y = 0; y < size; y++) {
+			col.push(modules[y][x])
+		}
+		penalty += runPenalty(col)
+		penalty += finderLikePenalty(col)
+	}
+	// 规则 2：2×2 同色块
+	for (let y = 0; y < size - 1; y++) {
+		for (let x = 0; x < size - 1; x++) {
+			const c: boolean = modules[y][x]
+			if (c == modules[y][x + 1] && c == modules[y + 1][x] && c == modules[y + 1][x + 1]) {
+				penalty += PENALTY_N2
+			}
+		}
+	}
+	// 规则 4：暗模块比例偏离 50%，每 5% 罚 N4
+	let dark: number = 0
+	for (let y = 0; y < size; y++) {
+		for (let x = 0; x < size; x++) {
+			if (modules[y][x]) {
+				dark++
+			}
+		}
+	}
+	const total: number = size * size
+	const devi: number = Math.abs(dark * 20 - total * 10)
+	const k: number = Math.ceil(devi / total) - 1
+	penalty += k * PENALTY_N4
+	return penalty
+}
+
+// ---------------- 编码主流程 ----------------
+
+/** 构建功能区域骨架（finder/timing/alignment/version/格式占位），数据位留空 */
+function buildBase(version: number): QrBase {
+	const base = new QrBase()
+	base.version = version
+	base.size = 21 + (version - 1) * 4
+	base.modules = newSquare(base.size, false)
+	base.isFunction = newSquare(base.size, false)
+	drawFormatBits(base, 0)  // 先画 mask0 占位标记功能区；最终值在选定掩码后重画
+	drawFinder(base, 3, 3)
+	drawFinder(base, base.size - 4, 3)
+	drawFinder(base, 3, base.size - 4)
+	drawAlignmentAll(base)
+	drawTiming(base)
+	drawVersionBits(base)
+	return base
+}
+
+/** 对齐图形：坐标组合去掉与三个 finder 重叠的角组合 */
+function drawAlignmentAll(base: QrBase) {
+	const positions: number[] = ALIGNMENT_POSITIONS[base.version - 1]
+	if (positions.length == 0) {
+		return
+	}
+	const last: number = positions.length - 1
+	for (let i = 0; i < positions.length; i++) {
+		for (let j = 0; j < positions.length; j++) {
+			const isCorner: boolean = (i == 0 && j == 0) || (i == 0 && j == last) || (i == last && j == 0)
+			if (!isCorner) {
+				drawAlignment(base, positions[i], positions[j])
+			}
+		}
+	}
+}
+
+/**
+ * 编码入口：文本（UTF-8）→ QR Code（纠错 M，版本 1-10 自动选择）。
+ * 超容量（> 208 字节）返回 null，由调用方按「数据过长」失败处理。
+ */
+export function encodeQrText(text: string): QrCodeResult | null {
+	const bytes: number[] = utf8Encode(text)
+	// 版本选择：取能容纳的最小版本（容量表见 byteCapacityOf）
+	let version: number = 0
+	for (let v = 1; v <= MAX_VERSION; v++) {
+		if (bytes.length <= byteCapacityOf(v)) {
+			version = v
+			break
+		}
+	}
+	if (version == 0) {
+		return null
+	}
+	const dataCodewords: number[] = encodeDataBytes(bytes, version)
+	const allCodewords: number[] = addEccAndInterleave(version, dataCodewords)
+	const base: QrBase = buildBase(version)
+	drawCodewords(base, allCodewords)
+	// 8 种掩码逐一评分，取惩罚最低者（并列取编号小 → 结果确定）
+	let bestMask: number = 0
+	let bestModules: boolean[][] = []
+	let bestScore: number = -1
+	for (let mask = 0; mask < 8; mask++) {
+		const trial = new QrBase()
+		trial.size = base.size
+		trial.version = base.version
+		trial.modules = cloneMatrix(base.modules)
+		trial.isFunction = base.isFunction  // 只读复用
+		applyMask(trial, mask)
+		drawFormatBits(trial, mask)
+		const score: number = penaltyScore(trial.modules, trial.size)
+		if (bestScore < 0 || score < bestScore) {
+			bestScore = score
+			bestMask = mask
+			bestModules = trial.modules
+		}
+	}
+	const result = new QrCodeResult()
+	result.modules = bestModules
+	result.size = base.size
+	result.version = version
+	result.maskPattern = bestMask
+	return result
+}
+
+function cloneMatrix(src: boolean[][]): boolean[][] {
+	const out: boolean[][] = []
+	for (let y = 0; y < src.length; y++) {
+		const row: boolean[] = []
+		for (let x = 0; x < src[y].length; x++) {
+			row.push(src[y][x])
+		}
+		out.push(row)
+	}
+	return out
+}
+
+// ---------------- 自测（静态保证，不依赖运行环境） ----------------
+
+/**
+ * 自测一：格式信息 BCH(15,5) + 掩码 0x5412。
+ * 断言 M 级 mask 0/1/2 → 0x5412 / 0x5125 / 0x5E7C（ISO/IEC 18004 Table C.1 公认值）。
+ */
+export function qrcodeTestFormatInfo(): boolean {
+	return formatInfoBits(0) == 0x5412 && formatInfoBits(1) == 0x5125 && formatInfoBits(2) == 0x5E7C
+}
+
+/**
+ * 自测二：RS 纠错（GF(256)，本原多项式 0x11D）。
+ * 断言 ISO/IEC 18004 附录例题：数字串 "01234567" 的 V1-M 数据码字
+ * [10 20 0C 56 61 80 EC 11 EC 11 EC 11 EC 11 EC 11] 的 10 个纠错码字
+ * == [A5 24 D4 C1 ED 36 C7 87 2C 55]。
+ */
+export function qrcodeTestReedSolomon(): boolean {
+	const data: number[] = [0x10, 0x20, 0x0C, 0x56, 0x61, 0x80, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11]
+	const expected: number[] = [0xA5, 0x24, 0xD4, 0xC1, 0xED, 0x36, 0xC7, 0x87, 0x2C, 0x55]
+	const actual: number[] = rsRemainder(data, rsDivisor(10))
+	if (actual.length != expected.length) {
+		return false
+	}
+	for (let i = 0; i < expected.length; i++) {
+		if (actual[i] != expected[i]) {
+			return false
+		}
+	}
+	// 顺带锁定版本信息 BCH(18,6)：V7 → 0x07C94（规范附录公认值）
+	return versionInfoBits(7) == 0x07C94
+}
+
+/**
+ * 自测三：矩阵结构（finder / timing / 暗模块 / 格式副本一致性 / 数据位回读）。
+ * 用 B 站登录 URL 形态的样例编码（约 100 字节 → V6），断言：
+ *  - 尺寸 = 21 + (version-1)*4；三个 finder 的角/分隔符/中心暗亮正确；
+ *  - 时序行 (6,8) 暗 (6,9) 亮；固定暗模块 (4v+9, 8) 暗；
+ *  - 格式信息两处副本读回一致且等于编码值；
+ *  - 数据位按放置规则回读（去掩码）与码字序列一致（放置 + 掩码可逆性）。
+ */
+export function qrcodeTestStructure(): boolean {
+	const sample: string = 'https://passport.bilibili.com/h5-app/passport/login/qr?navhidden=1&qrcode_key=0e4ddb7a-0000-4000-8000-abcdef0123456789'
+	const encoded = encodeQrText(sample)
+	if (encoded == null) {
+		return false
+	}
+	const m: boolean[][] = encoded.modules
+	const n: number = encoded.size
+	const version: number = encoded.version
+	if (n != 21 + (version - 1) * 4) {
+		return false
+	}
+	// 左上 finder：外环角暗、亮环、中心暗、分隔符亮；右上/左下 finder 角暗
+	if (!m[0][0] || m[1][1] || !m[3][3] || m[0][7] || m[7][0]) {
+		return false
+	}
+	if (!m[0][n - 1] || !m[n - 1][0] || !m[n - 1][n - 1]) {
+		return false
+	}
+	// 时序图形：列 8 起交替（(6,8) 暗、(6,9) 亮），行 8 同理
+	if (!m[6][8] || m[6][9] || !m[8][6] || m[9][6]) {
+		return false
+	}
+	// 固定暗模块 (4*version+9, 8)
+	if (!m[4 * version + 9][8]) {
+		return false
+	}
+	// 格式信息副本一致性：副本二（右上 8 位 + 左下 7 位）重组后应等于副本一
+	const expect: number = formatInfoBits(encoded.maskPattern)
+	let copy2: number = 0
+	for (let i = 0; i < 8; i++) {
+		if (m[8][n - 1 - i]) {
+			copy2 = copy2 | (1 << i)
+		}
+	}
+	for (let i = 8; i < 15; i++) {
+		if (m[n - 15 + i][8]) {
+			copy2 = copy2 | (1 << i)
+		}
+	}
+	if (copy2 != expect) {
+		return false
+	}
+	// 数据位回读（drawCodewords 逆操作）：非功能位去掩码后应还原码字序列。
+	// isFunction 用 buildBase 重建（构建确定性，与编码时一致）
+	const bytes: number[] = utf8Encode(sample)
+	const dataWords: number[] = encodeDataBytes(bytes, version)
+	const allWords: number[] = addEccAndInterleave(version, dataWords)
+	const probe: QrBase = buildBase(version)
+	const bits: number[] = []
+	let i2: number = 0
+	for (let right = n - 1; right >= 1; right -= 2) {
+		if (right == 6) {
+			right = 5
+		}
+		for (let vert = 0; vert < n; vert++) {
+			for (let j = 0; j < 2; j++) {
+				const x: number = right - j
+				const upward: boolean = ((right + 1) & 2) == 0
+				const y: number = upward ? n - 1 - vert : vert
+				if (!probe.isFunction[y][x] && i2 < allWords.length * 8) {
+					let dark: boolean = m[y][x]
+					if (maskBit(encoded.maskPattern, y, x)) {
+						dark = !dark
+					}
+					bits.push(dark ? 1 : 0)
+					i2++
+				}
+			}
+		}
+	}
+	if (bits.length != allWords.length * 8) {
+		return false
+	}
+	for (let i = 0; i < allWords.length; i++) {
+		let b: number = 0
+		for (let j = 0; j < 8; j++) {
+			b = (b << 1) | bits[i * 8 + j]
+		}
+		if (b != allWords[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+/** 自测总入口：三项全过返回 true（可在任意端/调试面板静态调用） */
+export function qrcodeSelfTest(): boolean {
+	return qrcodeTestFormatInfo() && qrcodeTestReedSolomon() && qrcodeTestStructure()
+}

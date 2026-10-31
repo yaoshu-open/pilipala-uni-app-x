@@ -1,0 +1,284 @@
+<template>
+	<view class="fav">
+		<app-navbar :title="navTitle">
+			<template v-slot:right>
+				<view v-if="!isOwner" class="fav-nav-btn" @click="onSubscription">
+					<p-icon name="video-collection-outlined" :size="21" :color="iconColor"></p-icon>
+				</view>
+				<view v-if="isOwner" class="fav-nav-btn" @click="onAddFolder">
+					<p-icon name="add-outlined" :size="24" :color="iconColor"></p-icon>
+				</view>
+				<view class="fav-nav-btn" @click="onSearch">
+					<p-icon name="search-outlined" :size="22" :color="iconColor"></p-icon>
+				</view>
+			</template>
+		</app-navbar>
+
+		<view v-if="state == 'error'" class="fav-fill">
+			<p-http-error :message="errorText" @retry="onErrorAction"></p-http-error>
+		</view>
+
+		<list-view v-if="state == 'loading'" class="fav-list">
+			<list-item v-for="n in 10" :key="'sk-' + n.toString()" :type="2">
+				<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+			</list-item>
+		</list-view>
+
+		<list-view
+			v-if="state != 'loading' && state != 'error'"
+			class="fav-list"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:scroll-top="scrollTop"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+		>
+			<list-item v-if="state == 'empty'" :key="'empty'" :type="3">
+				<empty-illus text="没有数据"></empty-illus>
+			</list-item>
+			<list-item v-for="folder in folders" :key="folder.id.toString()" :type="1">
+				<fav-folder-card
+					:cover="folder.cover"
+					:title="folder.title"
+					:media-count="folder.mediaCount"
+					:attr="folder.attr"
+					@tap="openDetail(folder)"
+				></fav-folder-card>
+			</list-item>
+			<list-item :key="'footer'" :type="4">
+				<view class="fav-footer"></view>
+			</list-item>
+		</list-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import FavFolderCard from '../../components/fav/fav-folder-card.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchFavFolder } from '../../api/fav.uts'
+import { FavFolderItem, FavFolderResult } from '../../models/fav.uts'
+import { userState } from '../../stores/user.uts'
+import { textPrimary } from '../../utils/theme.uts'
+
+/**
+ * 我的收藏（源头：`lib/pages/fav/view.dart`）。
+ *
+ *  - 顶栏：标题「我/Ta 的收藏」（随 isOwner）+ 右侧动作：非本人=订阅入口（跳 subscription，
+ *    簇C 页面路由）、本人=「+」新建收藏夹（跳 favEdit，返回后重载列表）+ 搜索（跳 favSearch
+ *    searchType=1，mediaId 取首个收藏夹——无收藏夹时不带 mediaId）；
+ *  - 单列收藏夹卡（fav-folder-card），下拉刷新（保留旧数据前插，源同款）+ 分页 ps=60、距底触发；
+ *  - 未登录：源直接给 {'msg': '账号未登录', 'code': -101} → 错误态按钮「去登录」跳登录页；
+ *  - 编辑/新建收藏夹返回后（onShow）重载列表（源 Get.toNamed await 后 setState 同款时机）。
+ */
+const PAGE_SIZE: number = 60
+
+const folders = ref<Array<FavFolderItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const errorCode = ref<number>(0)
+const refreshing = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const hasMore = ref<boolean>(true)
+const page = ref<number>(1)
+const scrollTop = ref<number>(0)
+const mid = ref<number>(-1)
+const isOwner = ref<boolean>(true)
+/** 首次 onShow 跳过（onLoad 已发起首载） */
+const firstShow = ref<boolean>(true)
+
+const iconColor: string = textPrimary()
+
+const navTitle = computed((): string => isOwner.value ? '我的收藏' : 'Ta 的收藏')
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		const half = (info.windowWidth - 24 - 48) / 2
+		return Math.max(88, Math.round(half / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+async function loadFirst() {
+	if (!userState.isLogin) {
+		state.value = 'error'
+		errorCode.value = -101
+		errorText.value = '账号未登录'
+		return
+	}
+	const res: FavFolderResult = await fetchFavFolder(ownerMid(), 1, PAGE_SIZE)
+	if (!res.status) {
+		state.value = 'error'
+		errorCode.value = res.code
+		errorText.value = res.message
+		return
+	}
+	folders.value = []
+	for (let i = 0; i < res.items.length; i++) {
+		folders.value.push(res.items[i])
+	}
+	hasMore.value = res.page.hasMore
+	page.value = 2
+	state.value = folders.value.length > 0 ? 'ready' : 'empty'
+}
+
+function ownerMid(): number {
+	return isOwner.value ? userState.info.mid : mid.value
+}
+
+async function onRefresh() {
+	if (state.value == 'loading') {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	const res: FavFolderResult = await fetchFavFolder(ownerMid(), 1, PAGE_SIZE)
+	if (res.status) {
+		// 源刷新为前插（insertAll），保留已加载的后续页
+		const merged: Array<FavFolderItem> = []
+		for (let i = 0; i < res.items.length; i++) {
+			merged.push(res.items[i])
+		}
+		for (let j = 0; j < folders.value.length; j++) {
+			merged.push(folders.value[j])
+		}
+		folders.value = merged
+		hasMore.value = res.page.hasMore
+	}
+	refreshing.value = false
+}
+
+/** 返回本页的静默刷新：重取第 1 页整表替换；失败保留旧数据（不下拉动画） */
+async function refreshSilently() {
+	const res: FavFolderResult = await fetchFavFolder(ownerMid(), 1, PAGE_SIZE)
+	if (res.status) {
+		const fresh: Array<FavFolderItem> = []
+		for (let i = 0; i < res.items.length; i++) {
+			fresh.push(res.items[i])
+		}
+		folders.value = fresh
+		hasMore.value = res.page.hasMore
+		page.value = 2
+		state.value = folders.value.length > 0 ? 'ready' : 'empty'
+	}
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value || refreshing.value || !hasMore.value) {
+		return
+	}
+	loadingMore.value = true
+	const res: FavFolderResult = await fetchFavFolder(ownerMid(), page.value, PAGE_SIZE)
+	if (res.status) {
+		for (let i = 0; i < res.items.length; i++) {
+			folders.value.push(res.items[i])
+		}
+		hasMore.value = res.page.hasMore
+		page.value = page.value + 1
+	}
+	loadingMore.value = false
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+function onErrorAction() {
+	if (errorCode.value == -101) {
+		uni.navigateTo({ url: '/pages/login/login' })
+	} else {
+		state.value = 'loading'
+		loadFirst()
+	}
+}
+
+function openDetail(folder: FavFolderItem) {
+	uni.navigateTo({
+		url: '/pages/fav-detail/fav-detail?mediaId=' + folder.id.toString() +
+			'&isOwner=' + (isOwner.value ? '1' : '0')
+	})
+}
+
+function onAddFolder() {
+	uni.navigateTo({ url: '/pages/fav-edit/fav-edit' })
+}
+
+function onSearch() {
+	// 源取首个收藏夹 id；无收藏夹时 mediaId 传 0（favSearch searchType=1 下服务端按全量收藏检索）
+	let mediaId = 0
+	if (folders.value.length > 0) {
+		mediaId = folders.value[0].id
+	}
+	uni.navigateTo({ url: '/pages/fav-search/fav-search?searchType=1&mediaId=' + mediaId.toString() })
+}
+
+function onSubscription() {
+	uni.navigateTo({ url: '/pages/subscription/subscription?mid=' + mid.value.toString() })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	if (rawMid != null && rawMid.length > 0) {
+		const parsed = parseInt(rawMid)
+		if (!isNaN(parsed) && parsed > 0) {
+			mid.value = parsed
+		}
+	}
+	// 源判定：mid == -1 或 mid == 登录 mid 即本人
+	isOwner.value = mid.value == -1 || mid.value == userState.info.mid
+	loadFirst()
+})
+
+onShow(() => {
+	if (firstShow.value) {
+		firstShow.value = false
+		return
+	}
+	// 返回本页即静默刷新：覆盖新建/编辑收藏夹（favEdit 返回）、删除收藏夹
+	//（favDetail 返回，源跨页 controller 直改列表，新端按 onShow 重取等价）、
+	// 去登录后重试三种场景；失败保留旧数据
+	if (state.value == 'ready' || state.value == 'empty') {
+		refreshSilently()
+		return
+	}
+	// 去登录返回本页后自动重试（设计 §八 错误态口径）
+	if (state.value == 'error' && errorCode.value == -101 && userState.isLogin) {
+		state.value = 'loading'
+		loadFirst()
+	}
+})
+</script>
+
+<style>
+	.fav {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fav-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fav-list {
+		flex: 1;
+	}
+	.fav-nav-btn {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.fav-footer {
+		height: 60px;
+	}
+</style>

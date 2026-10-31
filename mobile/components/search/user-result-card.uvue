@@ -1,0 +1,101 @@
+<template>
+	<view class="urc" @click="onTap">
+		<network-img class="urc-avatar" :src="user.upic" width="45px" height="45px" radius="23px"></network-img>
+		<view class="urc-body">
+			<view class="urc-name-row">
+				<text class="urc-name" :style="nameStyle" :max-lines="1">{{ user.uname }}</text>
+				<view class="urc-level">
+					<text class="urc-level-text">LV{{ user.level.toString() }}</text>
+				</view>
+			</view>
+			<view class="urc-meta-row">
+				<text class="urc-meta" :style="metaStyle">粉丝：{{ fansText }} 视频：{{ videosText }}</text>
+			</view>
+			<text v-if="user.officialDesc.length > 0" class="urc-meta" :style="metaStyle" :max-lines="1">{{ user.officialDesc }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { SearchUserItem } from '../../models/search.uts'
+import { numFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 用户结果行（源头：search_panel/widgets/user_panel.dart）。
+ * 结构：头像 45（圆）+ 右列（昵称 14 + LV 徽章 → 粉丝/投稿 11 灰 →
+ * 认证说明[official_verify.desc 非空才渲染]）。
+ * LV 徽章形态沿用 member 页惯例（橙底白字 10 号、圆角 3）。
+ * 点击整行 → 页面跳 /pages/member/member?mid=（emit 交页面处理）。
+ */
+const props = defineProps({
+	user: { type: Object, default: null }
+})
+
+const emit = defineEmits(['tap'])
+
+const user = computed((): SearchUserItem => props.user as SearchUserItem)
+
+const nameStyle = 'color:' + textPrimary() + ';'
+const metaStyle = 'color:' + textSecondary() + ';'
+
+const fansText = computed((): string => numFormat(user.value.fans))
+const videosText = computed((): string => numFormat(user.value.videos))
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	.urc {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.urc-avatar {
+		flex-shrink: 0;
+	}
+	.urc-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+	}
+	.urc-name-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.urc-name {
+		font-size: 14px;
+	}
+	.urc-level {
+		margin-left: 6px;
+		padding-left: 5px;
+		padding-right: 5px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+		border-radius: 3px;
+		background-color: #F08A3C;
+		flex-shrink: 0;
+	}
+	.urc-level-text {
+		font-size: 10px;
+		color: #FFFFFF;
+	}
+		.urc-meta-row {
+		display: flex;
+		flex-direction: row;
+		margin-top: 3px;
+	}
+	.urc-meta {
+		font-size: 11px;
+	}
+</style>

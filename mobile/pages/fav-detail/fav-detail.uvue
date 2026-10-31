@@ -1,0 +1,638 @@
+<template>
+	<view class="fd">
+		<view class="fd-nav" :style="navStyle">
+			<view class="fd-nav-btn" @click="onBack">
+				<text class="fd-nav-back" :style="navIconStyle">←</text>
+			</view>
+			<view class="fd-nav-space"></view>
+			<view class="fd-nav-btn" @click="onSearch">
+				<p-icon name="search-outlined" :size="22" :color="navIconColor"></p-icon>
+			</view>
+			<view class="fd-nav-btn" @click="onToggleMenu">
+				<p-icon name="more-vert" :size="22" :color="navIconColor"></p-icon>
+			</view>
+		</view>
+
+		<view v-if="state == 'error'" class="fd-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+
+		<scroll-view v-if="state != 'error'" class="fd-scroll" @scrolltolower="onLoadMore">
+			<view v-if="state == 'loading'" class="fd-skeleton">
+				<skeleton-video-card-h v-for="n in 10" :key="'sk-' + n.toString()" :cover-height="cardHeight"></skeleton-video-card-h>
+			</view>
+			<block v-if="state != 'loading'">
+				<fav-detail-header :cover="info.cover" :title="info.title" :upper-name="info.upper.name"></fav-detail-header>
+				<view class="fd-divider" :style="dividerStyle"></view>
+				<text class="fd-count" :style="secondaryStyle">共{{ mediaCount.toString() }}条视频</text>
+
+				<empty-illus v-if="state == 'empty'" text="没有数据"></empty-illus>
+
+				<view v-for="video in medias" :key="video.id.toString()" class="fd-row" :style="rowHeightStyle">
+					<view class="fd-row-cover" :style="coverStyle">
+						<network-img :src="video.pic" width="100%" height="100%" radius="10px"></network-img>
+						<view class="fd-row-duration">
+							<p-badge :text="durationText(video)" type="gray" size="small" :font-size="11"></p-badge>
+						</view>
+					</view>
+					<view class="fd-row-body">
+						<text class="fd-row-title" :style="titleStyle" :max-lines="2">{{ video.title }}</text>
+						<view class="fd-row-spacer"></view>
+						<text class="fd-row-time" :style="secondaryStyle">{{ favTimeText(video) }}</text>
+						<text v-if="video.upper.name.length > 0" class="fd-row-owner" :style="secondaryStyle" :max-lines="1">{{ video.upper.name }}</text>
+						<view class="fd-row-stat">
+							<p-stat icon="play-circle-outlined" :text="playText(video)" :icon-size="13"></p-stat>
+							<view class="fd-row-gap8"></view>
+							<p-stat icon="subtitles-outlined" :text="danmuText(video)" :icon-size="14"></p-stat>
+							<view class="fd-row-spacer2"></view>
+							<view v-if="isOwner" class="fd-row-remove" @click.stop="onRemoveTap(video)">
+								<p-icon name="clear-outlined" :size="18" :color="removeColor"></p-icon>
+							</view>
+						</view>
+					</view>
+				</view>
+
+				<view class="fd-footer">
+					<text v-if="state == 'ready'" class="fd-footer-text" :style="secondaryStyle">{{ loadingText }}</text>
+				</view>
+			</block>
+		</scroll-view>
+
+		<view v-if="menuVisible" class="fd-menu-mask" @click="onCloseMenu">
+			<view class="fd-menu" :style="menuStyle" @click.stop="noop">
+				<view class="fd-menu-item" @click.stop="onEditFolder">
+					<text class="fd-menu-item-text" :style="menuTextStyle">编辑收藏夹</text>
+				</view>
+				<view class="fd-menu-item" @click.stop="onDelFolderTap">
+					<text class="fd-menu-item-text" :style="menuTextStyle">删除收藏夹</text>
+				</view>
+			</view>
+		</view>
+
+		<view v-if="confirmAction.length > 0" class="fd-confirm-mask" @click="onConfirmCancel">
+			<view class="fd-confirm" :style="confirmStyle" @click.stop="noop">
+				<text class="fd-confirm-title" :style="titleStyle">提示</text>
+				<text class="fd-confirm-content" :style="secondaryStyle">{{ confirmContent }}</text>
+				<view class="fd-confirm-actions">
+					<view class="fd-confirm-btn" @click.stop="onConfirmCancel">
+						<text class="fd-confirm-cancel" :style="secondaryStyle">{{ confirmCancelText }}</text>
+					</view>
+					<view class="fd-confirm-btn" @click.stop="onConfirmOk">
+						<text class="fd-confirm-ok" :style="primaryTextStyle">{{ confirmOkText }}</text>
+					</view>
+				</view>
+			</view>
+		</view>
+
+		<view v-if="mediaCount > 0 && state == 'ready'" class="fd-fab-row" :style="fabRowStyle">
+			<view class="fd-fab" :style="fabStyle" @click="onPlayAll">
+				<p-icon name="playlist-play" :size="20" :color="fabContentColor"></p-icon>
+				<text class="fd-fab-text" :style="fabTextStyle">播放全部</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow, onBackPress } from '@dcloudio/uni-app'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PBadge from '../../components/p-badge/p-badge.uvue'
+import PStat from '../../components/p-stat/p-stat.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import FavDetailHeader from '../../components/fav/fav-detail-header.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchFavDetail, favFolderDel, favVideoRemove } from '../../api/fav.uts'
+import { FavDetailItem, FavDetailInfo, FavDetailResult, FavActionResult } from '../../models/fav.uts'
+import { numFormat, timeFormat, dateFormat } from '../../utils/format.uts'
+import { pageBackground, cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha } from '../../utils/theme.uts'
+import { statusBarHeight, statusBarPaddingTop, safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 收藏夹详情（源头：`lib/pages/fav_detail/view.dart`）。
+ *
+ *  - 顶栏无标题字（← / 🔍 / ⋮）——基线 P5_fav_detail 同款；源 SliverAppBar 滚动标题淡入
+ *    无 Sliver 等价，改为固定头部块（差异见设计 §十，登记交付说明）；
+ *  - 头部块：封面 180×110 + 夹名 titleMedium bold + UP 名（fav-detail-header）；
+ *    分隔线 + 「共N条视频」（labelMedium 次要色 letterSpacing 1，源 padding T15 B8 L14）；
+ *  - 内容卡（源 FavVideoCardH）：半宽封面 + 右列（标题 2 行 w500 → 收藏时间 → UP →
+ *    播放/弹幕）；isOwner 时行末「×」取消收藏（确认弹层「要取消收藏吗?/取消+确定取消」）；
+ *  - ⋮ 菜单：编辑收藏夹（跳 favEdit 带参，返回后刷新头部与列表）/ 删除收藏夹
+ *    （确认弹层「确定删除这个收藏夹吗？/点错了+确认」，成功后返回上级）；
+ *  - 分页 ps=20，favList >= mediaCount 时尾部「没有更多了」；
+ *  - 右下「播放全部」悬浮胶囊（mediaCount>0），取首条跳视频详情（不做连播上下文）。
+ */
+const PAGE_SIZE: number = 20
+
+const mediaId = ref<number>(0)
+const isOwner = ref<boolean>(true)
+
+const info = ref<FavDetailInfo>(new FavDetailInfo())
+const medias = ref<Array<FavDetailItem>>([])
+const mediaCount = ref<number>(0)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const loadingMore = ref<boolean>(false)
+const page = ref<number>(1)
+const loadingText = ref<string>('加载中...')
+/** 弹层状态：'' 无 / 'removeVideo' 取消收藏 / 'delFolder' 删除收藏夹 */
+const confirmAction = ref<string>('')
+/** 取消收藏目标条目 */
+const removeTarget = ref<FavDetailItem | null>(null)
+const menuVisible = ref<boolean>(false)
+const needReload = ref<boolean>(false)
+
+const primary: string = themeColor(currentThemeIndex())
+
+const navStyle: string = 'background-color:' + pageBackground() + ';' + statusBarPaddingTop(0)
+const navIconColor: string = textPrimary()
+const navIconStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const dividerStyle: string = 'background-color:' + withAlpha(textSecondary(), 0.2) + ';'
+const removeColor: string = textSecondary()
+const menuTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+
+const confirmContent = computed((): string => {
+	if (confirmAction.value == 'removeVideo') {
+		return '要取消收藏吗?'
+	}
+	if (confirmAction.value == 'delFolder') {
+		return '确定删除这个收藏夹吗？'
+	}
+	return ''
+})
+
+const confirmCancelText = computed((): string => confirmAction.value == 'delFolder' ? '点错了' : '取消')
+
+const confirmOkText = computed((): string => confirmAction.value == 'removeVideo' ? '确定取消' : '确认')
+
+// 菜单浮层贴顶栏 ⋮ 下方（顶栏高 = 状态栏 + 56，源 PopupMenuPosition.under 等价）
+const menuStyle: string = 'background-color:' + cardBackground() + ';margin-top:' +
+	(statusBarHeight() + 60).toString() + 'px;'
+const confirmStyle: string = 'background-color:' + cardBackground() + ';'
+// 「播放全部」FAB：基线 P5_fav_detail 为固定鹅黄胶囊 + 黑图标黑字（不随主题色）
+const FAB_BG: string = '#F7D999'
+const fabContentColor: string = '#18191C'
+const fabStyle: string = 'background-color:' + FAB_BG + ';'
+const fabTextStyle: string = 'color:' + fabContentColor + ';'
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		const half = (info.windowWidth - 24 - 48) / 2
+		return Math.max(88, Math.round(half / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+const coverStyle = computed((): string => {
+	const width = Math.round(cardHeight * 1.6)
+	return 'width:' + width.toString() + 'px;height:' + cardHeight.toString() + 'px;'
+})
+
+const rowHeightStyle = computed((): string => 'height:' + cardHeight.toString() + 'px;')
+
+const fabRowStyle = computed((): string => {
+	return 'bottom:' + (safeAreaBottom() + 16).toString() + 'px;'
+})
+
+function durationText(video: FavDetailItem): string {
+	return timeFormat(video.duration)
+}
+
+function favTimeText(video: FavDetailItem): string {
+	return dateFormat(video.favTime, 'list')
+}
+
+function playText(video: FavDetailItem): string {
+	return numFormat(video.play)
+}
+
+function danmuText(video: FavDetailItem): string {
+	return numFormat(video.danmaku)
+}
+
+async function loadFirst() {
+	const res: FavDetailResult = await fetchFavDetail(mediaId.value, 1, PAGE_SIZE)
+	if (!res.status) {
+		state.value = 'error'
+		errorText.value = res.message
+		return
+	}
+	if (res.info != null) {
+		info.value = res.info
+		mediaCount.value = res.info.mediaCount
+	}
+	medias.value = []
+	for (let i = 0; i < res.items.length; i++) {
+		medias.value.push(res.items[i])
+	}
+	page.value = 2
+	if (medias.value.length >= mediaCount.value) {
+		loadingText.value = '没有更多了'
+	}
+	state.value = mediaCount.value == 0 ? 'empty' : 'ready'
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value) {
+		return
+	}
+	if (medias.value.length >= mediaCount.value) {
+		loadingText.value = '没有更多了'
+		return
+	}
+	loadingMore.value = true
+	const res: FavDetailResult = await fetchFavDetail(mediaId.value, page.value, PAGE_SIZE)
+	if (res.status) {
+		for (let i = 0; i < res.items.length; i++) {
+			medias.value.push(res.items[i])
+		}
+		page.value = page.value + 1
+		if (medias.value.length >= mediaCount.value) {
+			loadingText.value = '没有更多了'
+		}
+	}
+	loadingMore.value = false
+}
+
+function reload() {
+	state.value = 'loading'
+	loadFirst()
+}
+
+function onBack() {
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+function onSearch() {
+	uni.navigateTo({
+		url: '/pages/fav-search/fav-search?searchType=0&mediaId=' + mediaId.value.toString()
+	})
+}
+
+function onToggleMenu() {
+	menuVisible.value = !menuVisible.value
+}
+
+/** 弹层卡片阻断冒泡（点卡片空白不关闭，源 AlertDialog barrierDismissible=false 同款） */
+function noop() {
+}
+
+function onCloseMenu() {
+	menuVisible.value = false
+}
+
+function onEditFolder() {
+	menuVisible.value = false
+	needReload.value = true
+	// 私密判定走 info.attr（[23,1] 同列表口径）
+	const privacy = info.value.attr == 23 || info.value.attr == 1 ? 1 : 0
+	uni.navigateTo({
+		url: '/pages/fav-edit/fav-edit?mediaId=' + mediaId.value.toString() +
+			'&title=' + encodeURIComponent(info.value.title) +
+			'&intro=' + encodeURIComponent(info.value.intro) +
+			'&privacy=' + privacy.toString()
+	})
+}
+
+function onDelFolderTap() {
+	menuVisible.value = false
+	confirmAction.value = 'delFolder'
+}
+
+function onRemoveTap(video: FavDetailItem) {
+	confirmAction.value = 'removeVideo'
+	removeTarget.value = video
+}
+
+function onConfirmCancel() {
+	confirmAction.value = ''
+	removeTarget.value = null
+}
+
+async function onConfirmOk() {
+	if (confirmAction.value == 'removeVideo') {
+		const target = removeTarget.value
+		confirmAction.value = ''
+		removeTarget.value = null
+		if (target == null) {
+			return
+		}
+		const res: FavActionResult = await favVideoRemove(target.id, mediaId.value)
+		if (res.status) {
+			const kept: Array<FavDetailItem> = []
+			for (let i = 0; i < medias.value.length; i++) {
+				if (medias.value[i].id != target.id) {
+					kept.push(medias.value[i])
+				}
+			}
+			medias.value = kept
+			mediaCount.value = mediaCount.value > 0 ? mediaCount.value - 1 : 0
+			if (medias.value.length == 0) {
+				state.value = 'empty'
+			}
+			uni.showToast({ title: res.successToast, icon: 'none' })
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	if (confirmAction.value == 'delFolder') {
+		confirmAction.value = ''
+		const res: FavActionResult = await favFolderDel(mediaId.value)
+		if (res.status) {
+			uni.showToast({ title: res.successToast, icon: 'none' })
+			setTimeout(() => {
+				uni.navigateBack({ delta: 1 })
+			}, 300)
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+	}
+}
+
+function onPlayAll() {
+	if (medias.value.length == 0) {
+		return
+	}
+	const first: FavDetailItem = medias.value[0]
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + first.bvid })
+}
+
+onBackPress((): boolean => {
+	// 浮层打开时返回键先关浮层（页面级接管）
+	if (menuVisible.value) {
+		menuVisible.value = false
+		return true
+	}
+	if (confirmAction.value.length > 0) {
+		confirmAction.value = ''
+		removeTarget.value = null
+		return true
+	}
+	return false
+})
+
+onLoad((options) => {
+	const rawMediaId = options != null ? options['mediaId'] : null
+	if (rawMediaId != null && rawMediaId.length > 0) {
+		const parsed = parseInt(rawMediaId)
+		if (!isNaN(parsed)) {
+			mediaId.value = parsed
+		}
+	}
+	const rawOwner = options != null ? options['isOwner'] : null
+	if (rawOwner != null) {
+		isOwner.value = rawOwner != '0'
+	}
+	loadFirst()
+})
+
+onShow(() => {
+	// 从 favEdit（编辑收藏夹）返回后刷新头部与列表（源 onEditFavFolder await 后更新 title）
+	if (needReload.value) {
+		needReload.value = false
+		reload()
+	}
+})
+</script>
+
+<style>
+	.fd {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fd-nav {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.fd-nav-btn {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.fd-nav-back {
+		font-size: 24px;
+		line-height: 24px;
+	}
+	.fd-nav-space {
+		flex: 1;
+	}
+	.fd-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fd-scroll {
+		flex: 1;
+	}
+	.fd-skeleton {
+		display: flex;
+		flex-direction: column;
+	}
+	.fd-divider {
+		height: 1px;
+		margin-left: 12px;
+		margin-right: 12px;
+	}
+	.fd-count {
+		font-size: 11px;
+		letter-spacing: 1px;
+		padding-left: 14px;
+		padding-top: 15px;
+		padding-bottom: 8px;
+	}
+	.fd-row {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 5px;
+		margin-bottom: 5px;
+	}
+	.fd-row-cover {
+		position: relative;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.fd-row-duration {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+	}
+	.fd-row-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-top: 2px;
+		padding-right: 6px;
+	}
+	.fd-row-title {
+		font-size: 14px;
+		font-weight: 500;
+		line-height: 20px;
+	}
+	.fd-row-spacer {
+		flex: 1;
+	}
+	.fd-row-time {
+		font-size: 11px;
+	}
+	.fd-row-owner {
+		font-size: 11px;
+		margin-top: 2px;
+	}
+	.fd-row-stat {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 2px;
+	}
+	.fd-row-gap8 {
+		width: 8px;
+	}
+	.fd-row-spacer2 {
+		flex: 1;
+	}
+	.fd-row-remove {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.fd-footer {
+		height: 60px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.fd-footer-text {
+		font-size: 13px;
+	}
+	.fd-menu-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.1);
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+	}
+	.fd-menu {
+		margin-right: 12px;
+		border-radius: 8px;
+		display: flex;
+		flex-direction: column;
+		padding-top: 4px;
+		padding-bottom: 4px;
+	}
+	.fd-menu-item {
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 12px;
+		padding-bottom: 12px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.fd-menu-item-text {
+		font-size: 14px;
+	}
+	.fd-confirm-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.fd-confirm {
+		width: 300px;
+		border-radius: 12px;
+		display: flex;
+		flex-direction: column;
+		padding-left: 24px;
+		padding-right: 24px;
+		padding-top: 20px;
+		padding-bottom: 12px;
+	}
+	.fd-confirm-title {
+		font-size: 16px;
+		font-weight: 500;
+	}
+	.fd-confirm-content {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 12px;
+	}
+	.fd-confirm-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+		margin-top: 8px;
+	}
+	.fd-confirm-btn {
+		height: 44px;
+		padding-left: 16px;
+		padding-right: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.fd-confirm-cancel {
+		font-size: 14px;
+	}
+	.fd-confirm-ok {
+		font-size: 14px;
+	}
+	.fd-fab-row {
+		position: fixed;
+		right: 16px;
+		display: flex;
+		flex-direction: row;
+		justify-content: flex-end;
+	}
+	.fd-fab {
+		height: 44px;
+		padding-left: 18px;
+		padding-right: 18px;
+		border-radius: 22px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.fd-fab-text {
+		font-size: 14px;
+		margin-left: 6px;
+	}
+</style>

@@ -1,0 +1,149 @@
+<template>
+	<view class="si" @click="onTap">
+		<view class="si-avatar-wrap">
+			<network-img
+				class="si-avatar"
+				:src="face"
+				width="45px"
+				height="45px"
+				radius="22.5px"
+			></network-img>
+			<view v-if="unread > 0" class="si-badge">
+				<text class="si-badge-text">{{ badgeText }}</text>
+			</view>
+		</view>
+		<view class="si-main">
+			<!-- 昵称行：即使无昵称也占位（源 ListTile 的 title 为空 Text 仍占一行，预览固定落在第二行——基线实测） -->
+			<view class="si-title">
+				<text class="si-name" :style="nameStyle" :max-lines="1">{{ name }}</text>
+			</view>
+			<text class="si-preview" :style="previewStyle" :max-lines="1">{{ preview }}</text>
+		</view>
+		<text class="si-time" :style="timeStyle">{{ timeText }}</text>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { SessionItem, AccountCard, LastMsg, sessionPreview } from '../../models/message.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 会话条目（源头：`lib/pages/whisper/view.dart` SessionItem StatelessWidget = ListTile）。
+ *
+ *  - 头像 45 圆形，右上未读角标（红底白字，无未读不渲染）；
+ *  - 昵称粗体深色；无昵称（系统通知类，accountInfo 缺失）时摘要上提为单行主位——基线同形态；
+ *  - 末条预览走 models/message.uts#sessionPreview 回退链（msgStatus 撤回/图片/content 四级回退）；
+ *  - 时间右侧灰字顶对齐（dateFormat 相对链：刚刚/x分钟前/x小时前/MM月DD日 hh:mm/YY年MM月DD日 hh:mm）；
+ *  - 点击由页面处理（emit tap）；分割线由页面按 divider indent 72/endIndent 20 渲染在条目间。
+ */
+const props = defineProps({
+	item: { type: Object, default: null }
+})
+
+const emit = defineEmits(['tap'])
+
+const session = computed((): SessionItem => props.item as SessionItem)
+
+const name = computed((): string => {
+	const account = session.value.accountInfo
+	return account == null ? '' : (account as AccountCard).name
+})
+const face = computed((): string => {
+	const account = session.value.accountInfo
+	return account == null ? '' : (account as AccountCard).face
+})
+const unread = computed((): number => session.value.unreadCount)
+const badgeText = computed((): string => unread.value > 99 ? '99+' : unread.value.toString())
+const preview = computed((): string => sessionPreview(session.value))
+const timeText = computed((): string => {
+	const last = session.value.lastMsg
+	if (last == null) {
+		return ''
+	}
+	return dateFormat((last as LastMsg).timestamp, '')
+})
+
+const nameStyle = computed((): string => 'color:' + textPrimary() + ';')
+const previewStyle = computed((): string => 'color:' + textSecondary() + ';')
+const timeStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	/* 条目高 72（源 ListTile 双行固定高；基线实测 252px/3.5=72），左右内边距 16 */
+	.si {
+		height: 72px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.si-avatar-wrap {
+		position: relative;
+		width: 45px;
+		height: 45px;
+		flex-shrink: 0;
+	}
+	.si-avatar {
+		width: 45px;
+		height: 45px;
+	}
+	/* 未读角标：右上 1/3 溢出头像外缘（基线形态） */
+	.si-badge {
+		position: absolute;
+		right: -6px;
+		top: -5px;
+		min-width: 17px;
+		height: 17px;
+		border-radius: 9px;
+		background-color: #FA5151;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 4px;
+		padding-right: 4px;
+	}
+	.si-badge-text {
+		font-size: 11px;
+		color: #FFFFFF;
+	}
+	/* 头像与正文间距 16（源 ListTile horizontalTitleGap 默认值；基线实测正文起点 77dp = 16+45+16） */
+	.si-main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		margin-left: 16px;
+		margin-right: 8px;
+	}
+	.si-title {
+		height: 22px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		overflow: hidden;
+	}
+	/* 字号：title=bodyLarge 16 / subtitle=labelMedium 12 / trailing=labelSmall 11（源 ListTile 默认值） */
+	.si-name {
+		font-size: 16px;
+		line-height: 22px;
+	}
+	.si-preview {
+		font-size: 12px;
+		line-height: 17px;
+		margin-top: 2px;
+	}
+	.si-time {
+		font-size: 11px;
+		line-height: 15px;
+		flex-shrink: 0;
+	}
+</style>

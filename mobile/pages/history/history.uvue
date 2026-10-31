@@ -1,0 +1,798 @@
+<template>
+	<view class="hy">
+		<view v-if="!multiple" class="hy-nav" :style="navStyle">
+			<view class="hy-nav-btn" @click="onBack">
+				<text class="hy-nav-back" :style="navIconTextStyle">←</text>
+			</view>
+			<text class="hy-nav-title" :style="navTitleStyle">观看记录</text>
+			<view class="hy-nav-actions">
+				<view class="hy-nav-btn" @click="onOpenSearch">
+					<p-icon name="search-outlined" :size="22" :color="navIconColor"></p-icon>
+				</view>
+				<view class="hy-nav-btn" @click="onToggleMenu">
+					<p-icon name="more-vert" :size="22" :color="navIconColor"></p-icon>
+				</view>
+				<view class="hy-nav-tail"></view>
+			</view>
+		</view>
+
+		<view v-if="multiple" class="hy-nav" :style="navStyle">
+			<view class="hy-nav-btn" @click="onExitMultiple">
+				<p-icon name="close" :size="22" :color="navIconColor"></p-icon>
+			</view>
+			<text class="hy-nav-title" :style="navTitleStyle">已选择{{ checkedCount.toString() }}项</text>
+			<view class="hy-nav-actions">
+				<view class="hy-nav-text-btn" @click="onSelectAll">
+					<text class="hy-nav-text" :style="primaryTextStyle">全选</text>
+				</view>
+				<view class="hy-nav-text-btn" @click="onDelCheckedTap">
+					<text class="hy-nav-text" :style="errorTextStyle">删除</text>
+				</view>
+				<view class="hy-nav-tail"></view>
+			</view>
+		</view>
+
+		<view v-if="state == 'error'" class="hy-fill">
+			<p-http-error :message="errorText" @retry="onErrorAction"></p-http-error>
+		</view>
+
+		<list-view v-if="state == 'loading'" class="hy-list">
+			<list-item v-for="n in 10" :key="'sk-' + n.toString()" :type="2">
+				<skeleton-video-card-h></skeleton-video-card-h>
+			</list-item>
+		</list-view>
+
+		<list-view
+			v-if="state != 'loading' && state != 'error'"
+			class="hy-list"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+		>
+			<list-item v-if="state == 'empty' && !loadingMore" :key="'empty'" :type="3">
+				<empty-illus text="没有数据"></empty-illus>
+			</list-item>
+			<list-item v-for="(item, index) in items" :key="item.history.oid.toString() + '-' + item.viewAt.toString()" :type="1">
+				<history-item
+					:item="item"
+					:multiple="multiple"
+					:checked="item.checked"
+					@tap="onItemTap(index)"
+					@longpress="onItemLongPress(index)"
+					@more="onItemMore(index)"
+					@check="onToggleCheck(index)"
+				></history-item>
+			</list-item>
+			<list-item v-if="loadingMore && items.length > 0" :key="'more'" :type="4">
+				<view class="hy-more">
+					<text class="hy-more-text" :style="secondaryStyle">加载中</text>
+				</view>
+			</list-item>
+			<list-item :key="'footer'" :type="5">
+				<view class="hy-footer"></view>
+			</list-item>
+		</list-view>
+
+		<view v-if="menuVisible" class="hy-menu-mask" @click="onCloseMenu">
+			<view class="hy-menu" :style="menuStyle" @click.stop="noop">
+				<view class="hy-menu-item" @click.stop="onPauseTap">
+					<text class="hy-menu-item-text" :style="menuTextStyle">{{ pauseStatus ? '恢复观看记录' : '暂停观看记录' }}</text>
+				</view>
+				<view class="hy-menu-item" @click.stop="onClearTap">
+					<text class="hy-menu-item-text" :style="menuTextStyle">清空观看记录</text>
+				</view>
+				<view class="hy-menu-item" @click.stop="onDelWatchedTap">
+					<text class="hy-menu-item-text" :style="menuTextStyle">删除已看记录</text>
+				</view>
+				<view class="hy-menu-item" @click.stop="onMultipleTap">
+					<text class="hy-menu-item-text" :style="menuTextStyle">多选删除</text>
+				</view>
+			</view>
+		</view>
+
+		<view v-if="rowMenuVisible" class="hy-menu-mask" @click="onCloseRowMenu">
+			<view class="hy-rowmenu" :style="menuStyle" @click.stop="noop">
+				<view v-if="rowMenuCanLater" class="hy-menu-item" @click.stop="onRowLater">
+					<text class="hy-menu-item-text" :style="menuTextStyle">稍后再看</text>
+				</view>
+				<view class="hy-menu-item" @click.stop="onRowDelete">
+					<text class="hy-menu-item-text" :style="menuTextStyle">删除记录</text>
+				</view>
+			</view>
+		</view>
+
+		<view v-if="confirmAction.length > 0" class="hy-confirm-mask" @click="onConfirmCancel">
+			<view class="hy-confirm" :style="confirmStyle" @click.stop="noop">
+				<text class="hy-confirm-title" :style="navTitleStyle">提示</text>
+				<text class="hy-confirm-content" :style="secondaryStyle">{{ confirmContent }}</text>
+				<view class="hy-confirm-actions">
+					<view class="hy-confirm-btn" @click.stop="onConfirmCancel">
+						<text class="hy-confirm-cancel" :style="secondaryStyle">取消</text>
+					</view>
+					<view class="hy-confirm-btn" @click.stop="onConfirmOk">
+						<text class="hy-confirm-ok" :style="primaryTextStyle">{{ confirmOkText }}</text>
+					</view>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow, onBackPress } from '@dcloudio/uni-app'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import HistoryItem from '../../components/history/history-item.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchHistory, fetchHistoryShadow, historyPauseSet, historyClear, historyDelete, laterAdd, HistoryActionResult } from '../../api/history.uts'
+import { HisListItem, HistoryResult, historyKidOf, historyFinished } from '../../models/history.uts'
+import { userState } from '../../stores/user.uts'
+import { cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, errorText as errorTextColor } from '../../utils/theme.uts'
+import { statusBarHeight, statusBarPaddingTop } from '../../utils/safeArea.uts'
+
+/**
+ * 观看记录（源头：`lib/pages/history/view.dart` + controller）。
+ *
+ *  - 顶栏双形态：普通（标题「观看记录」+ 🔍 + ⋮ 菜单）/ 多选（× 退出 + 「已选择N项」+
+ *    全选 + 删除）；菜单四项：暂停/恢复（确认弹层「啊叻？你要暂停历史记录功能吗？」）、
+ *    清空（确认「啊叻？你要清空历史记录功能吗？」）、删除已看（直接执行 + toast「操作完成」，
+ *    源同款无确认）、多选删除（长按条目进入，确认「确认删除所选历史记录吗？」）；
+ *  - 游标分页：max/view_at = 上页末条 history.oid/viewAt（源同款），ps=20；
+ *  - 条目点击路由分支：archive → 视频详情（bvid）；article/live/番剧（badge 判断）→
+ *    分支：专栏→阅读页、直播→直播间、番剧→详情（有 bvid）或番剧详情（仅 epid）；
+ *  - 条目 ⋮ 行菜单：稍后再看（archive 类才显示，laterAdd）/ 删除记录（historyDelete）。
+ */
+const items = ref<Array<HisListItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const errorCode = ref<number>(0)
+const refreshing = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+/** 游标终止：返回空页即到底 */
+const finished = ref<boolean>(false)
+const multiple = ref<boolean>(false)
+const checkedCount = ref<number>(0)
+const pauseStatus = ref<boolean>(false)
+const menuVisible = ref<boolean>(false)
+/** 弹层动作：pause 暂停恢复 / clear 清空 / delChecked 多选删除 */
+const confirmAction = ref<string>('')
+/** 行菜单（条目 ⋮） */
+const rowMenuVisible = ref<boolean>(false)
+const rowMenuIndex = ref<number>(-1)
+
+const primary: string = themeColor(currentThemeIndex())
+
+const navStyle: string = 'background-color:' + cardBackground() + ';' + statusBarPaddingTop(0)
+const navIconColor: string = textPrimary()
+const navIconTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const navTitleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const errorTextStyle = computed((): string => 'color:' + errorTextColor() + ';')
+const menuTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+// 顶栏 ⋮ 菜单贴其下方（状态栏 + 56 + 4）
+const menuStyle: string = 'background-color:' + cardBackground() + ';margin-top:' +
+	(statusBarHeight() + 60).toString() + 'px;'
+const confirmStyle: string = 'background-color:' + cardBackground() + ';'
+
+const confirmContent = computed((): string => {
+	if (confirmAction.value == 'pause') {
+		return pauseStatus.value ? '啊叻？要恢复历史记录功能吗？' : '啊叻？你要暂停历史记录功能吗？'
+	}
+	if (confirmAction.value == 'clear') {
+		return '啊叻？你要清空历史记录功能吗？'
+	}
+	if (confirmAction.value == 'delChecked') {
+		return '确认删除所选历史记录吗？'
+	}
+	return ''
+})
+
+const confirmOkText = computed((): string => {
+	if (confirmAction.value == 'pause') {
+		return pauseStatus.value ? '确认恢复' : '确认暂停'
+	}
+	if (confirmAction.value == 'clear') {
+		return '确认清空'
+	}
+	return '确认'
+})
+
+/** 行菜单「稍后再看」仅 archive 类条目显示（源：非番剧/live/article 才展示） */
+const rowMenuCanLater = computed((): boolean => {
+	const target = rowMenuTarget()
+	if (target == null) {
+		return false
+	}
+	const business = target.history.business
+	const isBangumi = target.badge == '番剧' || target.tagName.indexOf('动画') >= 0
+	return !isBangumi && business != 'live' && business.indexOf('article') < 0
+})
+
+function rowMenuTarget(): HisListItem | null {
+	if (rowMenuIndex.value < 0 || rowMenuIndex.value >= items.value.length) {
+		return null
+	}
+	return items.value[rowMenuIndex.value]
+}
+
+function onBack() {
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+async function loadFirst() {
+	if (!userState.isLogin) {
+		state.value = 'error'
+		errorCode.value = -101
+		errorText.value = '账号未登录'
+		return
+	}
+	const res: HistoryResult = await fetchHistory(0, 0)
+	if (!res.status) {
+		state.value = 'error'
+		errorCode.value = res.code
+		errorText.value = res.message
+		return
+	}
+	items.value = []
+	appendItems(res.items)
+	finished.value = res.items.length == 0
+	state.value = items.value.length > 0 ? 'ready' : 'empty'
+}
+
+function appendItems(list: Array<HisListItem>) {
+	for (let i = 0; i < list.length; i++) {
+		items.value.push(list[i])
+	}
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value || refreshing.value || finished.value) {
+		return
+	}
+	if (items.value.length == 0) {
+		return
+	}
+	loadingMore.value = true
+	const last: HisListItem = items.value[items.value.length - 1]
+	const res: HistoryResult = await fetchHistory(last.history.oid, last.viewAt)
+	if (res.status) {
+		appendItems(res.items)
+		if (res.items.length == 0) {
+			finished.value = true
+		}
+	}
+	loadingMore.value = false
+}
+
+async function onRefresh() {
+	if (state.value == 'loading') {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	const res: HistoryResult = await fetchHistory(0, 0)
+	if (res.status) {
+		const fresh: Array<HisListItem> = []
+		for (let i = 0; i < res.items.length; i++) {
+			fresh.push(res.items[i])
+		}
+		if (fresh.length > 0) {
+			// 源刷新语义：整表重取置顶（onRefresh → queryHistoryList init）
+			for (let j = 0; j < items.value.length; j++) {
+				let exists = false
+				for (let k = 0; k < fresh.length; k++) {
+					if (fresh[k].history.oid == items.value[j].history.oid) {
+						exists = true
+						break
+					}
+				}
+				if (!exists) {
+					fresh.push(items.value[j])
+				}
+			}
+		}
+		items.value = fresh
+		finished.value = res.items.length == 0
+		if (items.value.length > 0) {
+			state.value = 'ready'
+		}
+	}
+	refreshing.value = false
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+function onErrorAction() {
+	if (errorCode.value == -101) {
+		uni.navigateTo({ url: '/pages/login/login' })
+	} else {
+		state.value = 'loading'
+		loadFirst()
+	}
+}
+
+// ---------------------------------------------------------------- 条目交互
+
+function onItemTap(index: number) {
+	if (multiple.value) {
+		onToggleCheck(index)
+		return
+	}
+	const item: HisListItem = items.value[index]
+	const business = item.history.business
+	if (business.indexOf('article') >= 0) {
+		// 专栏 → 专栏阅读页（源 item.dart：id 取 history.cid，缺省回退 oid）
+		const cvid = item.history.cid > 0 ? item.history.cid : item.history.oid
+		if (cvid > 0) {
+			uni.navigateTo({ url: '/pages/read/read?cvid=' + cvid.toString() })
+		} else {
+			uni.showToast({ title: '无法获取文章内容', icon: 'none' })
+		}
+		return
+	}
+	if (business == 'live') {
+		if (item.liveStatus == 1) {
+			// 直播间（roomid=history.oid；title/cover 作起播前兜底，源 LiveItemModel 同口径）
+			let url = '/pages/live-room/live-room?roomid=' + item.history.oid.toString()
+			url = url + '&title=' + encodeURIComponent(item.title)
+			if (item.cover.length > 0) {
+				url = url + '&cover=' + encodeURIComponent(item.cover)
+			}
+			uni.navigateTo({ url: url })
+		} else {
+			uni.showToast({ title: '直播未开播', icon: 'none' })
+		}
+		return
+	}
+	// 番剧/动画条目（源 item.dart:78-110）：有 bvid 走详情页（同源分支），
+	// 只有 epid 时走番剧详情（源 RoutePush.bangumiPush 的等价出口）
+	const bvid = item.history.bvid
+	if (bvid.length > 0) {
+		let url = '/pages/video/video?bvid=' + bvid
+		if (item.history.cid > 0) {
+			url = url + '&cid=' + item.history.cid.toString()
+		}
+		uni.navigateTo({ url: url })
+		return
+	}
+	const epid = item.history.epid
+	if (epid.length > 0) {
+		const parsedEp = parseInt(epid)
+		if (!isNaN(parsedEp) && parsedEp > 0) {
+			uni.navigateTo({ url: '/pages/bangumi-intro/bangumi-intro?ep_id=' + parsedEp.toString() })
+			return
+		}
+	}
+	uni.showToast({ title: '无法获取视频信息', icon: 'none' })
+}
+
+function onItemLongPress(index: number) {
+	if (multiple.value) {
+		return
+	}
+	multiple.value = true
+	onToggleCheck(index)
+}
+
+function onToggleCheck(index: number) {
+	const item: HisListItem = items.value[index]
+	item.checked = !item.checked
+	let count = 0
+	for (let i = 0; i < items.value.length; i++) {
+		if (items.value[i].checked) {
+			count = count + 1
+		}
+	}
+	checkedCount.value = count
+	// 触发列表重渲染（items 数组内对象字段变更）
+	const copied: Array<HisListItem> = []
+	for (let i = 0; i < items.value.length; i++) {
+		copied.push(items.value[i])
+	}
+	items.value = copied
+}
+
+function onExitMultiple() {
+	for (let i = 0; i < items.value.length; i++) {
+		items.value[i].checked = false
+	}
+	checkedCount.value = 0
+	multiple.value = false
+}
+
+function onSelectAll() {
+	const copied: Array<HisListItem> = []
+	for (let i = 0; i < items.value.length; i++) {
+		items.value[i].checked = true
+		copied.push(items.value[i])
+	}
+	items.value = copied
+	checkedCount.value = items.value.length
+}
+
+// ---------------------------------------------------------------- 顶栏菜单
+
+function onOpenSearch() {
+	uni.navigateTo({ url: '/pages/history-search/history-search' })
+}
+
+function onToggleMenu() {
+	menuVisible.value = !menuVisible.value
+}
+
+/** 浮层卡片阻断冒泡（点卡片空白不关闭） */
+function noop() {
+}
+
+function onCloseMenu() {
+	menuVisible.value = false
+}
+
+function onPauseTap() {
+	menuVisible.value = false
+	confirmAction.value = 'pause'
+}
+
+function onClearTap() {
+	menuVisible.value = false
+	confirmAction.value = 'clear'
+}
+
+function onDelWatchedTap() {
+	// 源无确认弹层，菜单点选即执行（遍历 progress==-1 逐条删）
+	menuVisible.value = false
+	delWatched()
+}
+
+async function delWatched() {
+	let removed = 0
+	for (let i = items.value.length - 1; i >= 0; i--) {
+		if (historyFinished(items.value[i])) {
+			const res: HistoryActionResult = await historyDelete(historyKidOf(items.value[i].kid, items.value[i].history.business))
+			if (res.status) {
+				items.value.splice(i, 1)
+				removed = removed + 1
+			}
+		}
+	}
+	if (removed > 0) {
+		if (items.value.length == 0) {
+			state.value = 'empty'
+		}
+	}
+	uni.showToast({ title: '操作完成', icon: 'none' })
+}
+
+function onMultipleTap() {
+	menuVisible.value = false
+	multiple.value = true
+}
+
+function onDelCheckedTap() {
+	confirmAction.value = 'delChecked'
+}
+
+// ---------------------------------------------------------------- 行菜单
+
+function onItemMore(index: number) {
+	rowMenuIndex.value = index
+	rowMenuVisible.value = true
+}
+
+function onCloseRowMenu() {
+	rowMenuVisible.value = false
+	rowMenuIndex.value = -1
+}
+
+async function onRowLater() {
+	const target = rowMenuTarget()
+	onCloseRowMenu()
+	if (target == null) {
+		return
+	}
+	const bvid = target.history.bvid
+	if (bvid.length == 0) {
+		uni.showToast({ title: '无法加入稍后再看', icon: 'none' })
+		return
+	}
+	const res: HistoryActionResult = await laterAdd(bvid)
+	uni.showToast({ title: res.status ? res.successToast : res.message, icon: 'none' })
+}
+
+async function onRowDelete() {
+	const target = rowMenuTarget()
+	const kid = target == null ? '' : historyKidOf(target.kid, target.history.business)
+	const oid = target == null ? 0 : target.history.oid
+	onCloseRowMenu()
+	if (kid.length == 0) {
+		return
+	}
+	const res: HistoryActionResult = await historyDelete(kid)
+	if (res.status) {
+		const kept: Array<HisListItem> = []
+		for (let i = 0; i < items.value.length; i++) {
+			if (items.value[i].history.oid != oid) {
+				kept.push(items.value[i])
+			}
+		}
+		items.value = kept
+		if (kept.length == 0) {
+			state.value = 'empty'
+		}
+		uni.showToast({ title: res.successToast, icon: 'none' })
+	} else {
+		uni.showToast({ title: res.message, icon: 'none' })
+	}
+}
+
+// ---------------------------------------------------------------- 确认弹层
+
+function onConfirmCancel() {
+	confirmAction.value = ''
+}
+
+async function onConfirmOk() {
+	const action = confirmAction.value
+	confirmAction.value = ''
+	if (action == 'pause') {
+		const res: HistoryActionResult = await historyPauseSet(!pauseStatus.value)
+		if (res.status) {
+			pauseStatus.value = !pauseStatus.value
+		}
+		uni.showToast({ title: res.status ? res.successToast : res.message, icon: 'none' })
+		return
+	}
+	if (action == 'clear') {
+		const res: HistoryActionResult = await historyClear()
+		if (res.status) {
+			items.value = []
+			state.value = 'empty'
+		}
+		uni.showToast({ title: res.status ? res.successToast : res.message, icon: 'none' })
+		return
+	}
+	if (action == 'delChecked') {
+		let ok = true
+		for (let i = items.value.length - 1; i >= 0; i--) {
+			if (items.value[i].checked) {
+				const res: HistoryActionResult = await historyDelete(historyKidOf(items.value[i].kid, items.value[i].history.business))
+				if (res.status) {
+					items.value.splice(i, 1)
+				} else {
+					ok = false
+				}
+			}
+		}
+		checkedCount.value = 0
+		multiple.value = false
+		if (items.value.length == 0) {
+			state.value = 'empty'
+		}
+		if (!ok) {
+			uni.showToast({ title: '部分记录删除失败，请重试', icon: 'none' })
+		}
+	}
+}
+
+// ---------------------------------------------------------------- 生命周期
+
+async function loadShadowStatus() {
+	const res = await fetchHistoryShadow()
+	if (res.status) {
+		pauseStatus.value = res.paused
+	}
+}
+
+onBackPress((): boolean => {
+	// 返回键优先级：菜单 → 弹层 → 多选（设计 §八 返回行为）
+	if (menuVisible.value) {
+		menuVisible.value = false
+		return true
+	}
+	if (rowMenuVisible.value) {
+		rowMenuVisible.value = false
+		rowMenuIndex.value = -1
+		return true
+	}
+	if (confirmAction.value.length > 0) {
+		confirmAction.value = ''
+		return true
+	}
+	if (multiple.value) {
+		onExitMultiple()
+		return true
+	}
+	return false
+})
+
+onLoad(() => {
+	loadFirst()
+	loadShadowStatus()
+})
+
+onShow(() => {
+	// 去登录返回本页后自动重试
+	if (state.value == 'error' && errorCode.value == -101 && userState.isLogin) {
+		state.value = 'loading'
+		loadFirst()
+	}
+})
+</script>
+
+<style>
+	.hy {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.hy-nav {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.hy-nav-btn {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.hy-nav-back {
+		font-size: 24px;
+		line-height: 24px;
+	}
+	.hy-nav-title {
+		flex: 1;
+		font-size: 16px;
+		font-weight: 500;
+		text-align: left;
+	}
+	.hy-nav-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.hy-nav-text-btn {
+		height: 56px;
+		padding-left: 12px;
+		padding-right: 12px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.hy-nav-text {
+		font-size: 15px;
+	}
+	.hy-nav-tail {
+		width: 8px;
+	}
+	.hy-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.hy-list {
+		flex: 1;
+	}
+	.hy-more {
+		height: 44px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.hy-more-text {
+		font-size: 13px;
+	}
+	.hy-footer {
+		height: 20px;
+	}
+	.hy-menu-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.1);
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+	}
+	.hy-menu {
+		margin-right: 12px;
+		border-radius: 8px;
+		display: flex;
+		flex-direction: column;
+		padding-top: 4px;
+		padding-bottom: 4px;
+	}
+	.hy-rowmenu {
+		border-radius: 8px;
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		padding-top: 4px;
+		padding-bottom: 4px;
+		position: absolute;
+		right: 16px;
+		top: 45%;
+	}
+	.hy-menu-item {
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 12px;
+		padding-bottom: 12px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.hy-menu-item-text {
+		font-size: 14px;
+	}
+	.hy-confirm-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.hy-confirm {
+		width: 300px;
+		border-radius: 12px;
+		display: flex;
+		flex-direction: column;
+		padding-left: 24px;
+		padding-right: 24px;
+		padding-top: 20px;
+		padding-bottom: 12px;
+	}
+	.hy-confirm-title {
+		font-size: 16px;
+		font-weight: 500;
+	}
+	.hy-confirm-content {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 12px;
+	}
+	.hy-confirm-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+		margin-top: 8px;
+	}
+	.hy-confirm-btn {
+		height: 44px;
+		padding-left: 16px;
+		padding-right: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.hy-confirm-cancel {
+		font-size: 14px;
+	}
+	.hy-confirm-ok {
+		font-size: 14px;
+	}
+</style>

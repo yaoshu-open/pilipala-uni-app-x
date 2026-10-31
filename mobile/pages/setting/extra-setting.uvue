@@ -1,0 +1,167 @@
+<template>
+	<view class="ex" :style="pageStyle">
+		<app-navbar title="其他设置"></app-navbar>
+
+		<scroll-view class="ex-scroll" direction="vertical">
+			<view class="ex-list">
+				<setting-cell title="大家都在搜" sub-title="是否展示「大家都在搜」" mode="switch" :on="hotKey" :switch-key="SK.enableHotKey" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="搜索默认词" sub-title="是否展示搜索框默认词" mode="switch" :on="searchWord" :switch-key="SK.enableSearchWord" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="快速收藏" sub-title="点按收藏至默认，长按选择文件夹" mode="switch" :on="quickFav" :switch-key="SK.enableQuickFav" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="评论区搜索关键词" sub-title="展示评论区搜索关键词" mode="switch" :on="wordRe" :switch-key="SK.enableWordRe" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="启用ai总结" sub-title="视频详情页开启ai总结" mode="switch" :on="aiOn" :switch-key="SK.enableAi" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="相关视频推荐" sub-title="视频详情页推荐相关视频" mode="switch" :on="relatedVideo" :switch-key="SK.enableRelatedVideo" @toggle="onSwitch"></setting-cell>
+
+				<setting-cell title="评论展示" :sub-title="'当前优先展示「' + replySortLabel + '」'" mode="value" :value="replySortLabel" @tap="openReplySort"></setting-cell>
+				<setting-cell title="动态展示" :sub-title="'当前优先展示「' + dynamicTypeLabel + '」'" mode="value" :value="dynamicTypeLabel" @tap="openDynamicType"></setting-cell>
+
+				<!-- G5 系统代理（enableSystemProxy/systemProxyHost/Port）：入口不渲染，键保留 -->
+				<!-- G6 检查更新（autoUpdate）：内置更新链不迁移，源该行不渲染，键保留无 UI -->
+			</view>
+			<view class="ex-foot" :style="footStyle"></view>
+		</scroll-view>
+
+		<setting-select-sheet
+			:visible="sheetVisible"
+			:title="sheetTitle"
+			:options="sheetOptions"
+			@select="onSheetSelect"
+			@close="closeSheet"
+		></setting-select-sheet>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import SettingCell from '../../components/setting/setting-cell.uvue'
+import SettingSelectSheet, { SelectOption } from '../../components/setting/setting-select-sheet.uvue'
+import { pageBackground } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { SK, getBool, getNumber, setBool, setNumber } from '../../utils/storage.uts'
+
+/**
+ * 其他设置（源头：lib/pages/setting/extra_setting.dart）。
+ *
+ *  - 不迁移项不渲染：设置代理（G5：enableSystemProxy + systemProxyHost/Port）、
+ *    检查更新（G6：autoUpdate 键保留无 UI——内置更新链不迁移，留开关等于假功能，故按 G6 不渲染）。
+ *  - replySortType==2（源已废弃的类别档）读侧归 0（源 initState 同款清洗）。
+ *  - 行集合与源一致：6 开关 + 评论展示 + 动态展示（源该页无清除缓存/更新检查项，
+ *    清除缓存属 about 页职责，不在本页重复）。
+ */
+
+const hotKey = ref<boolean>(getBool(SK.enableHotKey, true))
+const searchWord = ref<boolean>(getBool(SK.enableSearchWord, true))
+const quickFav = ref<boolean>(getBool(SK.enableQuickFav, false))
+const wordRe = ref<boolean>(getBool(SK.enableWordRe, false))
+const aiOn = ref<boolean>(getBool(SK.enableAi, true))
+const relatedVideo = ref<boolean>(getBool(SK.enableRelatedVideo, true))
+/** 源清洗：==2（类别，已废弃）归 0 */
+const replySort = ref<number>(((): number => {
+	const raw = getNumber(SK.replySortType, 0)
+	return raw == 2 ? 0 : raw
+})())
+const dynamicType = ref<number>(getNumber(SK.defaultDynamicType, 0))
+
+const sheetVisible = ref<boolean>(false)
+const sheetTitle = ref<string>('')
+const sheetKind = ref<string>('')
+const sheetOptions = ref<Array<SelectOption>>([])
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+
+const replySortLabel = computed((): string => replySort.value == 1 ? '最热评论' : '最新评论')
+const dynamicTypeLabel = computed((): string => {
+	const labels = ['全部', '投稿', '番剧', '专栏']
+	if (dynamicType.value >= 0 && dynamicType.value < labels.length) {
+		return labels[dynamicType.value]
+	}
+	return labels[0]
+})
+
+function noop() {}
+
+function openReplySort() {
+	sheetKind.value = 'replySort'
+	sheetTitle.value = '评论展示'
+	sheetOptions.value = [
+		{ value: '0', label: '最新评论', checked: replySort.value == 0 } as SelectOption,
+		{ value: '1', label: '最热评论', checked: replySort.value == 1 } as SelectOption
+	]
+	sheetVisible.value = true
+}
+
+function openDynamicType() {
+	sheetKind.value = 'dynamicType'
+	sheetTitle.value = '动态展示'
+	const labels = ['全部', '投稿', '番剧', '专栏']
+	const list: Array<SelectOption> = []
+	for (let i = 0; i < labels.length; i++) {
+		list.push({ value: i.toString(), label: labels[i], checked: dynamicType.value == i } as SelectOption)
+	}
+	sheetOptions.value = list
+	sheetVisible.value = true
+}
+
+function closeSheet() {
+	sheetVisible.value = false
+}
+
+function onSheetSelect(value: string) {
+	if (sheetKind.value == 'replySort') {
+		replySort.value = parseInt(value)
+		setNumber(SK.replySortType, replySort.value)
+	} else if (sheetKind.value == 'dynamicType') {
+		dynamicType.value = parseInt(value)
+		setNumber(SK.defaultDynamicType, dynamicType.value)
+	}
+}
+
+/** 开关分发：setting-cell 抛 (value, switchKey)，与 play/recommend/style 三页同一签名 */
+function onSwitch(value: boolean, key: string) {
+	setBool(key, value)
+	if (key == SK.enableHotKey) {
+		hotKey.value = value
+	} else if (key == SK.enableSearchWord) {
+		searchWord.value = value
+	} else if (key == SK.enableQuickFav) {
+		quickFav.value = value
+	} else if (key == SK.enableWordRe) {
+		wordRe.value = value
+	} else if (key == SK.enableAi) {
+		aiOn.value = value
+	} else if (key == SK.enableRelatedVideo) {
+		relatedVideo.value = value
+	}
+}
+
+onBackPress(() => {
+	if (sheetVisible.value) {
+		closeSheet()
+		return true
+	}
+	return false
+})
+
+
+</script>
+
+<style>
+	.ex {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.ex-scroll {
+		flex: 1;
+	}
+	.ex-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.ex-foot {
+		height: 1px;
+	}
+</style>

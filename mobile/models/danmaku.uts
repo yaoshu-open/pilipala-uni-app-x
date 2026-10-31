@@ -1,0 +1,43 @@
+/**
+ * 弹幕数据模型（字段名与源工程一致：lib/models/danmaku/dm.pb.dart 的 DanmakuElem）。
+ *
+ * 只保留渲染与调度需要的字段：id/ctime/weight/action/attr/animation 等未进模型
+ * （int64 字段在 2^53 精度外，且渲染层用不到）。
+ */
+export class DanmakuItem {
+	/** 出现位置，毫秒（dm.proto DanmakuElem.progress = 2，int32） */
+	progress: number = 0
+	/**
+	 * 弹幕类型（DanmakuElem.mode = 3）：
+	 * 1/2/3 滚动，4 底部，5 顶部，6 逆向，7 高级，8 代码（pool 需为 2），9 BAS
+	 */
+	mode: number = 0
+	/** 弹幕字号（DanmakuElem.fontsize = 4），B 站默认 25 */
+	fontsize: number = 0
+	/** 弹幕颜色，0xRRGGBB 十进制（DanmakuElem.color = 5，uint32，16777215 为白色） */
+	color: number = 0
+	/** 弹幕正文（DanmakuElem.content = 7） */
+	content: string = ''
+	/** 弹幕池（DanmakuElem.pool = 11）：0 普通池 1 字幕池 2 特殊池 */
+	pool: number = 0
+	/** 发送者 mid 的哈希（DanmakuElem.midHash = 6），用于同用户刷屏的本地策略 */
+	midHash: string = ''
+}
+
+/** 分段弹幕请求结果（对齐工程既有 {status, message, items} 口径） */
+export class DanmakuSegmentResult {
+	status: boolean = false
+	message: string = ''
+	items: Array<DanmakuItem> = []
+}
+
+/**
+ * 发送弹幕结果。
+ * status 为 true 时 item 是**本地回显条目**（接口不返回正文/位置，按入参构造，midHash 留空），
+ * 供渲染层立刻上屏；status 为 false 时 message 是可直接展示的失败文案。
+ */
+export class DanmakuSendResult {
+	status: boolean = false
+	message: string = ''
+	item: DanmakuItem | null = null
+}

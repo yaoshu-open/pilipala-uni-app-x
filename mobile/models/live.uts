@@ -1,0 +1,327 @@
+import { strOf, numOf, objOf, arrOf, numArrayOf } from '../utils/json.uts'
+
+/**
+ * 直播域数据模型（源头：lib/models/model_live* 系列，字段对齐 设计_直播域 §六）。
+ *
+ * 拉流结构保留 stream → format → codec → url_info 四级遍历形态：
+ * 源（libmpv）直接拼 format[0].codec[0] 不区分协议；新端内置 video 仅稳 HLS，
+ * 取流必须遍历 format 按 format_name 优先 fmp4/ts（HLS），选取逻辑见 api/live.uts#pickLiveHlsUrl。
+ */
+
+/** 直播推荐卡（getUserRecommend.list[]，源头：lib/models/model_live_info.dart LiveInfoItem） */
+export class LiveItem {
+	roomId: number = 0
+	uid: number = 0
+	title: string = ''
+	uname: string = ''
+	online: number = 0
+	/** 封面（列表卡片用） */
+	cover: string = ''
+	/** 系统分发用图（与 cover 二选一展示） */
+	pic: string = ''
+	face: string = ''
+	/** watched_show.text_small（如「5009」「1.2万」），卡片角标原文 */
+	watchedText: string = ''
+	parentName: string = ''
+	areaName: string = ''
+
+	static from(obj: UTSJSONObject): LiveItem {
+		const item = new LiveItem()
+		item.roomId = numOf(obj, 'room_id')
+		item.uid = numOf(obj, 'uid')
+		item.title = strOf(obj, 'title')
+		item.uname = strOf(obj, 'uname')
+		item.online = numOf(obj, 'online')
+		item.cover = strOf(obj, 'cover')
+		item.pic = strOf(obj, 'pic')
+		item.face = strOf(obj, 'face')
+		const watched = objOf(obj, 'watched_show')
+		if (watched != null) {
+			item.watchedText = strOf(watched, 'text_small')
+		}
+		item.parentName = strOf(obj, 'parent_name')
+		item.areaName = strOf(obj, 'area_name')
+		return item
+	}
+
+	/** 卡片封面：接口有 cover 用 cover，缺省退 pic */
+	static coverOf(item: LiveItem): string {
+		if (item.cover.length > 0) {
+			return item.cover
+		}
+		return item.pic
+	}
+
+	/** 卡片分区角标：分区名缺省时用父分区名（源 LiveItemCard 同款降级） */
+	static areaOf(item: LiveItem): string {
+		if (item.areaName.length > 0) {
+			return item.areaName
+		}
+		return item.parentName
+	}
+}
+
+/** 流地址线路（getRoomPlayInfo 的 codec.url_info[]：host 与 extra 拼在 baseUrl 首尾） */
+export class LivePlayUrlInfo {
+	host: string = ''
+	extra: string = ''
+
+	static from(obj: UTSJSONObject): LivePlayUrlInfo {
+		const info = new LivePlayUrlInfo()
+		info.host = strOf(obj, 'host')
+		info.extra = strOf(obj, 'extra')
+		return info
+	}
+}
+
+/** 编码（codec：avc/hevc；codec_name=current_qn/accept_qn/base_url 与线路列表） */
+export class LivePlayCodec {
+	codecName: string = ''
+	currentQn: number = 0
+	acceptQn: number[] = []
+	baseUrl: string = ''
+	urlInfo: LivePlayUrlInfo[] = []
+
+	static from(obj: UTSJSONObject): LivePlayCodec {
+		const codec = new LivePlayCodec()
+		codec.codecName = strOf(obj, 'codec_name')
+		codec.currentQn = numOf(obj, 'current_qn')
+		codec.acceptQn = numArrayOf(obj, 'accept_qn')
+		codec.baseUrl = strOf(obj, 'base_url')
+		const list = arrOf(obj, 'url_info')
+		for (let i = 0; i < list.length; i++) {
+			codec.urlInfo.push(LivePlayUrlInfo.from(list[i]))
+		}
+		return codec
+	}
+}
+
+/**
+ * 流格式（format）：format_name=fmp4/ts 为 HLS 形态（新端可播），flv 为 FLV 形态（本期不支持，D3 后置）。
+ * 取流按本层遍历：优先 HLS，全无 HLS 由调用方落错误态。
+ */
+export class LivePlayFormat {
+	formatName: string = ''
+	codecList: LivePlayCodec[] = []
+
+	/** 是否 HLS 形态（fmp4/ts 的 m3u8 播放列表） */
+	static isHls(format: LivePlayFormat): boolean {
+		return format.formatName == 'fmp4' || format.formatName == 'ts'
+	}
+
+	static from(obj: UTSJSONObject): LivePlayFormat {
+		const format = new LivePlayFormat()
+		format.formatName = strOf(obj, 'format_name')
+		const list = arrOf(obj, 'codec')
+		for (let i = 0; i < list.length; i++) {
+			format.codecList.push(LivePlayCodec.from(list[i]))
+		}
+		return format
+	}
+}
+
+/** 流（stream）：protocol_name（http_stream/hls）下的格式列表 */
+export class LivePlayStream {
+	protocolName: string = ''
+	formatList: LivePlayFormat[] = []
+
+	static from(obj: UTSJSONObject): LivePlayStream {
+		const stream = new LivePlayStream()
+		stream.protocolName = strOf(obj, 'protocol_name')
+		const list = arrOf(obj, 'format')
+		for (let i = 0; i < list.length; i++) {
+			stream.formatList.push(LivePlayFormat.from(list[i]))
+		}
+		return stream
+	}
+}
+
+/** getRoomPlayInfo 解析结果（playurl_info.playurl 三级 + 房间形态） */
+export class LivePlayData {
+	streamList: LivePlayStream[] = []
+	/** 竖屏直播间（近全屏形态）标志，源 view.dart 高度三分支用 */
+	isPortrait: boolean = false
+
+	static from(playUrlObj: UTSJSONObject): LivePlayData {
+		const data = new LivePlayData()
+		const list = arrOf(playUrlObj, 'stream')
+		for (let i = 0; i < list.length; i++) {
+			data.streamList.push(LivePlayStream.from(list[i]))
+		}
+		return data
+	}
+}
+
+/** 直播间 H5 信息（getH5InfoByRoom：顶栏 + 背景 + 开播状态，结构扁平化，字段映射见注释） */
+export class LiveRoomH5 {
+	title: string = ''
+	/** 关键帧封面（起播前占位） */
+	keyframe: string = ''
+	/** 房间背景图（沉浸页背景，缺省空由页面用黑底兜底） */
+	appBackground: string = ''
+	areaName: string = ''
+	parentAreaName: string = ''
+	/** anchor_info.base_info.uname */
+	uname: string = ''
+	/** anchor_info.base_info.face */
+	face: string = ''
+	/** watched_show.text_large（顶栏「N人看过」） */
+	watchedTextLarge: string = ''
+	/** 0 未开播 / 1 直播中 / 2 轮播 */
+	liveStatus: number = 0
+
+	static from(dataObj: UTSJSONObject): LiveRoomH5 {
+		const h5 = new LiveRoomH5()
+		const roomInfo = objOf(dataObj, 'room_info')
+		if (roomInfo != null) {
+			h5.title = strOf(roomInfo, 'title')
+			h5.keyframe = strOf(roomInfo, 'keyframe')
+			h5.appBackground = strOf(roomInfo, 'app_background')
+			h5.areaName = strOf(roomInfo, 'area_name')
+			h5.parentAreaName = strOf(roomInfo, 'parent_area_name')
+			h5.liveStatus = numOf(roomInfo, 'live_status')
+		}
+		const anchorInfo = objOf(dataObj, 'anchor_info')
+		if (anchorInfo != null) {
+			const baseInfo = objOf(anchorInfo, 'base_info')
+			if (baseInfo != null) {
+				h5.uname = strOf(baseInfo, 'uname')
+				h5.face = strOf(baseInfo, 'face')
+			}
+		}
+		const watched = objOf(dataObj, 'watched_show')
+		if (watched != null) {
+			h5.watchedTextLarge = strOf(watched, 'text_large')
+		}
+		return h5
+	}
+}
+
+/** 弹幕服务器条目（getDanmuInfo.host_list[]） */
+export class LiveDanmakuHost {
+	host: string = ''
+	wssPort: number = 0
+
+	static from(obj: UTSJSONObject): LiveDanmakuHost {
+		const item = new LiveDanmakuHost()
+		item.host = strOf(obj, 'host')
+		item.wssPort = numOf(obj, 'wss_port')
+		return item
+	}
+}
+
+/** 弹幕连接信息（getDanmuInfo：token + host_list） */
+export class LiveDanmakuInfo {
+	token: string = ''
+	hostList: LiveDanmakuHost[] = []
+
+	static from(dataObj: UTSJSONObject): LiveDanmakuInfo {
+		const info = new LiveDanmakuInfo()
+		info.token = strOf(dataObj, 'token')
+		const list = arrOf(dataObj, 'host_list')
+		for (let i = 0; i < list.length; i++) {
+			info.hostList.push(LiveDanmakuHost.from(list[i]))
+		}
+		return info
+	}
+}
+
+/**
+ * 聊天气泡的一个片段：普通文本或行内表情图。
+ * 源头：`lib/pages/live_room/view.dart#buildMessageTextSpan` 把 message 按 emots 的 key 切成
+ * TextSpan 与 WidgetSpan（表情按接口给的 width/height 渲染）。App 端 TextSpan 不支持内嵌图，
+ * 等价实现 = 文本/图片两种片段的 flex-wrap 行。
+ */
+export class LiveChatSeg {
+	/** text 文本 / emote 表情图 */
+	kind: string = 'text'
+	text: string = ''
+	url: string = ''
+	/** 表情图宽高（接口 emots[key].width/height，单位 dp；0 时渲染端拍 20） */
+	width: number = 0
+	height: number = 0
+}
+
+/** 直播弹幕消息（websocket cmd 白名单解析产物，源头：lib/utils/live.dart 消息分发） */
+export class LiveMessage {
+	/** chat=弹幕 / join=进入直播间 / follow=关注了主播 / online=人气值（各 cmd 映射） */
+	type: string = ''
+	userName: string = ''
+	message: string = ''
+	/** 弹幕颜色（DANMU_MSG info[0][3]，0xRRGGBB 十进制，16777215 为白色） */
+	colorR: number = 255
+	colorG: number = 255
+	colorB: number = 255
+	/** 颜色十进制原值（送播放器弹幕层时用它，弹幕层按十进制换算 #RRGGBB） */
+	colorDecimal: number = 16777215
+	uid: number = 0
+	/** 发送者头像（info[0][15].user.base.face） */
+	face: string = ''
+	/** 文本分段（含行内表情）；空数组时渲染端按 message 纯文本兜底 */
+	segments: Array<LiveChatSeg> = []
+}
+
+/** 关注中正在直播的主播（getFollowing.list[]，源头：lib/models/live/follow.dart LiveFollowingItemModel） */
+export class LiveFollowingItem {
+	roomId: number = 0
+	uname: string = ''
+	face: string = ''
+	title: string = ''
+	/** 1 直播中 */
+	liveStatus: number = 0
+	/** 轮播标记：0 为正在直播（源过滤条件 liveStatus==1 && recordLiveTime==0） */
+	recordLiveTime: number = 0
+
+	static from(obj: UTSJSONObject): LiveFollowingItem {
+		const item = new LiveFollowingItem()
+		item.roomId = numOf(obj, 'room_id')
+		item.uname = strOf(obj, 'uname')
+		item.face = strOf(obj, 'face')
+		item.title = strOf(obj, 'title')
+		item.liveStatus = numOf(obj, 'live_status')
+		item.recordLiveTime = numOf(obj, 'record_live_time')
+		return item
+	}
+}
+
+/**
+ * 直播画质（源头：lib/models/live/quality.dart，码值与描述一一对应）。
+ * 顺序 = 源码 LiveQuality 枚举顺序（杜比 → 流畅），画质菜单按服务端 accept_qn 的码值映射描述。
+ */
+const LIVE_QN_CODES: Array<number> = [30000, 20000, 10000, 400, 250, 150, 80]
+const LIVE_QN_DESC: Array<string> = ['杜比', '4K', '原画', '蓝光', '超清', '高清', '流畅']
+
+/** 码值 → 描述；未知码值返回「画质{码}」，不静默显示空串 */
+export function liveQnDesc(code: number): string {
+	for (let i = 0; i < LIVE_QN_CODES.length; i++) {
+		if (LIVE_QN_CODES[i] == code) {
+			return LIVE_QN_DESC[i]
+		}
+	}
+	return '画质' + code.toString()
+}
+
+// ---------------------------------------------------------------- 请求结果（复用工程统一口径）
+
+/** 列表结果复用 models/video.uts#ListResult（status/message/items 三字段口径） */
+
+/** 拉流结果 */
+export class LivePlayResult {
+	status: boolean = false
+	message: string = ''
+	data: LivePlayData | null = null
+}
+
+/** H5 房间信息结果 */
+export class LiveH5Result {
+	status: boolean = false
+	message: string = ''
+	data: LiveRoomH5 | null = null
+}
+
+/** 弹幕连接信息结果 */
+export class LiveDanmakuInfoResult {
+	status: boolean = false
+	message: string = ''
+	data: LiveDanmakuInfo | null = null
+}

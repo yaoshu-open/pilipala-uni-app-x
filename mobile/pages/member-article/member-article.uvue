@@ -1,0 +1,266 @@
+<template>
+	<view class="mat" :style="pageStyle">
+		<app-navbar title="Ta的图文"></app-navbar>
+
+		<view v-if="state == 'error'" class="mat-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+		<!-- 空态：源 NoData = 插画 +「没有数据」400 顶盒 -->
+		<view v-else-if="state == 'empty'" class="mat-fill">
+			<empty-illus text="没有数据"></empty-illus>
+		</view>
+		<scroll-view
+			v-else
+			class="mat-scroll"
+			:lower-threshold="200"
+			@scrolltolower="onLoadMore"
+		>
+			<view v-if="state == 'loading'" class="mat-list">
+				<view v-for="n in 10" :key="'sk-' + n.toString()" class="mat-sk-row">
+					<skeleton-block width="50px" height="50px" radius="4px"></skeleton-block>
+					<view class="mat-sk-lines">
+						<skeleton-block width="85%" height="15px" radius="4px"></skeleton-block>
+						<view class="mat-sk-gap"></view>
+						<skeleton-block width="40%" height="11px" radius="4px"></skeleton-block>
+					</view>
+				</view>
+			</view>
+			<view v-else class="mat-list">
+				<view
+					v-for="(item, index) in items"
+					:key="item.opusId.length > 0 ? item.opusId : index.toString()"
+					class="mat-item"
+					:style="itemStyle"
+					@click="openItem(item)"
+				>
+					<view class="mat-cover">
+						<network-img :src="item.coverUrl" width="50px" height="50px" radius="4px"></network-img>
+					</view>
+					<view class="mat-body">
+						<text class="mat-title" :style="primaryTextStyle" :max-lines="2">{{ item.content }}</text>
+						<text class="mat-like" :style="secondaryTextStyle">{{ item.like.toString() }}人点赞</text>
+					</view>
+				</view>
+				<view v-if="isLoading" class="mat-footer">
+					<text class="mat-footer-text" :style="secondaryTextStyle">加载中...</text>
+				</view>
+				<view class="mat-bottom"></view>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import { fetchWWebid, fetchMemberArticle } from '../../api/member.uts'
+import { MemberArticleItem } from '../../models/member.uts'
+import { pageBackground, textPrimary, textSecondary, withAlpha } from '../../utils/theme.uts'
+
+/**
+ * 图文专栏页（源头：`lib/pages/member_article/view.dart` + controller.dart）。
+ *
+ * 前置链路照源：先抓 `space.bilibili.com/{mid}/article` 页面 HTML 取 __RENDER_DATA__ 的
+ * access_id 作 w_webid；失败 fallback '-1' + toast（源同款），再请求
+ * /x/polymer/web-dynamic/v1/opus/feed/space（page + offset 双游标分页，has_more 终止）。
+ * 条目=左 50 方图 + 标题（2 行）+「N人点赞」；封面缺失时 network-img 自带占位（基线第 4 条同形态）。
+ * 条目点击→图文页（pages/opus，源 /opus 阅读链路）。
+ */
+const mid = ref<number>(0)
+const items = ref<Array<MemberArticleItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const isLoading = ref<boolean>(false)
+const page = ref<number>(1)
+const offset = ref<string>('')
+const hasMore = ref<boolean>(true)
+/** w_webid：null=未取，'-1'=抓取失败兜底（源 controller 同款） */
+let wWebid: string | null = null
+let lastLoadAt: number = 0
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const primaryTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+/** 条目分隔线：dividerColor 15% 透明度（源 Divider(color: dividerColor.withOpacity(0.15))） */
+const itemStyle = computed((): string => 'border-bottom-color:' + withAlpha(textSecondary(), 0.15) + ';')
+
+async function ensureWWebid() {
+	if (wWebid != null) {
+		return
+	}
+	const res = await fetchWWebid(mid.value)
+	if (res.status) {
+		wWebid = res.webid
+	} else {
+		wWebid = '-1'
+		uni.showToast({ title: res.message.length > 0 ? res.message : 'w_webid 获取失败', icon: 'none' })
+	}
+}
+
+async function loadPage(pn: number) {
+	if (isLoading.value) {
+		return
+	}
+	isLoading.value = true
+	if (pn == 1) {
+		state.value = 'loading'
+		errorText.value = ''
+	}
+	await ensureWWebid()
+	const webid = wWebid == null ? '-1' : wWebid
+	const res = await fetchMemberArticle(mid.value, pn, pn == 1 ? '' : offset.value, webid)
+	isLoading.value = false
+	if (!res.status) {
+		if (pn == 1) {
+			state.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	const next: Array<MemberArticleItem> = pn == 1 ? [] : items.value.slice()
+	for (let i = 0; i < res.items.length; i++) {
+		next.push(res.items[i])
+	}
+	items.value = next
+	offset.value = res.offset
+	hasMore.value = res.hasMore
+	page.value = pn + 1
+	if (pn == 1) {
+		state.value = next.length > 0 ? 'ready' : 'empty'
+	}
+}
+
+function onLoadMore() {
+	if (state.value != 'ready' || isLoading.value || !hasMore.value) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadAt < 500) {
+		return
+	}
+	lastLoadAt = now
+	loadPage(page.value)
+}
+
+function reload() {
+	items.value = []
+	offset.value = ''
+	hasMore.value = true
+	page.value = 1
+	wWebid = null
+	loadPage(1)
+}
+
+function openItem(item: MemberArticleItem) {
+	// 图文 → 图文阅读页（源 member_article/view.dart：/opus 传 id=opus_id）
+	if (item.opusId.length == 0) {
+		uni.showToast({ title: '图文信息缺失', icon: 'none' })
+		return
+	}
+	uni.navigateTo({ url: '/pages/opus/opus?id=' + item.opusId })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	if (rawMid == null || (rawMid as string).length == 0) {
+		state.value = 'error'
+		errorText.value = '缺少用户参数（mid），请从用户主页进入'
+		return
+	}
+	const parsed = parseInt(rawMid as string)
+	mid.value = isNaN(parsed) ? 0 : parsed
+	if (mid.value <= 0) {
+		state.value = 'error'
+		errorText.value = '用户参数不合法，请从用户主页进入'
+		return
+	}
+	loadPage(1)
+})
+</script>
+
+<style>
+	.mat {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mat-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mat-scroll {
+		flex: 1;
+	}
+	.mat-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.mat-sk-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 14px;
+		padding-bottom: 14px;
+	}
+	.mat-sk-lines {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+	}
+	.mat-sk-gap {
+		height: 8px;
+	}
+	/* 条目：左 50 方图 + 右标题/点赞数（源 ListTile leading 50 + subtitle） */
+	.mat-item {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 14px;
+		padding-bottom: 14px;
+		border-bottom-width: 1px;
+		border-bottom-style: solid;
+	}
+	.mat-cover {
+		width: 50px;
+		height: 50px;
+	}
+	.mat-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+	}
+	.mat-title {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.mat-like {
+		font-size: 12px;
+		margin-top: 4px;
+	}
+	.mat-footer {
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+		padding-top: 16px;
+	}
+	.mat-footer-text {
+		font-size: 13px;
+	}
+	.mat-bottom {
+		height: 30px;
+	}
+</style>

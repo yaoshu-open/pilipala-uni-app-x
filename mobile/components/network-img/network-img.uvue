@@ -1,0 +1,138 @@
+<template>
+	<view class="network-img" :style="'border-radius:' + radius + ';' + sizeStyle">
+		<image
+			v-if="!failed"
+			class="network-img-inner"
+			:src="finalSrc"
+			:mode="mode"
+			@load="onLoad"
+			@error="onError"
+		></image>
+		<view v-if="failed || !loaded" class="network-img-placeholder">
+			<text class="network-img-placeholder-text">{{ failed ? '加载失败' : '' }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { SK, getNumber } from '../../utils/storage.uts'
+import { toSecureUrl } from '../../utils/url.uts'
+
+const props = defineProps({
+	src: { type: String, default: '' },
+	mode: { type: String, default: 'aspectFill' },
+	width: { type: String, default: '100%' },
+	height: { type: String, default: '100%' },
+	radius: { type: String, default: '0' }
+})
+
+const loaded = ref<boolean>(false)
+const failed = ref<boolean>(false)
+
+const sizeStyle = computed((): string => {
+	return 'width:' + props.width + ';height:' + props.height + ';'
+})
+
+/**
+ * 图片质量（源头：lib/common/widgets/network_img_layer.dart）
+ * 源对每个 src 拼 `@{defaultPicQa}q.webp`，设置页「图片质量」即时生效。
+ * 目标端只在 B 站图床域名上拼（hdslb / biliimg）——非图床地址（诊断用外链图、
+ * 第三方代理图）拼后缀会直接 404，属防御性收敛，差异登记在 P10 清单。
+ *
+ * 宽度约束（2026-10-28 补）：只拼画质后缀时服务端仍返回原始分辨率，整幅解码后
+ * 单张可达 8MB；瀑布流连刷数十张即触发 Fresco 位图池 hard cap（logcat：
+ * `Pool hard cap violation? Hard cap = 402653184`），此后所有图片加载失败。
+ * 故同时拼目标宽度 `@{w}w_{{q}}q.webp`——服务端按宽缩放，解码内存随显示尺寸收敛。
+ */
+const DEFAULT_TARGET_WIDTH = 720
+
+/** 从 "160px" 这类宽度串取数值（非 px 或百分比返回 0 → 走兜底宽度） */
+function pxWidthOf(value: string): number {
+	if (value.indexOf('px') < 0) {
+		return 0
+	}
+	let digits = ''
+	for (let i = 0; i < value.length; i++) {
+		const ch = value.substring(i, i + 1)
+		if (ch >= '0' && ch <= '9') {
+			digits += ch
+		} else if (digits.length > 0) {
+			break
+		}
+	}
+	if (digits.length == 0) {
+		return 0
+	}
+	return parseInt(digits)
+}
+
+/** 解码目标宽度：组件宽 ×2（高密度屏），未知宽度用兜底值，夹在 160~1080 */
+function targetWidthPx(): number {
+	let px = pxWidthOf(props.width) * 2
+	if (px <= 0) {
+		px = DEFAULT_TARGET_WIDTH
+	}
+	if (px < 160) {
+		px = 160
+	}
+	if (px > 1080) {
+		px = 1080
+	}
+	return Math.round(px)
+}
+
+const finalSrc = computed((): string => {
+	// 先升级协议再拼画质后缀：http 明文在 release 包被系统拦截（详见 utils/url.uts）
+	const raw = toSecureUrl(props.src)
+	if (raw.length == 0) {
+		return ''
+	}
+	const lower = raw.toLowerCase()
+	const isBiliCdn = lower.indexOf('hdslb.com') >= 0 || lower.indexOf('biliimg.com') >= 0
+	if (!isBiliCdn || lower.indexOf('@') >= 0) {
+		return raw
+	}
+	const quality = getNumber(SK.defaultPicQa, 10)
+	const width = targetWidthPx().toString()
+	if (quality <= 0) {
+		return raw + '@' + width + 'w.webp'
+	}
+	return raw + '@' + width + 'w_' + Math.round(quality).toString() + 'q.webp'
+})
+
+function onLoad() {
+	loaded.value = true
+	failed.value = false
+}
+
+function onError() {
+	failed.value = true
+}
+</script>
+
+<style>
+	.network-img {
+		position: relative;
+		overflow: hidden;
+		background-color: #EEF0F3;
+	}
+	.network-img-inner {
+		width: 100%;
+		height: 100%;
+	}
+	.network-img-placeholder {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.network-img-placeholder-text {
+		font-size: 22rpx;
+		color: #A7ADB8;
+	}
+</style>

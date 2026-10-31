@@ -1,0 +1,439 @@
+<template>
+	<!-- 系统类消息（10 业务通知 / 13 图片卡片 / 18 文本提示 / 16 自动回复）：无气泡独立形态 -->
+	<view v-if="isSystem" class="mb">
+		<view v-if="msg.msgType == 10" class="mb-notice">
+			<text class="mb-notice-title" :style="titleStyle" :max-lines="2">{{ noticeTitle }}</text>
+			<text class="mb-notice-time" :style="timeStyle">{{ timeText }}</text>
+			<view class="mb-notice-divider"></view>
+			<text class="mb-notice-text" :style="bodyStyle">{{ noticeText }}</text>
+		</view>
+		<view v-else-if="msg.msgType == 13" class="mb-piccard">
+			<network-img :src="picCardUrl" width="320px" height="150px" mode="aspectFill"></network-img>
+		</view>
+		<view v-else class="mb-sysline">
+			<text class="mb-sysline-text" :style="sysStyle">{{ sysLineText }}</text>
+		</view>
+	</view>
+
+	<!-- 撤回消息（msgType=5）：源渲染 SizedBox 即不显示 -->
+	<view v-else-if="msg.msgType == 5" class="mb-none"></view>
+
+	<!-- 普通气泡：左=对方、右=本人（源 chat_item 无双侧头像，气泡两侧仅 6dp 空隙） -->
+	<view v-else class="mb" :class="isOwner ? 'mb-row-owner' : 'mb-row-other'">
+		<view class="mb-side"></view>
+		<view
+			class="mb-bubble"
+			:class="isOwner ? 'mb-bubble-owner' : 'mb-bubble-other'"
+			:style="isOwner ? ownerBubbleStyle : otherBubbleStyle"
+		>
+			<!-- 图片消息：220 宽按原始比例，点击预览 -->
+			<view v-if="msg.msgType == 2" class="mb-pic" @click="onPicTap">
+				<network-img
+					:src="picUrl"
+					:width="'220px'"
+					:height="picHeight"
+					radius="6px"
+				></network-img>
+			</view>
+			<!-- 文本消息：[表情码] 切片为 文本段/表情行内图 -->
+			<view v-else-if="msg.msgType == 1 || msg.msgType == 6" class="mb-rich">
+				<template v-for="(seg, index) in segments" :key="'seg-' + index.toString()">
+					<image
+						v-if="seg.type == 'emote'"
+						class="mb-emote"
+						:src="seg.url"
+						mode="aspectFit"
+					></image>
+					<text v-else class="mb-text" :style="isOwner ? ownerTextStyle : otherTextStyle">{{ seg.text }}</text>
+				</template>
+			</view>
+			<!-- 分享卡片（share_v2=7 / archive_card=11）：封面 + 标题 + 副行简卡 -->
+			<view v-else-if="msg.msgType == 7 || msg.msgType == 11" class="mb-share">
+				<network-img :src="shareCover" width="220px" height="124px" radius="6px"></network-img>
+				<text class="mb-share-title" :style="isOwner ? ownerTextStyle : otherTextStyle" :max-lines="2">{{ shareTitle }}</text>
+				<text v-if="shareSub.length > 0" class="mb-share-sub" :style="isOwner ? ownerSubStyle : otherSubStyle">{{ shareSub }}</text>
+			</view>
+			<!-- 其余类型：content.content 兜底文本（源 default 分支） -->
+			<view v-else class="mb-rich">
+				<text class="mb-text" :style="isOwner ? ownerTextStyle : otherTextStyle">{{ fallbackText }}</text>
+			</view>
+			<view class="mb-meta" :style="metaStyle">
+				<text class="mb-time" :style="isOwner ? ownerTimeStyle : otherTimeStyle">{{ timeText }}</text>
+				<text v-if="msg.msgStatus == 1" class="mb-time" :style="isOwner ? ownerTimeStyle : otherTimeStyle">  已撤回</text>
+			</view>
+		</view>
+		<view class="mb-side"></view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { ChatMsg, EmoteInfo, MsgType, splitEmoteText, MsgSegment } from '../../models/message.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha, onPrimaryText } from '../../utils/theme.uts'
+
+/**
+ * 私信消息条目（源头：`lib/pages/whisper_detail/widget/chat_item.dart`）。
+ *
+ * 渲染分支（MsgType 枚举照源）：
+ *  - text=1：正文按 e_infos 切片（文本段 + 18px 行内表情图，等价源 splitMapJoin）
+ *  - 气泡两侧不带头像（源 chat_item 无双侧头像，仅 6dp 空隙 + 8dp 外边距）
+ *  - pic=2：220 宽按 content.width/height 比例出图，点击 uni.previewImage（会话 picList）
+ *  - custom_face=6：与文本同链（源富文本渲染，无独立分支内容时同样按 content 兜底）
+ *  - share_v2=7 / archive_card=11：封面 220x124 + 标题 + 副行简卡——跳转（源 ab2c→视频详情）
+ *    本批不实现，登记差异待后续批次接入
+ *  - revoke=5：源渲染空 SizedBox，不显示
+ *  - notify_msg=10：左对齐系统通知卡（标题+时间+分割线+正文）
+ *  - pic_card=13：300x150 大图无气泡
+ *  - notify_text=18 / auto_reply_push=16：居中灰字提示（18 为 JSON 数组文本拼接；
+ *    16 的 sub_cards 复杂卡降级为主标题灰字提示——设计文档「简卡」口径）
+ *  - 其余：content.content 粗体兜底 /「不支持的消息类型」
+ *
+ * 气泡视觉（源常量照搬）：圆角 12（小角 2 朝发送侧）、padding 10、margin 8、最大宽 300；
+ * msgStatus==1 撤回态：对方左侧 / 本人右侧 4px 色条 + 时间旁「已撤回」（源 border 分支）。
+ */
+const props = defineProps({
+	msg: { type: Object, default: null },
+	eInfos: {
+		type: Array,
+		default() {
+			return [] as Array<EmoteInfo>
+		}
+	},
+	isOwner: { type: Boolean, default: false },
+	/** 会话内全部图片消息 url（pic 预览用） */
+	picList: {
+		type: Array,
+		default() {
+			return [] as Array<string>
+		}
+	}
+})
+
+const primary = themeColor(currentThemeIndex())
+
+const msg = computed((): ChatMsg => props.msg as ChatMsg)
+const content = computed((): UTSJSONObject | null => msg.value.content)
+
+const isSystem = computed((): boolean => {
+	const t = msg.value.msgType
+	return t == MsgType.notifyMsg || t == MsgType.picCard || t == MsgType.notifyText || t == MsgType.autoReplyPush
+})
+
+const timeText = computed((): string => dateFormat(msg.value.timestamp, ''))
+
+// ---------------------------------------------------------------- 文本切片
+
+const segments = computed((): Array<MsgSegment> => {
+	const t = msg.value.msgType
+	if (t != MsgType.text && t != MsgType.customFace) {
+		return [] as Array<MsgSegment>
+	}
+	const raw = content.value
+	const text = raw == null ? '' : textOf(raw as UTSJSONObject)
+	if (text.length == 0) {
+		const seg = new MsgSegment()
+		seg.type = 'text'
+		seg.text = '不支持的消息类型'
+		const list: Array<MsgSegment> = []
+		list.push(seg)
+		return list
+	}
+	return splitEmoteText(text, props.eInfos as Array<EmoteInfo>)
+})
+
+/** 文本消息取值链（源 richTextMessage 取 content['content']） */
+function textOf(obj: UTSJSONObject): string {
+	const value = obj.getString('content')
+	return value == null ? '' : value
+}
+
+// ---------------------------------------------------------------- 图片消息
+
+const picUrl = computed((): string => strOf2(content.value, 'url'))
+const picHeight = computed((): string => {
+	const obj = content.value
+	if (obj == null) {
+		return '220px'
+	}
+	const w = (obj as UTSJSONObject).getNumber('width')
+	const h = (obj as UTSJSONObject).getNumber('height')
+	if (w == null || h == null) {
+		return '220px'
+	}
+	const width = w as number
+	const height = h as number
+	if (width == 0 || height == 0) {
+		return '220px'
+	}
+	const ratio = height / width
+	return Math.round(220 * ratio).toString() + 'px'
+})
+
+function onPicTap() {
+	const urls = props.picList as Array<string>
+	if (urls.length == 0) {
+		return
+	}
+	uni.previewImage({ urls: urls, current: picUrl.value })
+}
+
+// ---------------------------------------------------------------- 分享卡片
+
+const shareCover = computed((): string => {
+	const obj = content.value
+	if (obj == null) {
+		return ''
+	}
+	const thumb = (obj as UTSJSONObject).getString('thumb')
+	if (thumb != null && thumb.length > 0) {
+		return thumb
+	}
+	const cover = (obj as UTSJSONObject).getString('cover')
+	return cover == null ? '' : cover
+})
+const shareTitle = computed((): string => strOf2(content.value, 'title'))
+const shareSub = computed((): string => {
+	const obj = content.value
+	if (obj == null) {
+		return ''
+	}
+	const author = (obj as UTSJSONObject).getString('author')
+	if (author != null && author.length > 0) {
+		return author
+	}
+	const times = (obj as UTSJSONObject).getNumber('times')
+	return times == null ? '' : '时长 ' + Math.floor((times as number) / 60).toString() + ' 分钟'
+})
+
+// ---------------------------------------------------------------- 系统类
+
+const noticeTitle = computed((): string => strOf2(content.value, 'title'))
+const noticeText = computed((): string => strOf2(content.value, 'text'))
+const picCardUrl = computed((): string => strOf2(content.value, 'pic_url'))
+
+/** notify_text=18：content.content 为 JSON 数组 [{text}]，逐项 join；auto_reply_push=16：主标题 */
+const sysLineText = computed((): string => {
+	if (msg.value.msgType == MsgType.autoReplyPush) {
+		return strOf2(content.value, 'main_title')
+	}
+	const obj = content.value
+	if (obj == null) {
+		return ''
+	}
+	const raw = (obj as UTSJSONObject).getString('content')
+	if (raw == null || raw.length == 0) {
+		return ''
+	}
+	try {
+		const arr = JSON.parseArray<UTSJSONObject>(raw)
+		if (arr == null) {
+			return ''
+		}
+		const parts: string[] = []
+		for (let i = 0; i < arr.length; i++) {
+			const item = arr[i]
+			if (item == null) {
+				continue
+			}
+			const text = item.getString('text')
+			if (text != null && text.length > 0) {
+				parts.push(text)
+			}
+		}
+		return parts.join('\n')
+	} catch (e) {
+		return ''
+	}
+})
+
+// ---------------------------------------------------------------- 兜底文本
+
+const fallbackText = computed((): string => {
+	const text = strOf2(content.value, 'content')
+	return text.length > 0 ? text : '不支持的消息类型'
+})
+
+function strOf2(obj: UTSJSONObject | null, key: string): string {
+	if (obj == null) {
+		return ''
+	}
+	const value = (obj as UTSJSONObject).getString(key)
+	return value == null ? '' : value
+}
+
+// ---------------------------------------------------------------- 样式
+
+/**
+ * 气泡底色（源常量）：
+ *  - 己方：colorScheme.primary.withAlpha(180)（alpha 180/255 ≈ 0.706）
+ *  - 对方：colorScheme.outlineVariant.withOpacity(0.6).withAlpha(125)（≈ #C4C7C5 @ 0.49 → 白底实测 ≈ #E2E2E2）
+ * 撤回态：源用外层 Container 的 4dp 左/右边框（dividerColor / primaryColor），此处等效画在气泡同侧。
+ */
+const ownerBubbleStyle = computed((): string => {
+	const border = msg.value.msgStatus == 1
+		? 'border-right-width:4px;border-right-style:solid;border-right-color:' + primary + ';'
+		: ''
+	return 'background-color:' + withAlpha(primary, 0.706) + ';' + border
+})
+const otherBubbleStyle = computed((): string => {
+	const border = msg.value.msgStatus == 1
+		? 'border-left-width:4px;border-left-style:solid;border-left-color:rgba(128,128,128,0.45);'
+		: ''
+	return 'background-color:rgba(128,128,128,0.23);' + border
+})
+/** 正文样式：源 letterSpacing 0.6 / height 1.5 / 颜色 onPrimary|onBackground，字号取默认 14 */
+const ownerTextStyle = computed((): string => 'font-size:14px;line-height:21px;letter-spacing:0.6px;color:' + onPrimaryText() + ';')
+const otherTextStyle = computed((): string => 'font-size:14px;line-height:21px;letter-spacing:0.6px;color:' + textPrimary() + ';')
+const ownerSubStyle = computed((): string => 'font-size:12px;line-height:18px;letter-spacing:0.6px;color:rgba(255,255,255,0.6);')
+const otherSubStyle = computed((): string => 'font-size:12px;line-height:18px;letter-spacing:0.6px;color:' + textSecondary() + ';')
+/** 时间：labelSmall 11sp；己方 onPrimary 80% / 对方 onSecondaryContainer 80% */
+const ownerTimeStyle = computed((): string => 'font-size:11px;color:' + withAlpha(onPrimaryText(), 0.8) + ';')
+const otherTimeStyle = computed((): string => 'font-size:11px;color:' + withAlpha(textSecondary(), 0.8) + ';')
+/** 正文与时间的间距：图片消息 7、其余 4（源 SizedBox(height: isPic ? 7 : 4)） */
+const metaStyle = computed((): string => 'margin-top:' + (msg.value.msgType == 2 ? '7' : '4') + 'px;')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const timeStyle = computed((): string => 'color:' + textSecondary() + ';')
+const bodyStyle = computed((): string => 'color:' + textPrimary() + ';')
+const sysStyle = computed((): string => 'color:' + textSecondary() + ';')
+</script>
+
+<style>
+	/* 行容器：源 Container(padding: only(top: 6, bottom: 6))，左右无 padding */
+	.mb {
+		display: flex;
+		flex-direction: column;
+		padding-top: 6px;
+		padding-bottom: 6px;
+	}
+	.mb-none {
+		height: 0;
+	}
+	.mb-row-owner {
+		flex-direction: row;
+		justify-content: flex-end;
+	}
+	.mb-row-other {
+		flex-direction: row;
+		justify-content: flex-start;
+	}
+	/* 气泡两侧 6dp 空隙（源 const SizedBox(width: safeDistanceval=6)） */
+	.mb-side {
+		width: 6px;
+		flex-shrink: 0;
+	}
+	/* 气泡：圆角 12、发送侧底角 2、内边距 10、左右外边距 8（源 borderRadiusVal/paddingVal/EdgeInsets） */
+	.mb-bubble {
+		max-width: 300px;
+		display: flex;
+		flex-direction: column;
+		border-radius: 12px;
+		padding: 10px;
+		margin-left: 8px;
+		margin-right: 8px;
+	}
+	.mb-bubble-owner {
+		border-bottom-right-radius: 2px;
+	}
+	.mb-bubble-other {
+		border-bottom-left-radius: 2px;
+	}
+	.mb-rich {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+	/* 正文：SelectableText 默认 bodyMedium 14sp + letterSpacing 0.6 / height 1.5（源 richTextMessage） */
+	.mb-text {
+		font-size: 14px;
+		line-height: 21px;
+		letter-spacing: 0.6px;
+	}
+	.mb-emote {
+		width: 18px;
+		height: 18px;
+		margin-left: 1px;
+		margin-right: 1px;
+	}
+	.mb-pic {
+		display: flex;
+		flex-direction: row;
+	}
+	.mb-share {
+		display: flex;
+		flex-direction: column;
+	}
+	.mb-share-title {
+		font-size: 14px;
+		font-weight: 600;
+		margin-top: 6px;
+	}
+	.mb-share-sub {
+		font-size: 12px;
+		margin-top: 1px;
+	}
+	.mb-meta {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+	}
+	.mb-time {
+		font-size: 11px;
+	}
+	/* notify_msg=10 系统通知卡（源 SystemNotice：左对齐 + 圆角 16/6 + 分割线） */
+	.mb-notice {
+		max-width: 300px;
+		display: flex;
+		flex-direction: column;
+		border-radius: 16px;
+		border-bottom-left-radius: 6px;
+		background-color: rgba(128, 128, 128, 0.12);
+		margin-top: 12px;
+		margin-left: 12px;
+		padding-top: 12px;
+		padding-bottom: 12px;
+		padding-left: 12px;
+		padding-right: 12px;
+	}
+	.mb-notice-title {
+		font-size: 16px;
+		font-weight: 500;
+	}
+	.mb-notice-time {
+		font-size: 11px;
+		margin-top: 4px;
+	}
+	.mb-notice-divider {
+		height: 1px;
+		background-color: rgba(128, 128, 128, 0.15);
+		margin-top: 8px;
+		margin-bottom: 8px;
+	}
+	.mb-notice-text {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	/* pic_card=13：320x150 大图，左缩进 12 + 上边距 12（源 SystemNotice2） */
+	.mb-piccard {
+		display: flex;
+		flex-direction: row;
+		margin-top: 12px;
+		padding-left: 12px;
+	}
+	/* notify_text=18 / auto_reply_push=16：整行文本（源 messageContent 直返 SelectableText，无居中容器） */
+	.mb-sysline {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		margin-top: 6px;
+		margin-bottom: 6px;
+	}
+	.mb-sysline-text {
+		font-size: 14px;
+		line-height: 21px;
+	}
+</style>

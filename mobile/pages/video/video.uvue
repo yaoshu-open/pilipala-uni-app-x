@@ -1,0 +1,1762 @@
+<template>
+	<view class="vd" :style="pageStyle">
+		<!--
+			状态栏避让（竖屏）：播放区从状态栏下方开始，状态栏区域用页面底色。
+			全屏页横屏沉浸（隐藏状态栏）不受此影响——两页行为刻意不同。
+			播放器高度仍按「宽 × 9/16」由 player-stage 自身给出，这里只做占位，不参与视频尺寸计算。
+		-->
+		<view class="vd-statusbar" :style="statusBarStyle"></view>
+		<!--
+			播放区固定在页面顶部（吸顶的退化实现）。
+			设计_视频详情域 §三 的首选方案是「单 scroll-view + position: sticky」，
+			但 sticky 在 App 端滚动容器内的行为未经实测；按设计给出的退化路径实现为
+			「播放器固定在滚动容器外 + 下方信息/内容独立滚动」，视觉差异登记为平台约束。
+		-->
+		<view class="vd-stage">
+			<player-stage
+				:src="playSrc"
+				:backup-src="playBackupSrc"
+				:cover="cover"
+				:title="title"
+				:start-time="startSec"
+				:auto-play="autoPlay"
+				:duration-hint="durationHint"
+				@back="onBack"
+				@progress="onStageProgress"
+				@playing="onStagePlaying"
+				@fullscreen="onEnterFullscreen"
+			></player-stage>
+
+			<!--
+				弹幕层：绝对定位铺满播放区「控制条以上」的部分。
+				底部让出控制条高度——既保证弹幕不压住播放/时间/弹幕/全屏按钮，
+				也让控制条不被上层 canvas 拦截点击（不依赖 pointer-events 的端差异）。
+			-->
+			<view class="vd-dm" :style="dmLayerStyle">
+				<danmaku-layer
+					:cid="cid"
+					:playing="stagePlaying"
+					:progress-ms="progressMs"
+					:enabled="dmEnabled"
+					:show-area="dmShowArea"
+					:opacity="dmOpacity"
+					:font-scale="dmFontScale"
+					:duration-sec="dmDuration"
+					:stroke-width="dmStrokeWidth"
+					:block-types="dmBlockTypes"
+				></danmaku-layer>
+			</view>
+		</view>
+
+		<!-- 播放地址失败：明确错误 + 重试（不静默停在黑屏） -->
+		<view v-if="playError.length > 0" class="vd-play-error" :style="playErrorStyle" @click="onRetryPlay">
+			<text class="vd-play-error-text" :style="playErrorTextStyle">{{ playError }}</text>
+			<text class="vd-play-error-retry" :style="primaryTextStyle">点击重试</text>
+		</view>
+
+		<view v-if="state == 'loading'" class="vd-loading">
+			<view v-for="n in 4" :key="'sk-' + n.toString()" class="vd-sk-row">
+				<skeleton-block width="100%" height="14px" radius="4px"></skeleton-block>
+				<view class="vd-sk-gap"></view>
+				<skeleton-block width="70%" height="12px" radius="4px"></skeleton-block>
+			</view>
+		</view>
+
+		<view v-else-if="state == 'error'" class="vd-fill">
+			<p-http-error :message="errorText" @retry="onRetryDetail"></p-http-error>
+		</view>
+
+		<view v-else class="vd-main">
+			<!--
+				Tab 栏：1:1 基线（源 \`lib/pages/video/detail/view.dart\` 的 body 首行 tabbarBuild）——
+				固定在播放区正下方、固定高 45、不随内容滚动。
+				左半区「简介 / 评论 N」两个等分 Tab（文字 13、选中主色 + 文字等宽下划线）；
+				右半区右对齐「发弹幕」（文字 12）与「弹幕开关」（38×38，开=主色 / 关=次要色），右侧留白 18。
+			-->
+			<view class="vd-tabs" :style="tabsStyle">
+				<view class="vd-tabs-left" :style="tabsHalfStyle">
+					<view class="vd-tab" @click="onTabIntro">
+						<view class="vd-tab-inner" :style="tabUnderlineStyle('intro')">
+							<text class="vd-tab-text" :style="tabTextStyle('intro')">简介</text>
+						</view>
+					</view>
+					<view class="vd-tab" @click="onTabReply">
+						<view class="vd-tab-inner" :style="tabUnderlineStyle('reply')">
+							<text class="vd-tab-text" :style="tabTextStyle('reply')">评论 {{ replyCountText }}</text>
+						</view>
+					</view>
+				</view>
+				<view class="vd-tabs-right" :style="tabsHalfStyle">
+					<view class="vd-dm-send" @click="openDanmakuSheet">
+						<text class="vd-dm-send-text" :style="primaryTextStyle">发弹幕</text>
+					</view>
+					<view class="vd-dm-switch" @click="onToggleDanmaku">
+						<text class="vd-dm-switch-glyph" :style="dmSwitchStyle">弹</text>
+					</view>
+				</view>
+			</view>
+
+			<view class="vd-content">
+				<!--
+					简介 Tab：顺序＝1:1 基线「标题 → 元数据 → 互动栏 → UP 行 → 简介 → 分割线 → 相关推荐」。
+					UP 行只在 up-row 里出现一次（旧的「信息区 UP 卡 + 简介区 UP 卡」重复已删除）。
+				-->
+				<scroll-view v-show="tab == 'intro'" class="vd-scroll" :scroll-top="scrollTop">
+					<view class="vd-body" :style="bodyStyle">
+						<video-info
+							:title="title"
+							:view-count="viewCount"
+							:danmu-count="danmuCount"
+							:pubdate="pubdate"
+							:online-text="onlineText"
+						></video-info>
+
+						<action-row
+							:bvid="bvid"
+							:aid="aid"
+							:like-count="likeCount"
+							:coin-count="coinCount"
+							:fav-count="favCount"
+						></action-row>
+
+						<up-row
+							:name="ownerName"
+							:face="ownerFace"
+							:fans-count="follower"
+							:followed="following"
+							@follow="onToggleFollow"
+							@open-user="onOpenOwner"
+						></up-row>
+
+						<intro-pane
+							:desc="desc"
+							:pages="pages"
+							:episodes="episodes"
+							:season-title="seasonTitle"
+							:related="relatedItems"
+							:current-cid="cid"
+							:related-state="relatedState"
+							:related-error="relatedError"
+							:show-related="relatedEnabled"
+							@switch-page="onSwitchPage"
+							@switch-episode="onSwitchEpisode"
+							@open-related="onOpenRelated"
+							@retry-related="onRetryRelated"
+						></intro-pane>
+					</view>
+				</scroll-view>
+
+				<!-- 评论区关闭：入口隐藏但给一句明确说明，不静默消失 -->
+				<view v-if="tab == 'reply' && replyClosed" class="vd-reply-closed">
+					<text class="vd-reply-closed-text" :style="secondaryTextStyle">该视频的评论区已关闭，暂时无法发表评论</text>
+				</view>
+
+				<!--
+					评论 Tab：只有评论列表——标题/UP/互动栏都在简介 Tab 的滚动容器里，切 Tab 即随内容一起隐藏。
+					首次进评论 Tab 才挂载（避免仅看简介也拉一次评论），挂载后 v-show 保活（切 Tab 不丢列表与滚动位置）。
+				-->
+				<view v-if="replyOpened" v-show="tab == 'reply'" class="vd-reply-pane">
+					<reply-list
+						:oid="aid"
+						:up-mid="ownerMid"
+						:insert-seq="insertSeq"
+						:insert-item="insertItem"
+						:bottom-inset="replyBottomInset"
+						@open-reply="onOpenReply"
+						@reply="onReplyFromItem"
+						@need-login="showLoginGuide"
+						@seek="onSeekText"
+						@open-user="onOpenUser"
+						@open-link="onOpenLink"
+						@req-code="onReqCode"
+					></reply-list>
+				</view>
+			</view>
+		</view>
+		<!-- 发评论入口：评论 Tab 可见 + 登录态由输入条内部处理 + 评论区关闭时整条隐藏 -->
+		<view v-if="state == 'ready' && tab == 'reply' && !replyClosed" class="vd-input-bar">
+			<reply-input
+				:oid="aid"
+				:root="mainRoot"
+				:parent="mainParent"
+				:reply-to-name="replyTargetName"
+				:force-close-seq="emoteCloseSeq"
+				@sent="onSentComment"
+				@need-login="showLoginGuide"
+				@popup-state="onEmoteState"
+				@cancel-reply="onCancelReplyTarget"
+			></reply-input>
+		</view>
+
+		<!--
+			发弹幕底部弹层：Tab 栏「发弹幕」的唯一入口（1:1 基线：发弹幕在 Tab 栏右侧）。
+			真链路：输入 → sendDanmaku（api/danmaku.uts）→ 成功 toast「弹幕已发送」+ pushLocal 本地即时上屏；
+			失败原样 toast「code: message」，不做假入口、不静默吞错。
+			键盘：输入框 adjust-position=false，弹层按 uni.onKeyboardHeightChange 给的高度上移。
+		-->
+		<view v-if="dmSheetVisible" class="vd-dm-mask">
+			<view class="vd-dm-mask-bg" @click="closeDanmakuSheet"></view>
+			<view class="vd-dm-sheet" :style="dmSheetStyle">
+				<view class="vd-dm-sheet-head">
+					<text class="vd-dm-sheet-title" :style="sheetTitleStyle">发弹幕</text>
+					<text class="vd-dm-sheet-tip" :style="secondaryTextStyle">{{ dmProgressText }}</text>
+					<view class="vd-dm-sheet-close" @click="closeDanmakuSheet">
+						<text class="vd-dm-sheet-close-text" :style="secondaryTextStyle">关闭</text>
+					</view>
+				</view>
+				<view class="vd-dm-sheet-row">
+					<input
+						class="vd-dm-input"
+						:style="dmInputStyle"
+						:value="dmText"
+						:maxlength="100"
+						:adjust-position="false"
+						placeholder="发个友善的弹幕见证当下"
+						placeholder-class="vd-dm-placeholder"
+						confirm-type="send"
+						@input="onDmInput"
+						@confirm="onSendDanmaku"
+					/>
+					<view class="vd-dm-submit" :style="dmSubmitStyle" @click="onSendDanmaku">
+						<text class="vd-dm-submit-text" :style="dmSubmitTextStyle">{{ dmSending ? '发送中' : '发送' }}</text>
+					</view>
+				</view>
+			</view>
+		</view>
+
+		<!-- 二级评论面板（底部弹层，点顶部把手切换半屏/全屏高度） -->
+		<view v-if="sheetVisible" class="vd-sheet-mask">
+			<view class="vd-sheet" :style="sheetStyle">
+				<view class="vd-sheet-head">
+					<view class="vd-sheet-grip" @click="toggleSheetHeight">
+						<view class="vd-sheet-grip-bar" :style="gripStyle"></view>
+					</view>
+					<view class="vd-sheet-title-row">
+						<text class="vd-sheet-title" :style="sheetTitleStyle">评论详情</text>
+						<text class="vd-sheet-tip" :style="secondaryTextStyle">{{ sheetHeightTip }}</text>
+						<view class="vd-sheet-close" @click="closeSheet">
+							<text class="vd-sheet-close-text" :style="secondaryTextStyle">关闭</text>
+						</view>
+					</view>
+				</view>
+
+				<scroll-view class="vd-sheet-scroll" :lower-threshold="200" @scrolltolower="onSheetLoadMore">
+					<reply-item-view
+						v-if="sheetRoot != null"
+						:item="sheetRoot"
+						level="2"
+						:show-reply-row="false"
+						@need-login="showLoginGuide"
+						@reply="onReplyFromSheet"
+						@seek="onSeekText"
+						@open-user="onOpenUser"
+						@open-link="onOpenLink"
+					></reply-item-view>
+
+					<view class="vd-sheet-sep" :style="sheetSepStyle"></view>
+
+					<view v-if="sheetState == 'loading'" class="vd-sheet-state">
+						<text class="vd-sheet-state-text" :style="secondaryTextStyle">加载中…</text>
+					</view>
+					<view v-else-if="sheetState == 'error'" class="vd-sheet-state" @click="reloadSheet">
+						<text class="vd-sheet-state-text" :style="secondaryTextStyle">{{ sheetError }}</text>
+						<text class="vd-sheet-state-retry" :style="primaryTextStyle">点击重试</text>
+					</view>
+					<view v-else-if="sheetList.length == 0" class="vd-sheet-state">
+						<text class="vd-sheet-state-text" :style="secondaryTextStyle">还没有评论</text>
+					</view>
+					<view v-else class="vd-sheet-list">
+						<reply-item-view
+							v-for="reply in sheetList"
+							:key="reply.rpid"
+							:item="reply"
+							level="2"
+							:show-reply-row="false"
+							@need-login="showLoginGuide"
+							@reply="onReplyFromSheet"
+							@seek="onSeekText"
+							@open-user="onOpenUser"
+							@open-link="onOpenLink"
+						></reply-item-view>
+					</view>
+
+					<view class="vd-sheet-footer">
+						<text class="vd-sheet-footer-text" :style="secondaryTextStyle">{{ sheetFooterText }}</text>
+					</view>
+				</scroll-view>
+
+				<view class="vd-sheet-input">
+					<reply-input
+						:oid="aid"
+						:root="sheetRootRpid"
+						:parent="sheetParentRpid"
+						:reply-to-name="sheetReplyName"
+						placeholder="回复这条评论"
+						:force-close-seq="emoteCloseSeq"
+						@sent="onSheetSent"
+						@need-login="showLoginGuide"
+						@popup-state="onEmoteState"
+						@cancel-reply="onCancelSheetReply"
+					></reply-input>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow, onHide, onUnload, onBackPress } from '@dcloudio/uni-app'
+import PlayerStage from '../../components/player/player-stage.uvue'
+import DanmakuLayer from '../../components/player/danmaku-layer.uvue'
+import VideoInfo from '../../components/video/video-info.uvue'
+import ActionRow from '../../components/video/action-row.uvue'
+import UpRow from '../../components/video/up-row.uvue'
+import IntroPane from '../../components/video/intro-pane.uvue'
+import ReplyList from '../../components/reply/reply-list.uvue'
+import ReplyInput from '../../components/reply/reply-input.uvue'
+// uvue 的组件标签按导入名解析（ReplyItemView → <reply-item-view>）；模型类 ReplyItem 同名会冲突，故用 View 后缀
+import ReplyItemView from '../../components/reply/reply-item.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import { fetchVideoDetail, fetchPlayUrl, fetchRelated, fetchUserStat, hasFollow, followMod, fetchOnlineTotal, selectPlaySrc, selectPlayBackup } from '../../api/play.uts'
+import { fetchReplyReplyList, REPLY_CLOSED_CODE } from '../../api/reply.uts'
+import { sendDanmaku } from '../../api/danmaku.uts'
+import { useDanmaku } from '../../composables/useDanmaku.uts'
+import { VideoDetail, VideoPage, VideoSeason, VideoSeasonEpisode } from '../../models/video-detail.uts'
+import { ReplyItem } from '../../models/reply.uts'
+import { HotVideoItem } from '../../models/video.uts'
+import { userState } from '../../stores/user.uts'
+import { navigateTo, navigateBack, RT } from '../../utils/routes.uts'
+import { openRichLink } from '../../utils/link.uts'
+import {
+	pageBackground, cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex,
+	withAlpha, onPrimaryText,
+	errorText as themeErrorText, errorBackground
+} from '../../utils/theme.uts'
+import { numFormat, timeFormat } from '../../utils/format.uts'
+import {
+	getBool, setBool, SK,
+	getDanmakuBlockType, getDanmakuShowArea, getDanmakuOpacity, getDanmakuFontScale,
+	getDanmakuDuration, getDanmakuStrokeWidth
+} from '../../utils/storage.uts'
+import { safeAreaBottom, statusBarHeight } from '../../utils/safeArea.uts'
+
+/**
+ * 视频详情页宿主（源头：`lib/pages/video/detail/index.dart` + `view.dart` + `controller.dart`）。
+ *
+ * 本阶段范围（P4 集成接线）：播放区（内置 video + durl）、Tab 栏、简介页（标题/元数据/互动栏/UP 行/
+ * 简介正文/相关推荐）、评论全链路（一级列表 / 楼中楼弹层 / 点赞 / 发评论 / 表情），以及
+ * **弹幕层接线**（canvas 渲染层铺在播放区控制条以上，配置取自 storage 弹幕 6 键）、
+ * **发弹幕**（Tab 栏入口 → 底部弹层 → sendDanmaku → 本地即时上屏）与
+ * **全屏入口**（跳 pages/video/fullscreen，返回按 $emit 的位置续播）。
+ *
+ * 结构口径（1:1 旧版基线）：播放区 → **Tab 栏（固定高 45，紧贴播放区下沿、不随内容滚动）** →
+ * 简介 Tab（标题 → 元数据 → 互动栏 → UP 行 → 简介 → 分割线 → 相关推荐）/ 评论 Tab（只有评论列表）。
+ * 「标题/UP/互动栏」整体在简介 Tab 的滚动容器内，切到评论 Tab 时随之隐藏；弹幕开关只有 Tab 栏一处入口。
+ *
+ * 数据流：详情（view）先到 → cid 兜底（query 缺省取 pages[0].cid）→ 并行域数据顺序拉取
+ *（播放地址 / 相关推荐 / UP 粉丝数 / 关注态 / 同时在看）。
+ * 切分P 只换 cid 重拉播放地址；切合集分集换 bvid 后整体重拉（标题/UP/简介都可能变）。
+ *
+ * 评论交互的归属：列表与输入条各自闭环（组件内部状态 + 接口），页面只负责
+ * ①把详情里的 aid / UP mid 传给列表 ②接住输入条回传的新评论做前插与计数 ③登录引导与跨域跳转（占位页）。
+ *
+ * 深链能力（非测试后门）：`/pages/video/video?bvid=xxx&tab=reply` 直接定位到评论 Tab，
+ * 供外部跳转与无点击环境取证使用；等价于用户点一下「评论」Tab。
+ */
+const bvid = ref<string>('')
+const cid = ref<number>(0)
+const detail = ref<VideoDetail | null>(null)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const playSrc = ref<string>('')
+const playBackupSrc = ref<string>('')
+const startSec = ref<number>(0)
+const durationHint = ref<number>(0)
+const playError = ref<string>('')
+/** 相关视频推荐开关（SK.enableRelatedVideo）：关闭时不渲染相关推荐段（源同款） */
+const relatedEnabled = ref<boolean>(getBool(SK.enableRelatedVideo, true))
+const relatedItems = ref<Array<HotVideoItem>>([])
+const relatedState = ref<string>('loading')
+const relatedError = ref<string>('')
+const follower = ref<number>(0)
+const following = ref<boolean>(false)
+const onlineText = ref<string>('')
+const tab = ref<string>('intro')
+const scrollTop = ref<number>(0)
+const autoPlay = ref<boolean>(true)
+let onlineTimer: number = -1
+
+// ---- 发弹幕（底部弹层）
+const dmSheetVisible = ref<boolean>(false)
+const dmText = ref<string>('')
+const dmSending = ref<boolean>(false)
+/** 软键盘高度（px）：弹层靠它上移，避免被键盘盖住 */
+const kbHeight = ref<number>(0)
+/** onKeyboardHeightChange 的监听 id（onUnload 摘除） */
+let kbListenerId: number = -1
+
+// ---- 评论：列表前插与计数
+const insertSeq = ref<number>(0)
+const insertItem = ref<ReplyItem | null>(null)
+const extraReplyCount = ref<number>(0)
+const replyClosed = ref<boolean>(false)
+/** 评论列表是否已挂载（首次进评论 Tab 才挂载，之后 v-show 保活） */
+const replyOpened = ref<boolean>(false)
+const emoteOpen = ref<boolean>(false)
+const emoteCloseSeq = ref<number>(0)
+const mainRoot = ref<string>('')
+const mainParent = ref<string>('')
+const replyTargetName = ref<string>('')
+
+// ---- 评论：二级面板
+const sheetVisible = ref<boolean>(false)
+const sheetExpanded = ref<boolean>(false)
+const sheetRoot = ref<ReplyItem | null>(null)
+const sheetList = ref<Array<ReplyItem>>([])
+const sheetState = ref<string>('loading')
+const sheetError = ref<string>('')
+const sheetPage = ref<number>(0)
+const sheetNoMore = ref<boolean>(false)
+const sheetLoading = ref<boolean>(false)
+const sheetReplyTarget = ref<ReplyItem | null>(null)
+const sheetReplyName = ref<string>('')
+let lastSheetLoadAt: number = 0
+
+// ---- 视口（评论面板高度按剩余空间算，避免被屏幕裁掉）
+const winWidth = ref<number>(0)
+const winHeight = ref<number>(0)
+try {
+	const info = uni.getWindowInfo()
+	winWidth.value = info.windowWidth
+	winHeight.value = info.windowHeight
+} catch (e) {
+	winWidth.value = 0
+	winHeight.value = 0
+	console.log('[video] window info failed')
+}
+
+// ---- 弹幕层（渲染在页面内，配置真值来自 utils/storage.uts 的弹幕 6 键 + enableShowDanmaku）
+/**
+ * 播放区底部控制条的高度（px）：player-stage 的 .ps-controls = 进度区 20 + 操作行 40 + padding-bottom 2。
+ * 弹幕层要在这个高度以上铺满，否则会盖住控制条（视觉遮挡 + 拦截点击）。
+ * 改 player-stage 控制条尺寸时必须同步这里（口径同 fullscreen 页的 inControlBar）。
+ */
+const CONTROL_BAR_HEIGHT = 62
+
+const dmEnabled = ref<boolean>(true)
+const dmShowArea = ref<number>(0.5)
+const dmOpacity = ref<number>(1.0)
+const dmFontScale = ref<number>(1.0)
+const dmDuration = ref<number>(4.0)
+const dmStrokeWidth = ref<number>(1.5)
+const dmBlockTypes = ref<Array<number>>([])
+/** 播放器是否在播（弹幕层据此冻结/推进，暂停时不补播） */
+const stagePlaying = ref<boolean>(false)
+/** 当前播放进度（毫秒），player-stage 每次 timeupdate 抛上来 */
+const progressMs = ref<number>(0)
+
+/** 全屏回传的续播位置（秒）；-1 = 无待续播位置 */
+const pendingResumeSec = ref<number>(-1)
+/** 本次是否由本页跳进全屏页（多级详情页堆叠时，只有发起页消费回传事件） */
+let fullscreenLaunched = false
+
+/** 播放区高度（16:9，口径同 player-stage 的 rootStyle） */
+const stageHeight = computed((): number => {
+	const width = winWidth.value > 0 ? winWidth.value : 390
+	return Math.round(width * 9 / 16)
+})
+
+const dmLayerStyle = computed((): string => {
+	const height = stageHeight.value - CONTROL_BAR_HEIGHT
+	return 'height:' + (height > 0 ? height : 0).toString() + 'px;'
+})
+
+const primary = themeColor(currentThemeIndex())
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+/** 状态栏占位：高度取 utils/safeArea.uts，底色跟页面（不要在状态栏区域铺黑块） */
+const statusBarStyle = computed((): string => {
+	return 'height:' + statusBarHeight().toString() + 'px;background-color:' + pageBackground() + ';'
+})
+const playErrorStyle = computed((): string => 'background-color:' + errorBackground() + ';')
+const playErrorTextStyle = computed((): string => 'color:' + themeErrorText() + ';')
+/**
+ * Tab 栏左右半区等分：源是 Expanded(flex:1) + Flexible(flex:1)，两半各占栏宽一半。
+ * 这里直接给半宽 px——flex:1 在本端按内容基准分配，右半区带 18 右留白会让两半不等宽（实测 Tab 中心右移 2.3dp）。
+ */
+const tabsHalfStyle = computed((): string => {
+	const width = winWidth.value > 0 ? winWidth.value : 390
+	return 'width:' + Math.round(width / 2).toString() + 'px;'
+})
+/** Tab 栏底色 + 底部 1px 分割线（源 tabbarBuild 的 Border bottom：分割色 10%） */
+const tabsStyle = computed((): string => {
+	return 'background-color:' + cardBackground() + ';border-bottom-color:' + withAlpha(textSecondary(), 0.2) + ';'
+})
+/**
+ * 选中态下划线：用内层容器的 border-bottom 实现——容器宽度由文字撑开，
+ * 边框自然与文字等宽（1:1 基线实测：下划线 90px ≈ 文字 91px，非整条 Tab 宽），未选中态透明占位。
+ */
+function tabUnderlineStyle(name: string): string {
+	return 'border-bottom-color:' + (tab.value == name ? primary : 'rgba(0,0,0,0)') + ';'
+}
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const sheetTitleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const gripStyle = computed((): string => 'background-color:' + textSecondary() + ';')
+const sheetSepStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const sheetStyle = computed((): string => {
+	const base = winHeight.value > 0 ? winHeight.value : 640
+	const height = sheetExpanded.value ? base * 0.88 : base * 0.62
+	return 'height:' + Math.round(height).toString() + 'px;background-color:' + cardBackground() + ';'
+})
+const sheetHeightTip = computed((): string => sheetExpanded.value ? '点击把手收起' : '点击把手展开')
+const gripBarStyle = computed((): string => 'background-color:' + withAlphaText(textSecondary()) + ';')
+
+/** 输入条高度估算（输入行 36 + 上下内边距 + 安全区），用于给列表尾部留白 */
+const inputBarHeight = computed((): number => 60 + safeAreaBottom())
+const replyBottomInset = computed((): number => replyClosed.value ? 0 : inputBarHeight.value)
+/** 简介滚到底部时让出安全区（源相关推荐末尾补一个 padding.bottom 的占位） */
+const bodyStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 8).toString() + 'px;')
+
+// ---- 发弹幕弹层的配色与布局
+/** 弹幕开关两态：开=主色、关=次要色（源：开启色 colorScheme.primary / 关闭色 colorScheme.outline） */
+const dmSwitchStyle = computed((): string => 'color:' + (dmEnabled.value ? primary : textSecondary()) + ';')
+const dmProgressText = computed((): string => {
+	const sec = Math.floor(progressMs.value / 1000)
+	return '发送位置 ' + timeFormat(sec)
+})
+const dmInputStyle = computed((): string => {
+	return 'background-color:' + pageBackground() + ';color:' + textPrimary() + ';'
+})
+/** 内容为空时发送按钮弱化（不是「点了没反应」：点击仍会给明确提示） */
+const dmSubmitEnabled = computed((): boolean => dmText.value.trim().length > 0 && !dmSending.value)
+const dmSubmitStyle = computed((): string => {
+	const bg = dmSubmitEnabled.value ? primary : withAlpha(textSecondary(), 0.3)
+	return 'background-color:' + bg + ';'
+})
+const dmSubmitTextStyle = computed((): string => 'color:' + onPrimaryText() + ';')
+/** 弹层：无键盘时铺安全区，有键盘时贴着键盘上沿（键盘已覆盖安全区，不再叠加） */
+const dmSheetStyle = computed((): string => {
+	const bottomPad = kbHeight.value > 0 ? 10 : safeAreaBottom() + 10
+	const lift = kbHeight.value > 0 ? 'margin-bottom:' + kbHeight.value.toString() + 'px;' : ''
+	return lift + 'padding-bottom:' + bottomPad.toString() + 'px;background-color:' + cardBackground() + ';'
+})
+
+const title = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : d.title
+})
+const cover = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : d.pic
+})
+const viewCount = computed((): number => {
+	const d = detail.value
+	return d == null ? 0 : d.stat.view
+})
+const danmuCount = computed((): number => {
+	const d = detail.value
+	return d == null ? 0 : d.stat.danmaku
+})
+const pubdate = computed((): number => {
+	const d = detail.value
+	return d == null ? 0 : d.pubdate
+})
+const ownerName = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : d.owner.name
+})
+const ownerFace = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : d.owner.face
+})
+const ownerMid = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : d.owner.mid.toString()
+})
+const aid = computed((): number => {
+	const d = detail.value
+	return d == null ? 0 : d.aid
+})
+const likeCount = computed((): number => {
+	const d = detail.value
+	return d == null ? 0 : d.stat.like
+})
+const coinCount = computed((): number => {
+	const d = detail.value
+	return d == null ? 0 : d.stat.coin
+})
+const favCount = computed((): number => {
+	const d = detail.value
+	return d == null ? 0 : d.stat.favorite
+})
+const desc = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : d.desc
+})
+/** 评论数：详情接口统计 + 本页新发的条数（发一条 +1，不重新拉详情） */
+const replyCountText = computed((): string => {
+	const d = detail.value
+	if (d == null) {
+		return ''
+	}
+	return numFormat(d.stat.reply + extraReplyCount.value)
+})
+const pages = computed((): Array<VideoPage> => {
+	const d = detail.value
+	return d == null ? [] as Array<VideoPage> : d.pages
+})
+const episodes = computed((): Array<VideoSeasonEpisode> => {
+	const list: Array<VideoSeasonEpisode> = []
+	const d = detail.value
+	if (d == null) {
+		return list
+	}
+	const season = d.ugcSeason
+	if (season == null) {
+		return list
+	}
+	for (let i = 0; i < season.sections.length; i++) {
+		const items = season.sections[i].episodes
+		for (let j = 0; j < items.length; j++) {
+			list.push(items[j])
+		}
+	}
+	return list
+})
+const seasonTitle = computed((): string => {
+	const d = detail.value
+	if (d == null) {
+		return ''
+	}
+	const season: VideoSeason | null = d.ugcSeason
+	return season == null ? '' : season.title
+})
+
+const sheetRootRpid = computed((): string => {
+	const root = sheetRoot.value
+	return root == null ? '' : root.rpid
+})
+const sheetParentRpid = computed((): string => {
+	const target = sheetReplyTarget.value
+	if (target != null) {
+		return target.rpid
+	}
+	return sheetRootRpid.value
+})
+const sheetFooterText = computed((): string => {
+	if (sheetState.value != 'ready' || sheetList.value.length == 0) {
+		return ''
+	}
+	if (sheetNoMore.value) {
+		return '没有更多了'
+	}
+	return sheetLoading.value ? '加载中…' : '上拉加载更多'
+})
+
+/** 主题色带透明度（App 端 8 位 hex/color-mix 不可靠，统一 rgba） */
+function withAlphaText(hex: string): string {
+	const text = hex.startsWith('#') ? hex.substring(1) : hex
+	if (text.length < 6) {
+		return hex
+	}
+	const r = parseInt(text.substring(0, 2), 16)
+	const g = parseInt(text.substring(2, 4), 16)
+	const b = parseInt(text.substring(4, 6), 16)
+	return 'rgba(' + r.toString() + ',' + g.toString() + ',' + b.toString() + ',0.45)'
+}
+
+function tabTextStyle(name: string): string {
+	return 'color:' + (tab.value == name ? primary : textSecondary()) + ';'
+}
+
+function scrollToTop() {
+	// 值不变不会触发滚动，先置 1 再置 0
+	scrollTop.value = 1
+	setTimeout(() => {
+		scrollTop.value = 0
+	}, 16)
+}
+
+function stopOnlineTimer() {
+	if (onlineTimer >= 0) {
+		clearInterval(onlineTimer)
+		onlineTimer = -1
+	}
+}
+
+function startOnlineTimer() {
+	stopOnlineTimer()
+	if (!getBool(SK.enableOnlineTotal, false)) {
+		return
+	}
+	onlineTimer = setInterval(() => {
+		loadOnline()
+	}, 10000)
+}
+
+async function loadOnline() {
+	// 观看人数开关（SK.enableOnlineTotal）：关闭时既不请求也不展示（源 introduction/controller 同款）
+	if (!getBool(SK.enableOnlineTotal, false)) {
+		onlineText.value = ''
+		return
+	}
+	if (bvid.value.length == 0 || cid.value <= 0) {
+		return
+	}
+	const res = await fetchOnlineTotal(aid.value, bvid.value, cid.value)
+	if (res.status) {
+		onlineText.value = res.total
+	}
+}
+
+async function loadOwner() {
+	const d = detail.value
+	if (d == null || d.owner.mid <= 0) {
+		return
+	}
+	const statRes = await fetchUserStat(d.owner.mid)
+	if (statRes.status) {
+		follower.value = statRes.follower
+	}
+	if (!userState.isLogin) {
+		following.value = false
+		return
+	}
+	const followRes = await hasFollow(d.owner.mid)
+	if (followRes.status) {
+		following.value = followRes.attribute == 2 || followRes.attribute == 6
+	}
+}
+
+async function loadRelated() {
+	// 相关视频推荐关闭时直接不请求（省一次接口，且与「不渲染」的口径一致）
+	if (!relatedEnabled.value) {
+		relatedItems.value = []
+		relatedState.value = 'empty'
+		return
+	}
+	relatedState.value = 'loading'
+	relatedError.value = ''
+	const res = await fetchRelated(bvid.value)
+	if (!res.status) {
+		relatedItems.value = []
+		relatedState.value = 'error'
+		relatedError.value = res.message
+		return
+	}
+	relatedItems.value = res.items
+	relatedState.value = res.items.length > 0 ? 'ready' : 'empty'
+}
+
+async function loadPlay() {
+	playError.value = ''
+	playSrc.value = ''
+	playBackupSrc.value = ''
+	if (bvid.value.length == 0 || cid.value <= 0) {
+		playError.value = '缺少播放参数，暂时无法起播'
+		return
+	}
+	const res = await fetchPlayUrl(bvid.value, cid.value, false)
+	if (!res.status || res.data == null) {
+		playError.value = res.message.length > 0 ? res.message : '播放地址获取失败'
+		return
+	}
+	const data = res.data
+	if (data.durl.length == 0 || data.durl[0].url.length == 0) {
+		playError.value = '该视频暂无可播放地址（可能需要登录或为付费/番剧内容）'
+		return
+	}
+	startSec.value = data.lastPlayTime > 0 ? Math.floor(data.lastPlayTime / 1000) : 0
+	durationHint.value = data.timeLength > 0 ? Math.floor(data.timeLength / 1000) : 0
+	// 地址选择与全屏页共用 api/play.uts#selectPlaySrc（源 detail/controller.dart 同款口径）
+	const primaryUrl = data.durl[0].url
+	const backupUrl = data.durl[0].backupUrl
+	playSrc.value = selectPlaySrc(primaryUrl, backupUrl)
+	playBackupSrc.value = selectPlayBackup(primaryUrl, backupUrl)
+	console.log('[video] play src cdn=' + getBool(SK.enableCDN, true).toString() +
+		' srcLen=' + playSrc.value.length.toString() + ' backupLen=' + playBackupSrc.value.length.toString())
+}
+
+async function loadAll() {
+	state.value = 'loading'
+	errorText.value = ''
+	playSrc.value = ''
+	playError.value = ''
+	relatedItems.value = []
+	relatedState.value = 'loading'
+	onlineText.value = ''
+	const res = await fetchVideoDetail(bvid.value)
+	if (!res.status || res.data == null) {
+		state.value = 'error'
+		errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		return
+	}
+	const d = res.data
+	detail.value = d
+	if (cid.value <= 0) {
+		cid.value = d.pages.length > 0 ? d.pages[0].cid : d.cid
+	}
+	state.value = 'ready'
+	await loadPlay()
+	await loadRelated()
+	await loadOwner()
+	await loadOnline()
+	startOnlineTimer()
+}
+
+function onRetryDetail() {
+	loadAll()
+}
+
+function onRetryPlay() {
+	loadPlay()
+}
+
+function onRetryRelated() {
+	loadRelated()
+}
+
+async function onSwitchPage(newCid: number) {
+	if (newCid == cid.value) {
+		return
+	}
+	cid.value = newCid
+	scrollToTop()
+	await loadPlay()
+	await loadOnline()
+}
+
+async function onSwitchEpisode(newBvid: string, newCid: number) {
+	if (newBvid.length == 0 || newCid <= 0) {
+		return
+	}
+	bvid.value = newBvid
+	cid.value = newCid
+	scrollToTop()
+	await loadAll()
+}
+
+function onOpenRelated(targetBvid: string, targetCid: number) {
+	let url = '/pages/video/video?bvid=' + targetBvid
+	if (targetCid > 0) {
+		url = url + '&cid=' + targetCid.toString()
+	}
+	uni.navigateTo({ url: url })
+}
+
+function onTabIntro() {
+	tab.value = 'intro'
+}
+
+function onTabReply() {
+	// 评论面板紧贴在 Tab 下方（面板高度按视口剩余空间定尺），切 Tab 后无需再滚外层：
+	// 实测 scroll-into-view 在本页（播放区在滚动容器外 + 面板定尺）不产生位移，故不引入该机制。
+	replyOpened.value = true
+	tab.value = 'reply'
+}
+
+// ---------------------------------------------------------------- 评论：事件接线
+
+function onReqCode(code: number) {
+	replyClosed.value = code == REPLY_CLOSED_CODE
+}
+
+function onEmoteState(open: boolean) {
+	emoteOpen.value = open
+}
+
+/** 时间戳点击：本阶段播放控制层还没接入 seek，明确提示而不是假装跳转 */
+function onSeekText(text: string, seconds: number) {
+	uni.showToast({ title: '跳到 ' + text + '：播放进度跳转随全屏控制层接入', icon: 'none' })
+}
+
+function onOpenUser(mid: string) {
+	if (mid.length == 0) {
+		return
+	}
+	uni.navigateTo({
+		url: '/pages/member/member?mid=' + mid
+	})
+}
+
+/** 评论正文 link 切片（链接 / BV 号 / 话题）：统一走 utils/link.uts 的真实落点 */
+function onOpenLink(text: string) {
+	openRichLink(text)
+}
+
+/** 一级列表里点「共 N 条回复」/ 二级预览：打开楼中楼面板 */
+function onOpenReply(root: ReplyItem) {
+	sheetRoot.value = root
+	sheetList.value = []
+	sheetReplyTarget.value = null
+	sheetReplyName.value = ''
+	sheetError.value = ''
+	sheetState.value = 'loading'
+	sheetPage.value = 0
+	sheetNoMore.value = false
+	sheetExpanded.value = false
+	sheetVisible.value = true
+	loadSheetPage(1)
+}
+
+function closeSheet() {
+	sheetVisible.value = false
+	sheetRoot.value = null
+	sheetList.value = []
+	sheetReplyTarget.value = null
+	sheetReplyName.value = ''
+}
+
+function toggleSheetHeight() {
+	sheetExpanded.value = !sheetExpanded.value
+}
+
+async function loadSheetPage(pn: number) {
+	if (sheetLoading.value) {
+		return
+	}
+	const root = sheetRoot.value
+	if (root == null || aid.value <= 0) {
+		return
+	}
+	sheetLoading.value = true
+	if (pn == 1) {
+		sheetState.value = 'loading'
+		sheetError.value = ''
+	}
+	const res = await fetchReplyReplyList(aid.value, root.rpid, pn)
+	sheetLoading.value = false
+	if (!res.status || res.data == null) {
+		if (pn == 1) {
+			sheetState.value = 'error'
+			sheetError.value = res.message.length > 0 ? res.message : '请求异常'
+		} else {
+			uni.showToast({ title: res.message.length > 0 ? res.message : '请求异常', icon: 'none' })
+		}
+		return
+	}
+	const data = res.data
+	const next: Array<ReplyItem> = pn == 1 ? [] : sheetList.value.slice()
+	for (let i = 0; i < data.replies.length; i++) {
+		next.push(data.replies[i])
+	}
+	sheetList.value = next
+	sheetPage.value = pn
+	// 楼中楼同样按「首屏不足 18 条即没有更多」处理
+	sheetNoMore.value = data.replies.length < 18
+	sheetState.value = 'ready'
+}
+
+function onSheetLoadMore() {
+	if (sheetState.value != 'ready' || sheetNoMore.value || sheetLoading.value) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastSheetLoadAt < 200) {
+		return
+	}
+	lastSheetLoadAt = now
+	loadSheetPage(sheetPage.value + 1)
+}
+
+function reloadSheet() {
+	loadSheetPage(1)
+}
+
+function onReplyFromSheet(item: ReplyItem) {
+	sheetReplyTarget.value = item
+	sheetReplyName.value = item.member.uname
+}
+
+function onCancelSheetReply() {
+	sheetReplyTarget.value = null
+	sheetReplyName.value = ''
+}
+
+/** 楼中楼里发评论成功：面板内前插 + 首楼回复数 +1（一级列表的预览随之更新） */
+function onSheetSent(item: ReplyItem) {
+	const next: Array<ReplyItem> = [item]
+	for (let i = 0; i < sheetList.value.length; i++) {
+		next.push(sheetList.value[i])
+	}
+	sheetList.value = next
+	sheetState.value = 'ready'
+	const root = sheetRoot.value
+	if (root != null) {
+		root.count = root.count + 1
+		root.replies.push(item)
+	}
+	sheetReplyTarget.value = null
+	sheetReplyName.value = ''
+}
+
+/** 一级列表里点「回复」：把输入条切到回复该用户（root/parent 按层级取，源同款规则） */
+function onReplyFromItem(item: ReplyItem) {
+	mainRoot.value = item.root == '0' ? item.rpid : item.root
+	mainParent.value = item.rpid
+	replyTargetName.value = item.member.uname
+}
+
+function onCancelReplyTarget() {
+	mainRoot.value = ''
+	mainParent.value = ''
+	replyTargetName.value = ''
+}
+
+/** 一级评论发送成功：列表前插 + Tab 数量 +1 + 复位回复目标 */
+function onSentComment(item: ReplyItem) {
+	insertItem.value = item
+	insertSeq.value = insertSeq.value + 1
+	extraReplyCount.value = extraReplyCount.value + 1
+	mainRoot.value = ''
+	mainParent.value = ''
+	replyTargetName.value = ''
+}
+
+// ---------------------------------------------------------------- 其它
+
+function showLoginGuide() {
+	uni.showModal({
+		title: '未登录',
+		content: '该操作需要登录，是否前往登录？',
+		confirmText: '去登录',
+		cancelText: '取消',
+		success: (res) => {
+			if (res.confirm == true) {
+				navigateTo(RT.login)
+			}
+		}
+	})
+}
+
+async function onToggleFollow() {
+	if (!userState.isLogin) {
+		showLoginGuide()
+		return
+	}
+	const d = detail.value
+	if (d == null || d.owner.mid <= 0) {
+		return
+	}
+	const act = following.value ? 2 : 1
+	const res = await followMod(d.owner.mid, act)
+	if (res.status) {
+		following.value = !following.value
+		uni.showToast({ title: following.value ? '关注成功' : '已取消关注', icon: 'none' })
+	} else {
+		uni.showToast({ title: res.message, icon: 'none' })
+	}
+}
+
+function onBack() {
+	const stack = getCurrentPages()
+	if (stack.length > 1) {
+		navigateBack(1)
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+// ---------------------------------------------------------------- 弹幕层与全屏接线
+
+/** 读取弹幕配置：开关 + 渲染 6 键（设置页可改，进出页面各读一次保证改动即时生效） */
+function loadDanmakuConfig() {
+	dmEnabled.value = getBool(SK.enableShowDanmaku, false)
+	dmShowArea.value = getDanmakuShowArea()
+	dmOpacity.value = getDanmakuOpacity()
+	dmFontScale.value = getDanmakuFontScale()
+	dmDuration.value = getDanmakuDuration()
+	dmStrokeWidth.value = getDanmakuStrokeWidth()
+	dmBlockTypes.value = getDanmakuBlockType()
+}
+
+/** 播放心跳：进度毫秒向上到页面，再喂给弹幕层（弹幕层据此决定该上屏哪几条） */
+function onStageProgress(ms: number) {
+	progressMs.value = ms
+}
+
+/** 自动全屏（SK.enableAutoEnter）：首次起播后进入全屏一次，避免回到详情页续播时反复弹全屏 */
+let autoEnterHandled = false
+
+function onStagePlaying(playing: boolean) {
+	stagePlaying.value = playing
+	if (playing && !autoEnterHandled && !fullscreenLaunched && getBool(SK.enableAutoEnter, false)) {
+		autoEnterHandled = true
+		console.log('[video] auto enter fullscreen (SK.enableAutoEnter)')
+		onEnterFullscreen()
+	}
+}
+
+/** 弹幕开关（Tab 栏唯一入口）：切真值 + 写回设置键（弹幕层 watch enabled 即时启停，不清已拉取的数据） */
+function onToggleDanmaku() {
+	dmEnabled.value = !dmEnabled.value
+	setBool(SK.enableShowDanmaku, dmEnabled.value)
+	uni.showToast({ title: dmEnabled.value ? '弹幕已开启' : '弹幕已关闭', icon: 'none' })
+}
+
+// ---------------------------------------------------------------- 发弹幕
+
+/** 打开底部弹层（未登录也允许打开：发送时由接口给出明确失败原因，不做「看着能点其实没入口」的假交互） */
+function openDanmakuSheet() {
+	if (state.value != 'ready') {
+		return
+	}
+	dmText.value = ''
+	dmSheetVisible.value = true
+}
+
+function closeDanmakuSheet() {
+	dmSheetVisible.value = false
+	kbHeight.value = 0
+	uni.hideKeyboard()
+}
+
+function onDmInput(event: UniInputEvent) {
+	dmText.value = event.detail.value
+}
+
+/**
+ * 发送弹幕：progress = 当前播放毫秒、mode=1（滚动）、color=16777215（白）、fontsize=25、pool=0。
+ * 成功 → toast「弹幕已发送」+ 本地即时上屏（useDanmaku 的 pendingLocal 队列，渲染层下次心跳必取）；
+ * 失败 → 原样 toast 接口给的「code: message」，不静默、不假成功。
+ */
+async function onSendDanmaku() {
+	const text = dmText.value.trim()
+	if (text.length == 0) {
+		uni.showToast({ title: '弹幕内容不能为空', icon: 'none' })
+		return
+	}
+	if (dmSending.value) {
+		return
+	}
+	if (cid.value <= 0 || bvid.value.length == 0) {
+		uni.showToast({ title: '稿件信息未就绪，请稍后重试', icon: 'none' })
+		return
+	}
+	dmSending.value = true
+	const res = await sendDanmaku(cid.value, bvid.value, text, progressMs.value, 1, 16777215, 25, 0)
+	dmSending.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	const item = res.item
+	if (item != null) {
+		useDanmaku().pushLocal(cid.value, item)
+	}
+	closeDanmakuSheet()
+	uni.showToast({ title: dmEnabled.value ? '弹幕已发送' : '弹幕已发送（弹幕开关已关，开启后可见）', icon: 'none' })
+}
+
+/** UP 行点击进用户主页，与评论区的头像点击同一出口（源头 video_card_h.dart:75 同口径） */
+function onOpenOwner() {
+	onOpenUser(ownerMid.value)
+}
+
+/** 查询串取值：统一编码（项目内跳转约定：发起方编码，接收方解码，见 placeholder 页） */
+function q(value: string): string {
+	return encodeURIComponent(value)
+}
+
+/** 全屏期间本页播放器已释放的地址（返回时按它重建播放） */
+let fullscreenSrc = ''
+/** 进全屏时的进度（秒）：全屏页没回传位置时用它兜底续播 */
+let fullscreenEnterSec = 0
+
+/**
+ * 进全屏前释放本页播放器：pause + 清空 src。
+ *
+ * 同一个 durl 被两个播放器实例同时占用时，后起播的实例会被 CDN 判 403
+ * （真机实测：详情页单独播正常、全屏页复用同一地址报 Response code: 403）。
+ * 全屏页因此按 bvid/cid 现取新地址，本页把旧实例彻底放开（只 pause 不释放，连接仍占着）。
+ */
+function releaseStageForFullscreen(sec: number) {
+	fullscreenSrc = playSrc.value
+	fullscreenEnterSec = sec
+	try {
+		const ctx = uni.createVideoContext('vd-video')
+		if (ctx != null) {
+			ctx.pause()
+		}
+	} catch (e) {
+		console.log('[video] pause before fullscreen failed')
+	}
+	// 清空 src：player-stage 的 props.src 监听会把内部 src 置空，底层播放器随之释放
+	playSrc.value = ''
+	stagePlaying.value = false
+	console.log('[video] release stage for fullscreen srcLen=' + fullscreenSrc.length.toString())
+}
+
+/**
+ * 从全屏返回：重设 src + 按回传位置续播。
+ * seek 交给 player-stage——它在新 src 的元数据就绪后才 seek（此刻直接 seek 会被忽略）。
+ */
+function restoreStageAfterFullscreen(sec: number) {
+	if (fullscreenSrc.length == 0) {
+		return
+	}
+	const url = fullscreenSrc
+	fullscreenSrc = ''
+	if (playSrc.value.length == 0) {
+		startSec.value = sec
+		playSrc.value = url
+		console.log('[video] restore stage at=' + sec.toString())
+		return
+	}
+	// src 没被清掉（异常路径）：直接按位置续播
+	applyResumePosition(sec)
+}
+
+/**
+ * 全屏入口：带当前进度跳 `pages/video/fullscreen`，参数名与全屏页契约一致
+ * （bvid / cid / src / cover / title / startTime / danmakuCid）。
+ * src 作为全屏页取流失败时的兜底（全屏页正常会自取新地址，不复用这一份）；
+ * 跳转前释放本页播放器，避免双实例占用同一 URL。
+ */
+function onEnterFullscreen() {
+	if (playSrc.value.length == 0) {
+		uni.showToast({ title: '播放地址未就绪，暂不能全屏', icon: 'none' })
+		return
+	}
+	const startSecOut = progressMs.value > 0 ? Math.floor(progressMs.value / 1000) : 0
+	let url = '/pages/video/fullscreen?bvid=' + bvid.value +
+		'&cid=' + cid.value.toString() +
+		'&src=' + q(playSrc.value) +
+		'&startTime=' + startSecOut.toString() +
+		'&danmakuCid=' + cid.value.toString()
+	if (cover.value.length > 0) {
+		url = url + '&cover=' + q(cover.value)
+	}
+	if (title.value.length > 0) {
+		url = url + '&title=' + q(title.value)
+	}
+	fullscreenLaunched = true
+	console.log('[video] enter fullscreen start=' + startSecOut.toString() + ' srcLen=' + playSrc.value.length.toString())
+	releaseStageForFullscreen(startSecOut)
+	uni.navigateTo({
+		url: url,
+		fail: (err) => {
+			// 跳转失败：本页播放器已被释放，必须当场重建，否则停在黑屏且无法自愈
+			console.log('[video] enter fullscreen failed: ' + err.errMsg)
+			fullscreenLaunched = false
+			restoreStageAfterFullscreen(startSecOut)
+		}
+	})
+}
+
+/**
+ * 按秒数续播：video 组件 id「vd-video」在 player-stage 内且全页唯一，
+ * 页面侧用 createVideoContext 即可（口径同 onHide 的暂停）。
+ */
+function applyResumePosition(sec: number) {
+	try {
+		const ctx = uni.createVideoContext('vd-video')
+		if (ctx != null) {
+			ctx.seek(sec)
+			ctx.play()
+		}
+	} catch (e) {
+		console.log('[video] resume after fullscreen failed')
+	}
+}
+
+/**
+ * 全屏页返回时回传播放位置（`uni.$emit('player:fullscreen-exit', { position })`）。
+ * 只在「本页发起过全屏」时消费——多级详情页堆叠时，下层页面不得跟着 seek/续播。
+ *
+ * 注意：事件在全屏页 navigateBack 之前同步发出，此刻本页仍是隐藏态。因此这里只登记位置，
+ * 真正的 seek/续播放到 onShow（页面已可见、返回动画已结束）——避免与全屏页的退出时序抢跑。
+ */
+function onFullscreenExit(payload: any) {
+	if (!fullscreenLaunched) {
+		return
+	}
+	if (payload == null) {
+		return
+	}
+	const obj = payload as UTSJSONObject
+	const value = obj.getNumber('position')
+	if (value == null) {
+		return
+	}
+	const position = value as number
+	if (position < 0) {
+		return
+	}
+	console.log('[video] fullscreen exit position=' + position.toString())
+	pendingResumeSec.value = position
+}
+
+// 浮层返回接管：发弹幕弹层 → 二级面板 → 表情弹层 → 默认返回。写在页面级钩子（组件内写不生效）
+onBackPress(() => {
+	if (dmSheetVisible.value) {
+		closeDanmakuSheet()
+		return true
+	}
+	if (sheetVisible.value) {
+		closeSheet()
+		return true
+	}
+	if (emoteOpen.value) {
+		emoteCloseSeq.value = emoteCloseSeq.value + 1
+		emoteOpen.value = false
+		return true
+	}
+	return false
+})
+
+onLoad((options) => {
+	const rawBvid = options != null ? options['bvid'] : null
+	if (rawBvid == null || (rawBvid as string).length == 0) {
+		state.value = 'error'
+		errorText.value = '缺少视频参数（bvid），请从列表页进入'
+		return
+	}
+	bvid.value = rawBvid as string
+	const rawCid = options != null ? options['cid'] : null
+	if (rawCid != null) {
+		const parsed = parseInt(rawCid as string)
+		cid.value = isNaN(parsed) ? 0 : parsed
+	}
+	// 深链：?tab=reply 直接定位评论 Tab（与手点 Tab 等价，供外部跳转/无点击环境使用）
+	const rawTab = options != null ? options['tab'] : null
+	if (rawTab != null && (rawTab as string) == 'reply') {
+		replyOpened.value = true
+		tab.value = 'reply'
+	}
+	autoPlay.value = getBool(SK.autoPlayEnable, true)
+	loadDanmakuConfig()
+	// 软键盘高度：发弹幕弹层据此上移（输入框关了 adjust-position，页面不整体被顶起）
+	try {
+		kbListenerId = uni.onKeyboardHeightChange((res) => {
+			kbHeight.value = res.height
+		})
+	} catch (e) {
+		kbHeight.value = 0
+		console.log('[video] keyboard height listener unavailable')
+	}
+	// 全屏页返回时会回传播放位置；只注册一次，onUnload 摘除
+	uni.$on('player:fullscreen-exit', onFullscreenExit)
+	loadAll()
+})
+
+onShow(() => {
+	// 设置页可能改过弹幕配置：每次回到本页重读（含从全屏页返回）
+	loadDanmakuConfig()
+	// 全屏回传的续播位置：在这里再应用一次（事件到达时页面还在隐藏态）
+	if (pendingResumeSec.value >= 0) {
+		const sec = pendingResumeSec.value
+		pendingResumeSec.value = -1
+		fullscreenLaunched = false
+		console.log('[video] resume from fullscreen at=' + sec.toString())
+		restoreStageAfterFullscreen(sec)
+	} else if (fullscreenSrc.length > 0 && playSrc.value.length == 0) {
+		// 全屏页被直接销毁等原因没回传位置：仍要把释放掉的 src 挂回去，不能停在黑屏
+		console.log('[video] fullscreen exit without position, restore at=' + fullscreenEnterSec.toString())
+		restoreStageAfterFullscreen(fullscreenEnterSec)
+	}
+	if (state.value == 'ready') {
+		loadOnline()
+		startOnlineTimer()
+	}
+})
+
+onHide(() => {
+	stopOnlineTimer()
+	// 离开页面暂停播放（返回续播属下一阶段：需配合本地上报进度）
+	try {
+		const ctx = uni.createVideoContext('vd-video')
+		if (ctx != null) {
+			ctx.pause()
+		}
+	} catch (e) {
+		console.log('[video] pause on hide failed')
+	}
+})
+
+onUnload(() => {
+	stopOnlineTimer()
+	uni.$off('player:fullscreen-exit', onFullscreenExit)
+	if (kbListenerId >= 0) {
+		uni.offKeyboardHeightChange(kbListenerId)
+		kbListenerId = -1
+	}
+})
+</script>
+
+<style>
+	.vd {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	/* 状态栏占位块：只承载高度与底色，不参与播放器布局计算 */
+	.vd-statusbar {
+		width: 100%;
+	}
+	.vd-stage {
+		width: 100%;
+		background-color: #000000;
+		/* 定位上下文：弹幕层（position:absolute）以播放区为参照铺满 */
+		position: relative;
+	}
+	.vd-dm {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		/* 高度由 dmLayerStyle 给出（= 播放区高 - 控制条高），left/top/right + height 构成确定盒子 */
+	}
+	.vd-play-error {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 6px;
+		padding-bottom: 6px;
+		background-color: #FFF4F4;
+	}
+	.vd-play-error-text {
+		flex: 1;
+		font-size: 12px;
+		color: #C0392B;
+	}
+	.vd-play-error-retry {
+		font-size: 12px;
+		margin-left: 8px;
+	}
+	.vd-loading {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 16px;
+	}
+	.vd-sk-row {
+		display: flex;
+		flex-direction: column;
+		margin-bottom: 14px;
+	}
+	.vd-sk-gap {
+		height: 8px;
+	}
+	.vd-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.vd-scroll {
+		flex: 1;
+	}
+	/* 简介 Tab 主体：底部留白由 bodyStyle 给（含安全区），此处不再固定 padding */
+	.vd-body {
+		display: flex;
+		flex-direction: column;
+	}
+	/* Tab 栏之下：简介滚动区与评论面板共用剩余高度（同一时刻只显示其一） */
+	.vd-main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.vd-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/*
+		Tab 栏：固定高 45（源 tabbarBuild 的 height: 45），紧贴播放区下沿（无 margin/padding 上边距）。
+		底部 1px 分割线由 tabsStyle 给颜色（border-box：45 含这 1px，与源 Container(height:45 + Border.bottom) 一致）。
+	*/
+	.vd-tabs {
+		height: 45px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		border-bottom-width: 1px;
+		border-bottom-style: solid;
+	}
+	/* 左半区：两个等分 Tab（源 Expanded + TabBar(isScrollable=false)，各占左半区一半） */
+	.vd-tabs-left {
+		height: 45px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.vd-tab {
+		flex: 1;
+		height: 45px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	/*
+		内层容器宽度被文字撑开，选中下划线用它的 border-bottom 画 —— 边框自动与文字等宽。
+		padding 上下 13.5/10.5 + 行高 18 + 边框 3 = 45：文字落在栏的中线（源 TabBar 垂直居中），
+		下划线贴住栏底（1:1 基线实测：文字 1003-1042、下划线 1090-1099，栏底 1099）。
+	*/
+	.vd-tab-inner {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-top: 13.5px;
+		padding-bottom: 10.5px;
+		border-bottom-width: 3px;
+		border-bottom-style: solid;
+	}
+	.vd-tab-text {
+		font-size: 13px;
+		line-height: 18px;
+	}
+	/*
+		右半区：与左半区**等分**（源 Expanded(flex:1) + Flexible(flex:1)，两半各占栏宽一半），
+		内容右对齐「发弹幕」+「弹幕开关」，右侧留白 18（源 SizedBox(width: 18)）。
+		不写 flex:1 会让右半区只占内容宽，左半区变宽 → Tab 中心随之右移（1:1 实测差异点）。
+	*/
+	.vd-tabs-right {
+		height: 45px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+		padding-right: 18px;
+	}
+	/* 发弹幕：源 TextButton 高 32 / 最小宽 64、文字 12；视觉不变，触控高度补到 44（栏目高 45 内） */
+	.vd-dm-send {
+		width: 64px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.vd-dm-send-text {
+		font-size: 12px;
+	}
+	/* 弹幕开关：源 SizedBox(38×38)，宽度按基线 38、触控高度补到 44 */
+	.vd-dm-switch {
+		width: 38px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.vd-dm-switch-glyph {
+		font-size: 17px;
+	}
+	.vd-reply-closed {
+		display: flex;
+		flex-direction: row;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-bottom: 6px;
+	}
+	.vd-reply-closed-text {
+		font-size: 12px;
+	}
+	/* 评论面板：占满 Tab 栏以下的剩余高度（flex:1 由 .vd-content 约束，不再按视口算死高度） */
+	.vd-reply-pane {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* ---- 发弹幕底部弹层 ---- */
+	.vd-dm-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+	}
+	/* 遮罩单独一层承接「点外部关闭」：弹层本体不参与冒泡，避免点输入框把弹层关掉 */
+	.vd-dm-mask-bg {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+	}
+	.vd-dm-sheet {
+		display: flex;
+		flex-direction: column;
+		border-top-left-radius: 14px;
+		border-top-right-radius: 14px;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 10px;
+	}
+	.vd-dm-sheet-head {
+		height: 30px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.vd-dm-sheet-title {
+		font-size: 14px;
+		font-weight: 500;
+	}
+	.vd-dm-sheet-tip {
+		flex: 1;
+		font-size: 11px;
+		margin-left: 8px;
+	}
+	.vd-dm-sheet-close {
+		height: 30px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+	}
+	.vd-dm-sheet-close-text {
+		font-size: 13px;
+	}
+	.vd-dm-sheet-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-top: 8px;
+		padding-bottom: 6px;
+	}
+	.vd-dm-input {
+		flex: 1;
+		height: 38px;
+		border-radius: 19px;
+		padding-left: 14px;
+		padding-right: 14px;
+		font-size: 13px;
+	}
+	.vd-dm-placeholder {
+		font-size: 13px;
+		color: #8A94A6;
+	}
+	.vd-dm-submit {
+		width: 64px;
+		height: 36px;
+		border-radius: 18px;
+		margin-left: 10px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.vd-dm-submit-text {
+		font-size: 13px;
+	}
+	.vd-input-bar {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+	}
+	.vd-sheet-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+	}
+	.vd-sheet {
+		display: flex;
+		flex-direction: column;
+		border-top-left-radius: 14px;
+		border-top-right-radius: 14px;
+		overflow: hidden;
+	}
+	.vd-sheet-head {
+		display: flex;
+		flex-direction: column;
+	}
+	.vd-sheet-grip {
+		height: 20px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.vd-sheet-grip-bar {
+		width: 34px;
+		height: 3px;
+		border-radius: 2px;
+	}
+	.vd-sheet-title-row {
+		height: 34px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 14px;
+		padding-right: 10px;
+	}
+	.vd-sheet-title {
+		font-size: 14px;
+		font-weight: 500;
+	}
+	.vd-sheet-tip {
+		flex: 1;
+		font-size: 11px;
+		margin-left: 8px;
+	}
+	.vd-sheet-close {
+		height: 30px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+	}
+	.vd-sheet-close-text {
+		font-size: 13px;
+	}
+	.vd-sheet-scroll {
+		flex: 1;
+	}
+	.vd-sheet-sep {
+		height: 6px;
+	}
+	.vd-sheet-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.vd-sheet-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-top: 30px;
+		padding-bottom: 30px;
+	}
+	.vd-sheet-state-text {
+		font-size: 12px;
+	}
+	.vd-sheet-state-retry {
+		font-size: 12px;
+		margin-top: 6px;
+	}
+	.vd-sheet-footer {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.vd-sheet-footer-text {
+		font-size: 12px;
+	}
+	.vd-sheet-input {
+		display: flex;
+		flex-direction: column;
+	}
+</style>

@@ -1,0 +1,59 @@
+<template>
+	<view class="sni">
+		<text class="sni-title" :style="titleStyle" :max-lines="2">{{ title }}</text>
+		<text class="sni-time" :style="secondaryStyle">{{ timeText }}</text>
+		<text v-if="contentText.length > 0" class="sni-content" :style="bodyStyle">{{ contentText }}</text>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { SystemNoticeItem } from '../../models/message.uts'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 系统通知条目（源头：`lib/pages/message/system/view.dart` SystemItem）。
+ *
+ * 源结构：标题 16 粗体 → 时间（outline 色）→ 正文（content 为 String 直显 / 对象取 web 字段）。
+ * 正文由模型层归并为 contentText（models/message.uts#SystemNoticeItem.from），组件只做纯文本渲染。
+ * 内边距源为 fromLTRB(14,14,14,12)，本组件不含分割线（页面按 indent 14/14 渲染）。
+ */
+const props = defineProps({
+	item: { type: Object, default: null }
+})
+
+const notice = computed((): SystemNoticeItem => props.item as SystemNoticeItem)
+const title = computed((): string => notice.value.title)
+const timeText = computed((): string => notice.value.timeAt)
+const contentText = computed((): string => notice.value.contentText)
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const bodyStyle = computed((): string => 'color:' + textPrimary() + ';')
+</script>
+
+<style>
+	.sni {
+		display: flex;
+		flex-direction: column;
+		padding-top: 14px;
+		padding-left: 14px;
+		padding-right: 14px;
+		padding-bottom: 12px;
+	}
+	.sni-title {
+		font-size: 16px;
+		line-height: 22px;
+		font-weight: bold;
+	}
+	/* 时间与正文：源 Text 均无字号覆盖 → bodyMedium 14sp / line-height 20（基线实测正文行距 20dp） */
+	.sni-time {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 4px;
+	}
+	.sni-content {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 6px;
+	}
+</style>

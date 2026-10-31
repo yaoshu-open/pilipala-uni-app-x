@@ -1,0 +1,308 @@
+<template>
+	<view class="ply" :style="pageStyle">
+		<app-navbar title="播放设置"></app-navbar>
+
+		<scroll-view class="ply-scroll" direction="vertical">
+			<view class="ply-list">
+				<setting-cell title="倍速设置" sub-title="设置视频播放速度" mode="arrow" @tap="goSpeed"></setting-cell>
+				<setting-cell title="手势设置" sub-title="设置播放器手势" mode="arrow" @tap="goGesture"></setting-cell>
+
+				<setting-cell title="开启1080P" sub-title="免登录查看1080P视频" mode="switch" :on="p1080On" :switch-key="SK.p1080" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="CDN优化" sub-title="使用优质CDN线路" mode="switch" :on="cdnOn" :switch-key="SK.enableCDN" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="自动播放" sub-title="进入详情页自动播放" mode="switch" :on="autoPlay" :switch-key="SK.autoPlayEnable" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="后台播放" sub-title="进入后台时继续播放" mode="switch" :on="bgPlay" :switch-key="SK.enableBackgroundPlay" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="自动PiP播放" sub-title="进入后台时画中画播放" mode="switch" :on="autoPiPOn" :switch-key="SK.autoPiP" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="自动全屏" sub-title="视频开始播放时进入全屏" mode="switch" :on="autoEnter" :switch-key="SK.enableAutoEnter" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="自动退出" sub-title="视频结束播放时退出全屏" mode="switch" :on="autoExit" :switch-key="SK.enableAutoExit" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="开启硬解" sub-title="以较低功耗播放视频" mode="switch" :on="hardAcc" :switch-key="SK.enableHA" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="观看人数" sub-title="展示同时在看人数" mode="switch" :on="onlineTotal" :switch-key="SK.enableOnlineTotal" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="亮度记忆" sub-title="返回时自动调整视频亮度" mode="switch" :on="autoBright" :switch-key="SK.enableAutoBrightness" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="弹幕开关" sub-title="展示弹幕" mode="switch" :on="showDm" :switch-key="SK.enableShowDanmaku" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="控制栏动画" sub-title="播放器控制栏显示动画效果" mode="switch" :on="ctrlAnim" :switch-key="SK.enablePlayerControlAnimation" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="港澳台模式" sub-title="依赖第三方中转，连不上时接口报错属正常" mode="switch" :on="gatMode" :switch-key="SK.enableGATMode" @toggle="onSwitch"></setting-cell>
+
+				<setting-cell title="默认视频画质" :sub-title="'当前默认画质' + videoQaLabel" mode="value" :value="videoQaLabel" @tap="openVideoQa"></setting-cell>
+				<setting-cell title="默认直播画质" :sub-title="'当前默认画质' + liveQaLabel" mode="value" :value="liveQaLabel" @tap="openLiveQa"></setting-cell>
+				<setting-cell title="默认音质" :sub-title="'当前音质' + audioQaLabel" mode="value" :value="audioQaLabel" @tap="openAudioQa"></setting-cell>
+				<setting-cell title="默认解码格式" :sub-title="'当前解码格式' + decodeLabel" mode="value" :value="decodeLabel" @tap="openDecode"></setting-cell>
+				<setting-cell title="音频输出方式" :sub-title="'当前输出方式 ' + aoOutputLabel" mode="value" :value="aoOutputLabel" @tap="openAoOutput"></setting-cell>
+				<setting-cell title="默认全屏方式" :sub-title="'当前全屏方式：' + fullScreenLabel" mode="value" :value="fullScreenLabel" @tap="openFullScreen"></setting-cell>
+				<setting-cell title="底部进度条展示" :sub-title="'当前展示方式：' + btmProgressLabel" mode="value" :value="btmProgressLabel" @tap="openBtmProgress"></setting-cell>
+			</view>
+			<view class="ply-foot" :style="footStyle"></view>
+		</scroll-view>
+
+		<setting-select-sheet
+			:visible="sheetVisible"
+			:title="sheetTitle"
+			:options="sheetOptions"
+			@select="onSheetSelect"
+			@close="closeSheet"
+		></setting-select-sheet>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import SettingCell from '../../components/setting/setting-cell.uvue'
+import SettingSelectSheet, { SelectOption } from '../../components/setting/setting-select-sheet.uvue'
+import { pageBackground } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { SK, getBool, getNumber, getString, setBool, setNumber, setString } from '../../utils/storage.uts'
+
+/**
+ * 播放设置（源头：lib/pages/setting/play_setting.dart，逐项对齐）。
+ *
+ * 选项枚举值与源 models/video/play/quality.dart、models/live/quality.dart、
+ * pl_player/models/{fullscreen_mode,bottom_progress_behavior}.dart 一致（code 同值）。
+ *
+ * 已消费键：SK.p1080（api/play.uts try_look）、SK.enableShowDanmaku / SK.autoPlayEnable
+ * （pages/video/video.uvue）、SK.defaultLiveQa（api/live.uts，字符串存储——源 LiveQa
+ * 同为字符串枚举名，本端直接存 code 数字字符串，live.uts defaultLiveQn 已按数字解析）。
+ * 未消费键（defaultVideoQa/defaultAudioQa/defaultDecode/defaultAoOutput/fullScreenMode/
+ * btmProgressBehavior/enableCDN/enableBackgroundPlay/autoPiP/enableHA/…）：开关可写、
+ * 行为随 P4 播放器后续迭代接线（报告登记）。
+ *
+ * 画质选项照源全量列出（源 values.reversed = 高→低）；当前取流链（durl 兜底口径 qn=80）
+ * 实际可达 360P~1080P——超出部分照列可选中，选后取流按服务端 accept_quality 就近回档，
+ * 不在 UI 上禁选（与源一致，报告写明处置）。
+ */
+
+/** 视频画质枚举（源 VideoQuality：code/desc 一致，展示序=源 reversed 高→低） */
+const VIDEO_QA_CODES: number[] = [127, 126, 125, 120, 116, 112, 80, 74, 64, 32, 16, 6]
+const VIDEO_QA_DESCS: string[] = ['8K 超高清', '杜比视界', 'HDR 真彩色', '4K 超清', '1080P60 高帧率', '1080P+ 高码率', '1080P 高清', '720P60 高帧率', '720P 高清', '480P 清晰', '360P 流畅', '240P 极速']
+/** 直播画质（源 LiveQuality reversed） */
+const LIVE_QA_CODES: number[] = [30000, 20000, 10000, 400, 250, 150, 80]
+const LIVE_QA_DESCS: string[] = ['杜比', '4K', '原画', '蓝光', '超清', '高清', '流畅']
+/** 音质（源 AudioQuality reversed） */
+const AUDIO_QA_CODES: number[] = [30251, 30250, 30280, 30232, 30216]
+const AUDIO_QA_DESCS: string[] = ['Hi-Res无损', '杜比全景声', '192K', '132K', '64K']
+/** 解码格式（源 VideoDecodeFormats code） */
+const DECODE_CODES: string[] = ['dvh1', 'av01', 'hev1', 'avc1']
+const DECODE_DESCS: string[] = ['DVH1', 'AV1', 'HEVC', 'AVC']
+/** 音频输出（源 aoOutputList：title 为技术名，展示取 title） */
+const AO_CODES: string[] = ['0', '1', '2', '3']
+const AO_DESCS: string[] = ['audiotrack,opensles', 'opensles,audiotrack', 'audiotrack', 'opensles']
+/** 全屏方式（源 FullScreenMode：0 自适应 / 1 始终竖屏 / 2 始终横屏） */
+const FS_CODES: number[] = [0, 1, 2]
+const FS_DESCS: string[] = ['自适应', '始终竖屏', '始终横屏']
+/** 底部进度条（源 BtmProgresBehavior：0 始终展示 / 1 始终隐藏 / 2 仅全屏时展示 / 3 仅全屏时隐藏） */
+const BTM_CODES: number[] = [0, 1, 2, 3]
+const BTM_DESCS: string[] = ['始终展示', '始终隐藏', '仅全屏时展示', '仅全屏时隐藏']
+
+const p1080On = ref<boolean>(getBool(SK.p1080, true))
+const cdnOn = ref<boolean>(getBool(SK.enableCDN, true))
+const autoPlay = ref<boolean>(getBool(SK.autoPlayEnable, true))
+const bgPlay = ref<boolean>(getBool(SK.enableBackgroundPlay, false))
+const autoPiPOn = ref<boolean>(getBool(SK.autoPiP, false))
+const autoEnter = ref<boolean>(getBool(SK.enableAutoEnter, false))
+const autoExit = ref<boolean>(getBool(SK.enableAutoExit, false))
+const hardAcc = ref<boolean>(getBool(SK.enableHA, false))
+const onlineTotal = ref<boolean>(getBool(SK.enableOnlineTotal, false))
+const autoBright = ref<boolean>(getBool(SK.enableAutoBrightness, false))
+const showDm = ref<boolean>(getBool(SK.enableShowDanmaku, false))
+const ctrlAnim = ref<boolean>(getBool(SK.enablePlayerControlAnimation, true))
+const gatMode = ref<boolean>(getBool(SK.enableGATMode, false))
+
+const videoQa = ref<number>(getNumber(SK.defaultVideoQa, 116))
+const liveQa = ref<number>(getNumber(SK.defaultLiveQa, 10000))
+const audioQa = ref<number>(getNumber(SK.defaultAudioQa, 30264))
+const decode = ref<string>(getString(SK.defaultDecode, 'avc1'))
+const aoOutput = ref<string>(getString(SK.defaultAoOutput, '0'))
+const fullScreen = ref<number>(getNumber(SK.fullScreenMode, 0))
+const btmProgress = ref<number>(getNumber(SK.btmProgressBehavior, 0))
+
+const sheetVisible = ref<boolean>(false)
+const sheetTitle = ref<string>('')
+const sheetKind = ref<string>('')
+const sheetOptions = ref<Array<SelectOption>>([])
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+
+function labelOf(codes: number[], descs: string[], current: number): string {
+	for (let i = 0; i < codes.length; i++) {
+		if (codes[i] == current) {
+			return descs[i]
+		}
+	}
+	return descs[0]
+}
+
+const videoQaLabel = computed((): string => labelOf(VIDEO_QA_CODES, VIDEO_QA_DESCS, videoQa.value))
+const liveQaLabel = computed((): string => labelOf(LIVE_QA_CODES, LIVE_QA_DESCS, liveQa.value))
+const audioQaLabel = computed((): string => labelOf(AUDIO_QA_CODES, AUDIO_QA_DESCS, audioQa.value))
+const decodeLabel = computed((): string => {
+	for (let i = 0; i < DECODE_CODES.length; i++) {
+		if (DECODE_CODES[i] == decode.value) {
+			return DECODE_DESCS[i]
+		}
+	}
+	return decode.value.length > 0 ? decode.value : DECODE_DESCS[3]
+})
+const aoOutputLabel = computed((): string => {
+	for (let i = 0; i < AO_CODES.length; i++) {
+		if (AO_CODES[i] == aoOutput.value) {
+			return AO_DESCS[i]
+		}
+	}
+	return AO_DESCS[0]
+})
+const fullScreenLabel = computed((): string => labelOf(FS_CODES, FS_DESCS, fullScreen.value))
+const btmProgressLabel = computed((): string => labelOf(BTM_CODES, BTM_DESCS, btmProgress.value))
+
+function numOptions(codes: number[], descs: string[], current: number): Array<SelectOption> {
+	const list: Array<SelectOption> = []
+	for (let i = 0; i < codes.length; i++) {
+		list.push({ value: codes[i].toString(), label: descs[i], checked: current == codes[i] } as SelectOption)
+	}
+	return list
+}
+
+function strOptions(codes: string[], descs: string[], current: string): Array<SelectOption> {
+	const list: Array<SelectOption> = []
+	for (let i = 0; i < codes.length; i++) {
+		list.push({ value: codes[i], label: descs[i], checked: current == codes[i] } as SelectOption)
+	}
+	return list
+}
+
+function openSheet(kind: string, title: string, options: Array<SelectOption>) {
+	sheetKind.value = kind
+	sheetTitle.value = title
+	sheetOptions.value = options
+	sheetVisible.value = true
+}
+
+function openVideoQa() {
+	openSheet('videoQa', '默认视频画质', numOptions(VIDEO_QA_CODES, VIDEO_QA_DESCS, videoQa.value))
+}
+
+function openLiveQa() {
+	openSheet('liveQa', '默认直播画质', numOptions(LIVE_QA_CODES, LIVE_QA_DESCS, liveQa.value))
+}
+
+function openAudioQa() {
+	openSheet('audioQa', '默认音质', numOptions(AUDIO_QA_CODES, AUDIO_QA_DESCS, audioQa.value))
+}
+
+function openDecode() {
+	// 解码格式：与源 VideoDecodeFormats 枚举同集（DVH1/AV1/HEVC/AVC），默认 AVC（源 values.last）
+	openSheet('decode', '默认解码格式', strOptions(DECODE_CODES, DECODE_DESCS, decode.value))
+}
+
+function openAoOutput() {
+	openSheet('aoOutput', '音频输出方式', strOptions(AO_CODES, AO_DESCS, aoOutput.value))
+}
+
+function openFullScreen() {
+	openSheet('fullScreen', '默认全屏方式', numOptions(FS_CODES, FS_DESCS, fullScreen.value))
+}
+
+function openBtmProgress() {
+	openSheet('btmProgress', '底部进度条展示', numOptions(BTM_CODES, BTM_DESCS, btmProgress.value))
+}
+
+function closeSheet() {
+	sheetVisible.value = false
+}
+
+function onSheetSelect(value: string) {
+	if (sheetKind.value == 'videoQa') {
+		videoQa.value = parseInt(value)
+		setNumber(SK.defaultVideoQa, videoQa.value)
+	} else if (sheetKind.value == 'liveQa') {
+		liveQa.value = parseInt(value)
+		// live.uts defaultLiveQn 用 getNumber 读取，这里同写数值（两端同型）
+		setNumber(SK.defaultLiveQa, liveQa.value)
+	} else if (sheetKind.value == 'audioQa') {
+		audioQa.value = parseInt(value)
+		setNumber(SK.defaultAudioQa, audioQa.value)
+	} else if (sheetKind.value == 'decode') {
+		decode.value = value
+		setString(SK.defaultDecode, value)
+	} else if (sheetKind.value == 'aoOutput') {
+		aoOutput.value = value
+		setString(SK.defaultAoOutput, value)
+	} else if (sheetKind.value == 'fullScreen') {
+		fullScreen.value = parseInt(value)
+		setNumber(SK.fullScreenMode, fullScreen.value)
+	} else if (sheetKind.value == 'btmProgress') {
+		btmProgress.value = parseInt(value)
+		setNumber(SK.btmProgressBehavior, btmProgress.value)
+	}
+}
+
+/** 开关分发（setting-cell 回传 value + switchKey 两参） */
+function onSwitch(value: boolean, key: string) {
+	setBool(key, value)
+	if (key == SK.p1080) {
+		p1080On.value = value
+	} else if (key == SK.enableCDN) {
+		cdnOn.value = value
+	} else if (key == SK.autoPlayEnable) {
+		autoPlay.value = value
+	} else if (key == SK.enableBackgroundPlay) {
+		bgPlay.value = value
+	} else if (key == SK.autoPiP) {
+		autoPiPOn.value = value
+	} else if (key == SK.enableAutoEnter) {
+		autoEnter.value = value
+	} else if (key == SK.enableAutoExit) {
+		autoExit.value = value
+	} else if (key == SK.enableHA) {
+		hardAcc.value = value
+	} else if (key == SK.enableOnlineTotal) {
+		onlineTotal.value = value
+	} else if (key == SK.enableAutoBrightness) {
+		autoBright.value = value
+	} else if (key == SK.enableShowDanmaku) {
+		showDm.value = value
+	} else if (key == SK.enablePlayerControlAnimation) {
+		ctrlAnim.value = value
+	} else if (key == SK.enableGATMode) {
+		// 港澳台模式依赖源作者的第三方中转域名（bili.meark.me），本端未接入中转服务；
+		// 写入一个无消费方的键会变成"开了却什么都没变"的假开关，故不写键、如实提示并保持关闭。
+		gatMode.value = false
+		setBool(SK.enableGATMode, false)
+		uni.showToast({ title: '该功能依赖第三方中转服务，当前版本未接入', icon: 'none' })
+	}
+}
+
+function goSpeed() {
+	uni.navigateTo({ url: '/pages/setting/play-speed-set' })
+}
+
+function goGesture() {
+	uni.navigateTo({ url: '/pages/setting/play-gesture-set' })
+}
+
+onBackPress(() => {
+	if (sheetVisible.value) {
+		closeSheet()
+		return true
+	}
+	return false
+})
+</script>
+
+<style>
+	.ply {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.ply-scroll {
+		flex: 1;
+	}
+	.ply-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.ply-foot {
+		height: 1px;
+	}
+</style>

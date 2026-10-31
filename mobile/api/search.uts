@@ -1,0 +1,421 @@
+import { apiGet } from '../utils/request.uts'
+import { wbiGet } from '../utils/wbi.uts'
+import { Params } from '../utils/params.uts'
+import { SEARCH_BASE } from '../utils/constants.uts'
+import { isBlockedMid } from './video.uts'
+import { ListResult } from '../models/video.uts'
+import { arrOf, objOf } from '../utils/json.uts'
+import {
+	HotSearchItem,
+	SuggestItem,
+	SearchCounts,
+	SearchVideoItem,
+	SearchUserItem,
+	SearchLiveItem,
+	SearchMBangumiItem,
+	SearchArticleItem
+} from '../models/search.uts'
+
+/**
+ * 搜索域接口层（源头：lib/http/search.dart SearchHttp）。
+ *
+ * s.search 域响应形态：hotword/suggest 的响应体是 JSON 字符串而非对象——
+ * utils/request.uts#toJsonObject 已按内容形态先判再 parse（空串/非对象直接 null，
+ * P3 教训：App 端 JSON.parse('') 裸抛不被 try/catch 兜住），本层拿到 null 一律落
+ * 失败结果（失败不伪装成空列表），不再二次 parse。
+ *
+ * 风控口径：接口 code==-412 时文案统一「请求被风控，请稍后再试」（源 Request 层映射沿用）。
+ */
+
+/** 搜索风控码（源 Request 层 412 透传口径） */
+const CODE_RISK_CONTROL: number = -412
+
+function riskMessage(code: number, fallback: string): string {
+	if (code == CODE_RISK_CONTROL) {
+		return '请求被风控，请稍后再试'
+	}
+	return fallback
+}
+
+/** code != 0 时的统一失败出口（message 为空时给兜底文案） */
+function failed<T>(message: string): ListResult<T> {
+	const result = new ListResult<T>()
+	result.message = message.length == 0 ? '请求错误' : message
+	return result
+}
+
+// ---------------------------------------------------------------- 热搜 / 建议
+
+/** 热搜榜（源 hotSearchList：s.search/main/hotword，一次全量） */
+export async function fetchHotSearch(): Promise<ListResult<HotSearchItem>> {
+	const result = new ListResult<HotSearchItem>()
+	try {
+		const res = await apiGet(SEARCH_BASE + '/main/hotword')
+		if (res == null) {
+			return failed<HotSearchItem>('请求错误')
+		}
+		const code = res.getNumber('code')
+		if (code == null || code != 0) {
+			result.message = riskMessage(code == null ? -1 : code, strMessage(res))
+			return result
+		}
+		const list = arrOf(res, 'list')
+		for (let i = 0; i < list.length; i++) {
+			result.items.push(HotSearchItem.from(list[i]))
+		}
+		result.status = true
+		return result
+	} catch (e) {
+		console.log('[search] hotword error')
+		console.log(e)
+		return failed<HotSearchItem>('数据解析异常，请稍后重试')
+	}
+}
+
+/** 搜索建议（源 searchSuggest：term + main_ver=v1 + highlight=term；result 非 Map 时为空态） */
+export async function fetchSuggest(term: string): Promise<ListResult<SuggestItem>> {
+	const result = new ListResult<SuggestItem>()
+	try {
+		const params = new Params()
+		params.set('term', term)
+		params.set('main_ver', 'v1')
+		params.set('highlight', term)
+		const res = await apiGet(SEARCH_BASE + '/main/suggest', params)
+		if (res == null) {
+			return failed<SuggestItem>('请求错误')
+		}
+		const code = res.getNumber('code')
+		if (code == null || code != 0) {
+			result.message = riskMessage(code == null ? -1 : code, strMessage(res))
+			return result
+		}
+		// 无建议时 result 为空串/非对象 → getJSON 返回 null → 空列表（源 result is Map 判定同构）
+		const resultObj = objOf(res, 'result')
+		if (resultObj == null) {
+			result.status = true
+			return result
+		}
+		const tags = arrOf(resultObj, 'tag')
+		for (let i = 0; i < tags.length; i++) {
+			result.items.push(SuggestItem.from(tags[i]))
+		}
+		result.status = true
+		return result
+	} catch (e) {
+		console.log('[search] suggest error')
+		console.log(e)
+		return failed<SuggestItem>('数据解析异常，请稍后重试')
+	}
+}
+
+function strMessage(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	return message == null ? '' : message
+}
+
+// ---------------------------------------------------------------- 分类搜索（WBI）
+
+/** 分类搜索原始响应（search/type 的 data 节；numPages==0 视为空结果） */
+class TypePageData {
+	ok: boolean = false
+	message: string = ''
+	/** 空结果标记（numPages==0 或 result 缺失） */
+	empty: boolean = false
+	items: Array<UTSJSONObject> = []
+}
+
+async function requestTypePage(searchType: string, keyword: string, page: number, order: string,
+	duration: number, tids: number): Promise<TypePageData> {
+	const data = new TypePageData()
+	const params = new Params()
+	params.set('search_type', searchType)
+	params.set('keyword', keyword)
+	params.setNum('page', page)
+	if (order.length > 0) {
+		params.set('order', order)
+	}
+	if (searchType == 'video') {
+		params.setNum('duration', duration)
+		if (tids != -1) {
+			params.setNum('tids', tids)
+		}
+	}
+	const res = await wbiGet('/x/web-interface/wbi/search/type', params)
+	if (res == null) {
+		data.message = '请求错误'
+		return data
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		data.message = riskMessage(code == null ? -1 : code, strMessage(res))
+		return data
+	}
+	const dataObj = objOf(res, 'data')
+	if (dataObj == null) {
+		data.empty = true
+		data.ok = true
+		return data
+	}
+	const numPages = dataObj.getNumber('numPages')
+	if (numPages != null && numPages == 0) {
+		data.empty = true
+		data.ok = true
+		return data
+	}
+	data.items = arrOf(dataObj, 'result')
+	data.ok = true
+	return data
+}
+
+/** 视频搜索（黑名单过滤：源 available 标记等价，按 isBlockedMid 过滤） */
+export async function searchVideos(keyword: string, page: number, order: string, duration: number,
+	tids: number): Promise<ListResult<SearchVideoItem>> {
+	const result = new ListResult<SearchVideoItem>()
+	try {
+		const data = await requestTypePage('video', keyword, page, order, duration, tids)
+		if (!data.ok) {
+			result.message = data.message
+			return result
+		}
+		for (let i = 0; i < data.items.length; i++) {
+			const raw = data.items[i]
+			const mid = raw.getNumber('mid')
+			if (mid != null && isBlockedMid(mid)) {
+				continue
+			}
+			result.items.push(SearchVideoItem.from(raw))
+		}
+		result.status = true
+		return result
+	} catch (e) {
+		console.log('[search] type video error')
+		console.log(e)
+		return failed<SearchVideoItem>('数据解析异常，请稍后重试')
+	}
+}
+
+/** 番剧/影视搜索（media 结构共用，searchType 传 media_bangumi / media_ft） */
+export async function searchMedias(searchType: string, keyword: string, page: number): Promise<ListResult<SearchMBangumiItem>> {
+	const result = new ListResult<SearchMBangumiItem>()
+	try {
+		const data = await requestTypePage(searchType, keyword, page, '', 0, -1)
+		if (!data.ok) {
+			result.message = data.message
+			return result
+		}
+		for (let i = 0; i < data.items.length; i++) {
+			result.items.push(SearchMBangumiItem.from(data.items[i]))
+		}
+		result.status = true
+		return result
+	} catch (e) {
+		console.log('[search] type media error')
+		console.log(e)
+		return failed<SearchMBangumiItem>('数据解析异常，请稍后重试')
+	}
+}
+
+/** 直播间搜索 */
+export async function searchLives(keyword: string, page: number): Promise<ListResult<SearchLiveItem>> {
+	const result = new ListResult<SearchLiveItem>()
+	try {
+		const data = await requestTypePage('live_room', keyword, page, '', 0, -1)
+		if (!data.ok) {
+			result.message = data.message
+			return result
+		}
+		for (let i = 0; i < data.items.length; i++) {
+			result.items.push(SearchLiveItem.from(data.items[i]))
+		}
+		result.status = true
+		return result
+	} catch (e) {
+		console.log('[search] type live error')
+		console.log(e)
+		return failed<SearchLiveItem>('数据解析异常，请稍后重试')
+	}
+}
+
+/** 用户搜索 */
+export async function searchUsers(keyword: string, page: number): Promise<ListResult<SearchUserItem>> {
+	const result = new ListResult<SearchUserItem>()
+	try {
+		const data = await requestTypePage('bili_user', keyword, page, '', 0, -1)
+		if (!data.ok) {
+			result.message = data.message
+			return result
+		}
+		for (let i = 0; i < data.items.length; i++) {
+			result.items.push(SearchUserItem.from(data.items[i]))
+		}
+		result.status = true
+		return result
+	} catch (e) {
+		console.log('[search] type user error')
+		console.log(e)
+		return failed<SearchUserItem>('数据解析异常，请稍后重试')
+	}
+}
+
+/** 专栏搜索（order 仅 totalrank/pubdate/click/attention/scores） */
+export async function searchArticles(keyword: string, page: number, order: string): Promise<ListResult<SearchArticleItem>> {
+	const result = new ListResult<SearchArticleItem>()
+	try {
+		const data = await requestTypePage('article', keyword, page, order, 0, -1)
+		if (!data.ok) {
+			result.message = data.message
+			return result
+		}
+		for (let i = 0; i < data.items.length; i++) {
+			result.items.push(SearchArticleItem.from(data.items[i]))
+		}
+		result.status = true
+		return result
+	} catch (e) {
+		console.log('[search] type article error')
+		console.log(e)
+		return failed<SearchArticleItem>('数据解析异常，请稍后重试')
+	}
+}
+
+// ---------------------------------------------------------------- 计数 / AV·BV 直达
+
+/** 各类结果计数（源 searchCount：search/all/v2，WBI 签名，web_location=333.999） */
+export async function fetchSearchCounts(keyword: string): Promise<SearchCounts | null> {
+	const params = new Params()
+	params.set('keyword', keyword)
+	params.set('web_location', '333.999')
+	const res = await wbiGet('/x/web-interface/wbi/search/all/v2', params)
+	if (res == null) {
+		return null
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		return null
+	}
+	const dataObj = objOf(res, 'data')
+	if (dataObj == null) {
+		return null
+	}
+	return SearchCounts.from(dataObj)
+}
+
+/** AV/BV → cid（源 ab2c：/x/player/pagelist 取首分P cid；失败 -1） */
+export async function ab2c(aid: number, bvid: string): Promise<number> {
+	const params = new Params()
+	if (aid > 0) {
+		params.setNum('aid', aid)
+	} else if (bvid.length > 0) {
+		params.set('bvid', bvid)
+	} else {
+		return -1
+	}
+	const res = await apiGet('/x/player/pagelist', params)
+	if (res == null) {
+		return -1
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		return -1
+	}
+	const rawList = res.getArray('data')
+	if (rawList == null || rawList.length == 0) {
+		return -1
+	}
+	try {
+		const first = rawList[0] as UTSJSONObject
+		const cid = first.getNumber('cid')
+		return cid == null ? -1 : cid
+	} catch (e) {
+		return -1
+	}
+}
+
+/** AV/BV 号匹配结果（源 IdUtils.matchAvorBv） */
+export class AvBvMatch {
+	matched: boolean = false
+	/** 'BV' | 'AV' | ''（同时命中时以 BV 优先，源 result['BV'] 先写入） */
+	kind: string = ''
+	bvid: string = ''
+	aid: number = 0
+}
+
+/** 匹配输入中的 AV/BV 号（源正则：BV=10 位字母数字、AV=纯数字，均不区分大小写） */
+export function matchAvorBv(input: string): AvBvMatch {
+	const match = new AvBvMatch()
+	if (input.length == 0) {
+		return match
+	}
+	const bvIndex = indexOfBv(input)
+	if (bvIndex >= 0) {
+		match.matched = true
+		match.kind = 'BV'
+		const raw = input.substring(bvIndex, bvIndex + 12)
+		match.bvid = raw.substring(0, 2).toUpperCase() + raw.substring(2)
+		return match
+	}
+	const avIndex = indexOfAv(input)
+	if (avIndex >= 0) {
+		match.matched = true
+		match.kind = 'AV'
+		const digits = digitsAfter(input, avIndex + 2)
+		if (digits.length == 0) {
+			// 'av' 后无数字：不构成 AV 号
+			return new AvBvMatch()
+		}
+		match.aid = parseInt(digits)
+	}
+	return match
+}
+
+/** 找 BV 号起点（[bB][vV] + 10 位字母数字）；无则 -1 */
+function indexOfBv(input: string): number {
+	for (let i = 0; i + 12 <= input.length; i++) {
+		const c1 = input.charAt(i)
+		const c2 = input.charAt(i + 1)
+		if ((c1 == 'b' || c1 == 'B') && (c2 == 'v' || c2 == 'V')) {
+			let valid = true
+			for (let j = i + 2; j < i + 12; j++) {
+				if (!isAlnum(input.charAt(j))) {
+					valid = false
+					break
+				}
+			}
+			if (valid) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+/** 找 AV 号起点（[aA][vV] + 至少 1 位数字）；无则 -1 */
+function indexOfAv(input: string): number {
+	for (let i = 0; i + 3 <= input.length; i++) {
+		const c1 = input.charAt(i)
+		const c2 = input.charAt(i + 1)
+		if ((c1 == 'a' || c1 == 'A') && (c2 == 'v' || c2 == 'V')) {
+			if (digitsAfter(input, i + 2).length > 0) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+function digitsAfter(input: string, start: number): string {
+	let text = ''
+	for (let i = start; i < input.length; i++) {
+		const c = input.charAt(i)
+		if (c >= '0' && c <= '9') {
+			text += c
+		} else {
+			break
+		}
+	}
+	return text
+}
+
+function isAlnum(c: string): boolean {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}

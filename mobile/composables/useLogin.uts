@@ -1,0 +1,206 @@
+import { apiGet, rawGet } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { getString, setString, CK } from '../utils/storage.uts'
+import { VC_BASE } from '../utils/constants.uts'
+import { userState, UserInfo } from '../stores/user.uts'
+import { syncFromPlatform } from '../utils/cookie.uts'
+
+/**
+ * 登录态与用户信息。
+ *
+ * 判定唯一依据：`GET /x/web-interface/nav` 的 `data.isLogin`（URL 回跳只作为触发时机）。
+ * 存储：`storage:userInfo`（键名走 CK.userInfoCache，源 Hive box 'userInfo'），字段名与源 `models/user/info.dart` 一致。
+ * cookie 由平台 jar 持有（web-view 与请求层共享），应用层不注入、不搬运。
+ */
+const USER_INFO_KEY: string = CK.userInfoCache
+
+/**
+ * 刚由内置浏览器确认过登录：此时页面回调无需再打一次 nav（避免回到登录页时重复请求）。
+ * 由 `confirmLogin` 置位、`consumeJustConfirmed` 取用并复位，一次性信号。
+ */
+let justConfirmed: boolean = false
+
+export function consumeJustConfirmed(): boolean {
+	const value = justConfirmed
+	justConfirmed = false
+	return value
+}
+
+function readNumber(obj: UTSJSONObject, key: string): number {
+	const value = obj.getNumber(key)
+	return value == null ? 0 : value
+}
+
+function readString(obj: UTSJSONObject, key: string): string {
+	const value = obj.getString(key)
+	return value == null ? '' : value
+}
+
+/** 把 nav 的 data 落到内存态；返回是否已登录 */
+function applyUserData(data: UTSJSONObject): boolean {
+	const loginRaw = data.getBoolean('isLogin')
+	const isLogin = loginRaw == null ? false : loginRaw
+	userState.isLogin = isLogin
+	if (!isLogin) {
+		userState.info = new UserInfo()
+		resetUnread()
+		return false
+	}
+	const info = new UserInfo()
+	info.isLogin = true
+	info.mid = readNumber(data, 'mid')
+	info.uname = readString(data, 'uname')
+	info.face = readString(data, 'face')
+	info.money = readNumber(data, 'money')
+	info.moral = readNumber(data, 'moral')
+	info.vipStatus = readNumber(data, 'vipStatus')
+	info.vipType = readNumber(data, 'vipType')
+	info.vipDueDate = readNumber(data, 'vipDueDate')
+	const levelInfo = data.getJSON('level_info')
+	info.level = levelInfo != null ? readNumber(levelInfo, 'current_level') : 0
+	userState.info = info
+	return true
+}
+
+function userToObject(): UTSJSONObject {
+	const obj: UTSJSONObject = {}
+	obj.set('isLogin', userState.isLogin)
+	obj.set('mid', userState.info.mid)
+	obj.set('uname', userState.info.uname)
+	obj.set('face', userState.info.face)
+	obj.set('money', userState.info.money)
+	obj.set('moral', userState.info.moral)
+	obj.set('vipStatus', userState.info.vipStatus)
+	obj.set('vipType', userState.info.vipType)
+	obj.set('vipDueDate', userState.info.vipDueDate)
+	obj.set('level', userState.info.level)
+	return obj
+}
+
+function persistUser() {
+	setString(USER_INFO_KEY, JSON.stringify(userToObject()))
+}
+
+function resetUnread() {
+	userState.unread.msgReply = 0
+	userState.unread.msgAt = 0
+	userState.unread.msgLike = 0
+	userState.unread.msgSystem = 0
+	userState.unread.dynamic = 0
+}
+
+/**
+ * 冷启动先用本地缓存渲染已登录形态，再由 `refreshLoginState` 静默校正。
+ * 缓存读取失败按未登录处理，不抛错阻塞启动。
+ */
+export function loadCachedUser() {
+	const raw = getString(USER_INFO_KEY, '')
+	if (raw.length == 0) {
+		return
+	}
+	try {
+		const obj = JSON.parse<UTSJSONObject>(raw)
+		applyUserData(obj)
+	} catch (e) {
+		console.log('[login] cached user parse failed')
+	}
+}
+
+/** 请求 nav 并校正内存态；返回是否已登录 */
+export async function refreshLoginState(): Promise<boolean> {
+	const res = await apiGet('/x/web-interface/nav')
+	if (res == null) {
+		console.log('[login] nav request failed')
+		return userState.isLogin
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		console.log('[login] nav code=' + (code == null ? 'null' : code.toString()))
+		return userState.isLogin
+	}
+	const data = res.getJSON('data')
+	if (data == null) {
+		return userState.isLogin
+	}
+	const ok = applyUserData(data)
+	if (ok) {
+		// 登录态确认后立刻把平台 jar（web-view 登录写入）回读进镜像，写接口的 csrf 随即可用
+		syncFromPlatform()
+		persistUser()
+		console.log('[login] nav ok isLogin=true mid=' + userState.info.mid.toString() + ' uname=' + userState.info.uname)
+		await fetchUnread()
+	} else {
+		console.log('[login] nav ok isLogin=false')
+	}
+	return ok
+}
+
+/**
+ * 确保内存登录态已恢复：已是登录态直接返回 true，否则打一次 nav（内部失败保留原状态）。
+ * 页面在冷启动首屏调用（真机实测：App.onLaunch 的首个 nav 可能赶在运行时未就绪前失败，
+ * 之后再无触发点，导致 cookie 明明有效、页面却按未登录渲染）。
+ */
+export async function ensureLoginState(): Promise<boolean> {
+	if (userState.isLogin) {
+		return true
+	}
+	return await refreshLoginState()
+}
+
+/** 登录确认链：nav 判定 → 持久化 → 拉未读数。web-view 回跳与「刷新登录状态」都走这里 */
+export async function confirmLogin(): Promise<boolean> {
+	const ok = await refreshLoginState()
+	if (ok) {
+		justConfirmed = true
+		console.log('[login] confirm PASS mid=' + userState.info.mid.toString() + ' uname=' + userState.info.uname)
+	} else {
+		console.log('[login] confirm FAIL（nav 未返回已登录）')
+	}
+	return ok
+}
+
+/** 未读数：消息四类 + 动态入口。仅登录态请求，未登录归零 */
+export async function fetchUnread() {
+	if (!userState.isLogin) {
+		resetUnread()
+		return
+	}
+	// 域名取源 `Api.unread = ${HttpString.tUrl} + /x/im/web/msgfeed/unread`，tUrl = api.vc.bilibili.com
+	// （message.bilibili.com 同路径返回 HTML，解析会抛 JSON SyntaxError 且拿不到未读数）
+	const msgRes = await rawGet(VC_BASE + '/x/im/web/msgfeed/unread')
+	const msgCode = msgRes != null ? msgRes.getNumber('code') : null
+	console.log('[login] msg unread code=' + (msgCode == null ? 'null' : msgCode.toString()))
+	if (msgRes != null && msgCode != null && msgCode == 0) {
+		const data = msgRes.getJSON('data')
+		if (data != null) {
+			userState.unread.msgReply = readNumber(data, 'reply')
+			userState.unread.msgAt = readNumber(data, 'at')
+			userState.unread.msgLike = readNumber(data, 'like')
+			userState.unread.msgSystem = readNumber(data, 'sys_msg')
+		}
+	}
+	const p = new Params()
+	p.setNum('alltype_offset', 0)
+	p.set('video_offset', '')
+	p.setNum('article_offset', 0)
+	const dynRes = await apiGet('/x/web-interface/dynamic/entrance', p)
+	const dynCode = dynRes != null ? dynRes.getNumber('code') : null
+	if (dynRes != null && dynCode != null && dynCode == 0) {
+		const data = dynRes.getJSON('data')
+		const infos = data != null ? data.getArray('dyn_basic_infos') : null
+		userState.unread.dynamic = infos != null ? infos.length : 0
+	}
+	console.log('[login] unread msg=' + userState.unread.msgReply.toString() +
+		'/at=' + userState.unread.msgAt.toString() +
+		'/like=' + userState.unread.msgLike.toString() +
+		'/sys=' + userState.unread.msgSystem.toString() +
+		' dynamic=' + userState.unread.dynamic.toString())
+}
+
+/** 退出登录：清内存态与本地缓存（cookie 清理由设置域接入时统一处理） */
+export function clearLogin() {
+	userState.isLogin = false
+	userState.info = new UserInfo()
+	resetUnread()
+	setString(USER_INFO_KEY, '')
+}

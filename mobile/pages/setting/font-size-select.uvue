@@ -1,0 +1,138 @@
+<template>
+	<view class="fs" :style="pageStyle">
+		<app-navbar title="字体大小">
+			<template #right>
+				<view class="fs-ok" @click="applySize">
+					<text class="fs-ok-text" :style="okStyle">确定</text>
+				</view>
+			</template>
+		</app-navbar>
+
+		<!-- 预览区：源 `当前字体大小:xxx`，字号 = 14 × 当前值 -->
+		<view class="fs-preview">
+			<text class="fs-preview-text" :style="previewStyle">当前字体大小:{{ currentText }}</text>
+		</view>
+
+		<!-- 底部面板：小 —— Slider —— 大（源 font_size_select.dart 的 Slider 形态，0.9~1.3 八档） -->
+		<view class="fs-panel" :style="panelStyle">
+			<view class="fs-slider-row">
+				<text class="fs-side-small" :style="hintStyle">小</text>
+				<slider
+					class="fs-slider"
+					:min="MIN_SIZE"
+					:max="MAX_SIZE"
+					:step="STEP_SIZE"
+					:value="current"
+					:activeColor="primary"
+					backgroundColor="#D8DCE3"
+					block-size="20"
+					@changing="onSlide"
+					@change="onSlide"
+				></slider>
+				<text class="fs-side-large" :style="hintLargeStyle">大</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import { pageBackground, cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, textScale, setTextScale } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 字体大小选择（源头：lib/pages/setting/pages/font_size_select.dart）。
+ *
+ *  - 档位与源 list 一致：0.9 ~ 1.3 步进 0.05（divisions 8 = 九档）；
+ *  - 预览文本字号 = 14 × 当前值（源同款）；
+ *  - 「确定」写 SK.defaultTextScale（theme.uts setTextScale 唯一写入口，会自增主题信号让已挂载页面重算）并返回；
+ *  - 用真实 `slider` 组件（蒸汽端内置组件，props：min/max/step/value/activeColor/backgroundColor/block-size）。
+ */
+
+const MIN_SIZE: number = 0.9
+const MAX_SIZE: number = 1.3
+const STEP_SIZE: number = 0.05
+
+const current = ref<number>(textScale())
+
+const primary: string = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const panelStyle = computed((): string => 'background-color:' + cardBackground() + ';padding-bottom:' + (safeAreaBottom() + 20).toString() + 'px;')
+const okStyle: string = 'color:' + primary + ';'
+const hintStyle: string = 'color:' + textSecondary() + ';'
+const hintLargeStyle: string = 'color:' + textSecondary() + ';font-size:20px;'
+const stepValueStyle: string = 'color:' + textPrimary() + ';'
+
+const currentText = computed((): string => current.value == 1.0 ? '默认' : current.value.toString())
+const previewStyle = computed((): string => 'color:' + textPrimary() + ';font-size:' + (14 * current.value).toString() + 'px;')
+
+/** slider 回调：浮点步进会带出 0.9500000001 这类尾数，统一收敛到两位小数 */
+function onSlide(event: UniSliderChangeEvent) {
+	const value = Math.round(event.detail.value * 100) / 100
+	current.value = value
+}
+
+function applySize() {
+	setTextScale(current.value)
+	uni.showToast({ title: '设置成功', icon: 'none' })
+	setTimeout(() => {
+		uni.navigateBack({ delta: 1 })
+	}, 300)
+}
+</script>
+
+<style>
+	.fs {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fs-preview {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.fs-preview-text {
+		font-size: 14px;
+	}
+	.fs-panel {
+		border-top-left-radius: 14px;
+		border-top-right-radius: 14px;
+		display: flex;
+		flex-direction: column;
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 20px;
+	}
+	/* 源 Row：小 / Expanded(Slider) / 5 间距 / 大（20sp） */
+	.fs-slider-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.fs-side-small {
+		font-size: 14px;
+		margin-right: 8px;
+	}
+	.fs-side-large {
+		font-size: 20px;
+		margin-left: 5px;
+	}
+	.fs-slider {
+		flex: 1;
+	}
+	.fs-ok {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.fs-ok-text {
+		font-size: 15px;
+	}
+</style>

@@ -1,0 +1,728 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { wbiGet } from '../utils/wbi.uts'
+import { Params } from '../utils/params.uts'
+import { getBool, getNumber, SK } from '../utils/storage.uts'
+import { userState } from '../stores/user.uts'
+import { strOf, numOf, objOf, arrOf, boolOf, numArrayOf, strArrayOf } from '../utils/json.uts'
+import { HotVideoItem, ListResult } from '../models/video.uts'
+import { isBlockedMid, shouldFilterVideo } from './video.uts'
+import {
+	PlayResult, PlayData, DurlItem, DetailResult, VideoDetail, ActionResult, FlagResult, CoinStateResult,
+	FollowStateResult, TripleResult, OnlineResult, UserStatResult, FavFolderResult, FavToggleResult
+} from '../models/video-detail.uts'
+
+/**
+ * 视频详情域接口层（源头：`lib/http/video.dart` + `lib/http/user.dart` 的相关条目）。
+ *
+ * 约定与 P3 `api/video.uts` 一致：
+ *  - 内部 `xxxRaw` 负责请求 + 解析，导出函数统一 try/catch 兜底，**解析异常落失败结果并打日志**，
+ *    绝不让异常穿透到页面（P3 曾因 ReferenceError 穿透导致列表恒停在骨架）；
+ *  - 失败不伪装成空：message 优先取接口 message，其次网络/解析文案。
+ *
+ * 写操作（点赞/投币/收藏/关注/稍后再看）统一走 `postWithCsrf`：csrf 取不到时明确失败，
+ * 不静默当成成功（取数限制见 utils/request.uts#getCsrf）。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+/** 带 csrf 的写请求（csrf 由请求层从 cookie 镜像取） */
+async function postWithCsrf(path: string, params: Params): Promise<ActionResult> {
+	const result = new ActionResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[play] csrf empty path=' + path)
+		return result
+	}
+	const body = params.clone()
+	body.set('csrf', csrf)
+	const res = await apiPost(path, body.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[play] post fail path=' + path + ' code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+// ---------------------------------------------------------------- 播放地址
+
+/**
+ * CDN 优选（源头：lib/utils/video_utils.dart getCdnUrl，控制键 SK.enableCDN）：
+ *  - mcdn 节点（PCDN，非标准端口）改走官方代理中转；
+ *  - upgcxcode 主地址把域名换成阿里云镜像源（源同款 cdnList.ali）。
+ * 关闭 CDN 优化时不调用本函数，直接用接口返回的 backup_url / base_url（源同款）。
+ */
+export function optimizeCdnUrl(url: string): string {
+	if (url.length == 0) {
+		return url
+	}
+	if (url.indexOf('.mcdn.bilivideo') >= 0) {
+		return 'https://proxy-tf-all-ws.bilivideo.com/?url=' + encodeURIComponent(url)
+	}
+	if (url.indexOf('/upgcxcode/') >= 0) {
+		const marker = url.indexOf('/upgcxcode/')
+		const schemeEnd = url.indexOf('://')
+		if (schemeEnd < 0) {
+			return url
+		}
+		const rest = url.substring(schemeEnd + 3)
+		const slash = rest.indexOf('/')
+		if (slash < 0) {
+			return url
+		}
+		return 'https://upos-sz-mirrorali.bilivideo.com' + url.substring(schemeEnd + 3 + slash)
+	}
+	return url
+}
+
+/**
+ * 起播地址选择（详情页与全屏页**共用同一口径**，源头 lib/pages/video/detail/controller.dart）：
+ *  - SK.enableCDN 开：优先接口给的 backup_url，并对 mcdn/upgcxcode 做主域名优选；
+ *  - 关：backup_url 优先，原样使用（不做域名替换）。
+ * 两处各自实现过一次，结果全屏页拿到未优选的主地址直接 `Source error`（真机实测 code=300001）。
+ */
+export function selectPlaySrc(primary: string, backup: string): string {
+	if (getBool(SK.enableCDN, true)) {
+		const preferred = backup.length > 0 ? backup : primary
+		return optimizeCdnUrl(preferred)
+	}
+	return backup.length > 0 ? backup : primary
+}
+
+/** 起播主地址之外的备用地址（无备用或未开 CDN 优化时为空串） */
+export function selectPlayBackup(primary: string, backup: string): string {
+	if (!getBool(SK.enableCDN, true)) {
+		return ''
+	}
+	const preferred = backup.length > 0 ? backup : primary
+	return preferred == primary ? '' : primary
+}
+
+async function fetchPlayUrlRaw(bvid: string, cid: number, useDash: boolean): Promise<PlayResult> {
+	const result = new PlayResult()
+	const params = new Params()
+	params.setNum('cid', cid)
+	// 画质初始档：源取设置项 defaultVideoQa（默认 1080P60；durl 兜底链下服务端按 accept_quality 回档）
+	params.setNum('qn', getNumber(SK.defaultVideoQa, 116))
+	// fnval=1 取 durl 单文件流（本期 A 后端）；4048 为 DASH 分离轨，留给 pl-player（B 后端）
+	params.setNum('fnval', useDash ? 4048 : 1)
+	params.set('bvid', bvid)
+	params.setNum('fourk', 1)
+	params.setNum('voice_balance', 1)
+	params.set('gaia_source', 'pre-load')
+	params.setNum('web_location', 1550101)
+	// 未登录时试看 1080P（源 videoUrl 同款）
+	if (!userState.isLogin && getBool(SK.p1080, true)) {
+		params.setNum('try_look', 1)
+	}
+	const res = await wbiGet('/x/player/wbi/playurl', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[play] playurl code=' + result.code.toString() + ' cid=' + cid.toString())
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		console.log('[play] playurl data null cid=' + cid.toString())
+		return result
+	}
+	const play = new PlayData()
+	play.quality = numOf(data, 'quality')
+	play.timeLength = numOf(data, 'timelength')
+	play.lastPlayTime = numOf(data, 'last_play_time')
+	play.lastPlayCid = numOf(data, 'last_play_cid')
+	play.acceptQuality = numArrayOf(data, 'accept_quality')
+	play.acceptDesc = strArrayOf(data, 'accept_description')
+	const durlList = arrOf(data, 'durl')
+	for (let i = 0; i < durlList.length; i++) {
+		play.durl.push(DurlItem.from(durlList[i]))
+	}
+	const dash = objOf(data, 'dash')
+	if (dash != null) {
+		play.dashDuration = numOf(dash, 'duration')
+		const videos = arrOf(dash, 'video')
+		if (videos.length > 0) {
+			play.dashVideoUrl = strOf(videos[0], 'baseUrl')
+		}
+		const audios = arrOf(dash, 'audio')
+		if (audios.length > 0) {
+			play.dashAudioUrl = strOf(audios[0], 'baseUrl')
+		}
+	}
+	result.status = true
+	result.data = play
+	console.log('[play] playurl ok cid=' + cid.toString() + ' quality=' + play.quality.toString() +
+		' durl=' + play.durl.length.toString() + ' last=' + play.lastPlayTime.toString() +
+		' dash=' + (play.dashVideoUrl.length > 0 ? 'yes' : 'no'))
+	return result
+}
+
+/** 取播放地址；useDash=false → fnval=1（durl 单文件流），true → fnval=4048（DASH，预留） */
+export async function fetchPlayUrl(bvid: string, cid: number, useDash: boolean): Promise<PlayResult> {
+	try {
+		return await fetchPlayUrlRaw(bvid, cid, useDash)
+	} catch (e) {
+		console.log('[play] fetchPlayUrl error bvid=' + bvid)
+		console.log(e)
+		const failed = new PlayResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 视频详情
+
+async function fetchVideoDetailRaw(bvid: string): Promise<DetailResult> {
+	const result = new DetailResult()
+	const params = new Params()
+	params.set('bvid', bvid)
+	const res = await apiGet('/x/web-interface/view', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[play] view code=' + result.code.toString() + ' bvid=' + bvid)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		console.log('[play] view data null bvid=' + bvid)
+		return result
+	}
+	result.data = VideoDetail.from(data)
+	result.status = true
+	const detail = result.data
+	if (detail != null) {
+		console.log('[play] view ok bvid=' + bvid + ' pages=' + detail.pages.length.toString() +
+			' season=' + (detail.ugcSeason == null ? 'no' : 'yes'))
+	}
+	return result
+}
+
+/** 视频详情（标题/统计/UP/简介/分P/合集） */
+export async function fetchVideoDetail(bvid: string): Promise<DetailResult> {
+	try {
+		return await fetchVideoDetailRaw(bvid)
+	} catch (e) {
+		console.log('[play] fetchVideoDetail error bvid=' + bvid)
+		console.log(e)
+		const failed = new DetailResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 相关推荐
+
+async function fetchRelatedRaw(bvid: string): Promise<ListResult<HotVideoItem>> {
+	const result = new ListResult<HotVideoItem>()
+	const params = new Params()
+	params.set('bvid', bvid)
+	const res = await apiGet('/x/web-interface/archive/related', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const list = arrOf(res, 'data')
+	for (let i = 0; i < list.length; i++) {
+		const raw = list[i]
+		const ownerObj = objOf(raw, 'owner')
+		if (ownerObj != null && isBlockedMid(numOf(ownerObj, 'mid'))) {
+			continue
+		}
+		const item = HotVideoItem.from(raw)
+		// 相关推荐走 P3 同一条过滤链；条目无 isFollowed 字段，按非关注视频传 0
+		if (!shouldFilterVideo(item.duration, item.stat.view, item.stat.like, 0, true)) {
+			result.items.push(item)
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 相关推荐（复用 P3 过滤链：拉黑 UP + 时长/点赞比阈值） */
+export async function fetchRelated(bvid: string): Promise<ListResult<HotVideoItem>> {
+	try {
+		return await fetchRelatedRaw(bvid)
+	} catch (e) {
+		console.log('[play] fetchRelated error bvid=' + bvid)
+		console.log(e)
+		const failed = new ListResult<HotVideoItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 同时在看
+
+async function fetchOnlineTotalRaw(aid: number, bvid: string, cid: number): Promise<OnlineResult> {
+	const result = new OnlineResult()
+	const params = new Params()
+	params.setNum('aid', aid)
+	params.set('bvid', bvid)
+	params.setNum('cid', cid)
+	const res = await apiGet('/x/player/online/total', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.status = true
+		return result
+	}
+	const total = strOf(data, 'total')
+	result.total = total.length > 0 ? total : numOf(data, 'total').toString()
+	result.status = true
+	return result
+}
+
+/** 同时在看人数（源 10s 轮询，仅详情页可见时） */
+export async function fetchOnlineTotal(aid: number, bvid: string, cid: number): Promise<OnlineResult> {
+	try {
+		return await fetchOnlineTotalRaw(aid, bvid, cid)
+	} catch (e) {
+		console.log('[play] fetchOnlineTotal error bvid=' + bvid)
+		console.log(e)
+		const failed = new OnlineResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 三连状态
+
+async function hasLikeRaw(bvid: string): Promise<FlagResult> {
+	const result = new FlagResult()
+	const params = new Params()
+	params.set('bvid', bvid)
+	const res = await apiGet('/x/web-interface/archive/has/like', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	// 源口径：data 为被点赞标志 0/1
+	result.value = numOf(res, 'data') == 1
+	result.status = true
+	return result
+}
+
+/** 是否已点赞（data 为 0/1） */
+export async function hasLike(bvid: string): Promise<FlagResult> {
+	try {
+		return await hasLikeRaw(bvid)
+	} catch (e) {
+		console.log('[play] hasLike error bvid=' + bvid)
+		console.log(e)
+		const failed = new FlagResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function hasCoinRaw(bvid: string): Promise<CoinStateResult> {
+	const result = new CoinStateResult()
+	const params = new Params()
+	params.set('bvid', bvid)
+	const res = await apiGet('/x/web-interface/archive/coins', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	result.multiply = data == null ? 0 : numOf(data, 'multiply')
+	result.status = true
+	return result
+}
+
+/** 已投币枚数（0 表示未投币） */
+export async function hasCoin(bvid: string): Promise<CoinStateResult> {
+	try {
+		return await hasCoinRaw(bvid)
+	} catch (e) {
+		console.log('[play] hasCoin error bvid=' + bvid)
+		console.log(e)
+		const failed = new CoinStateResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function hasFavRaw(aid: number): Promise<FlagResult> {
+	const result = new FlagResult()
+	const params = new Params()
+	params.setNum('aid', aid)
+	const res = await apiGet('/x/v2/fav/video/favoured', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	result.value = data == null ? false : boolOf(data, 'favoured')
+	result.status = true
+	return result
+}
+
+/** 是否已收藏（data.favoured） */
+export async function hasFav(aid: number): Promise<FlagResult> {
+	try {
+		return await hasFavRaw(aid)
+	} catch (e) {
+		console.log('[play] hasFav error aid=' + aid.toString())
+		console.log(e)
+		const failed = new FlagResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 写操作
+
+async function likeVideoRaw(bvid: string, type: boolean): Promise<ActionResult> {
+	const params = new Params()
+	params.set('bvid', bvid)
+	params.setNum('like', type ? 1 : 2)
+	return await postWithCsrf('/x/web-interface/archive/like', params)
+}
+
+/** （取消）点赞；type=true 为点赞、false 为取消 */
+export async function likeVideo(bvid: string, type: boolean): Promise<ActionResult> {
+	try {
+		return await likeVideoRaw(bvid, type)
+	} catch (e) {
+		console.log('[play] likeVideo error bvid=' + bvid)
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function coinVideoRaw(bvid: string, multiply: number): Promise<ActionResult> {
+	const params = new Params()
+	params.set('bvid', bvid)
+	params.setNum('multiply', multiply)
+	// 源同款：投币不连带点赞
+	params.setNum('select_like', 0)
+	return await postWithCsrf('/x/web-interface/coin/add', params)
+}
+
+/** 投币（multiply 1 或 2） */
+export async function coinVideo(bvid: string, multiply: number): Promise<ActionResult> {
+	try {
+		return await coinVideoRaw(bvid, multiply)
+	} catch (e) {
+		console.log('[play] coinVideo error bvid=' + bvid)
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function favVideoRaw(aid: number, addIds: string, delIds: string): Promise<ActionResult> {
+	const params = new Params()
+	params.setNum('rid', aid)
+	params.setNum('type', 2)
+	params.set('add_media_ids', addIds)
+	params.set('del_media_ids', delIds)
+	return await postWithCsrf('/x/v3/fav/resource/deal', params)
+}
+
+/** （取消）收藏；addIds / delIds 为收藏夹 id 串（多个用逗号分隔） */
+export async function favVideo(aid: number, addIds: string, delIds: string): Promise<ActionResult> {
+	try {
+		return await favVideoRaw(aid, addIds, delIds)
+	} catch (e) {
+		console.log('[play] favVideo error aid=' + aid.toString())
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function oneThreeRaw(bvid: string): Promise<TripleResult> {
+	const result = new TripleResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		return result
+	}
+	const params = new Params()
+	params.set('bvid', bvid)
+	params.set('csrf', csrf)
+	const res = await apiPost('/x/web-interface/archive/like/triple', params.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data != null) {
+		result.like = boolOf(data, 'like')
+		result.coin = boolOf(data, 'coin')
+		result.fav = boolOf(data, 'fav')
+	}
+	result.status = true
+	return result
+}
+
+/** 一键三连（返回三态覆盖本地） */
+export async function oneThree(bvid: string): Promise<TripleResult> {
+	try {
+		return await oneThreeRaw(bvid)
+	} catch (e) {
+		console.log('[play] oneThree error bvid=' + bvid)
+		console.log(e)
+		const failed = new TripleResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function followModRaw(mid: number, act: number): Promise<ActionResult> {
+	const params = new Params()
+	params.setNum('fid', mid)
+	params.setNum('act', act)
+	// 来源位：视频详情页关注（源 reSrc=14）
+	params.setNum('re_src', 14)
+	return await postWithCsrf('/x/relation/modify', params)
+}
+
+/** 关注动作：act=1 关注 / 2 取消关注 / 5 拉黑 */
+export async function followMod(mid: number, act: number): Promise<ActionResult> {
+	try {
+		return await followModRaw(mid, act)
+	} catch (e) {
+		console.log('[play] followMod error mid=' + mid.toString())
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function hasFollowRaw(mid: number): Promise<FollowStateResult> {
+	const result = new FollowStateResult()
+	const params = new Params()
+	params.setNum('fid', mid)
+	const res = await apiGet('/x/relation', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	result.attribute = data == null ? 0 : numOf(data, 'attribute')
+	result.status = true
+	return result
+}
+
+/** 是否已关注 UP（data.attribute：0 未关注 / 2 已关注 / 6 互关 / 128 拉黑） */
+export async function hasFollow(mid: number): Promise<FollowStateResult> {
+	try {
+		return await hasFollowRaw(mid)
+	} catch (e) {
+		console.log('[play] hasFollow error mid=' + mid.toString())
+		console.log(e)
+		const failed = new FollowStateResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- UP 粉丝数 / 收藏夹 / 稍后再看
+
+async function fetchUserStatRaw(mid: number): Promise<UserStatResult> {
+	const result = new UserStatResult()
+	const params = new Params()
+	params.setNum('vmid', mid)
+	const res = await apiGet('/x/relation/stat', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	result.follower = data == null ? 0 : numOf(data, 'follower')
+	result.status = true
+	return result
+}
+
+/** UP 主粉丝数（/x/relation/stat） */
+export async function fetchUserStat(mid: number): Promise<UserStatResult> {
+	try {
+		return await fetchUserStatRaw(mid)
+	} catch (e) {
+		console.log('[play] fetchUserStat error mid=' + mid.toString())
+		console.log(e)
+		const failed = new UserStatResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+async function fetchDefaultFavFolderRaw(mid: number, rid: number): Promise<FavFolderResult> {
+	const result = new FavFolderResult()
+	const params = new Params()
+	params.setNum('up_mid', mid)
+	params.setNum('rid', rid)
+	const res = await apiGet('/x/v3/fav/folder/created/list-all', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = codeOf(res)
+	if (code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	const list = data == null ? [] : arrOf(data, 'list')
+	if (list.length == 0) {
+		result.message = '没有可用的收藏夹'
+		return result
+	}
+	// 源 actionFavVideo(type=default)：取第一个收藏夹做快速收藏
+	result.folderId = numOf(list[0], 'id')
+	result.favState = numOf(list[0], 'fav_state')
+	result.status = true
+	return result
+}
+
+/** 取默认（第一个）收藏夹及该视频在其中的收藏态 */
+export async function fetchDefaultFavFolder(mid: number, rid: number): Promise<FavFolderResult> {
+	try {
+		return await fetchDefaultFavFolderRaw(mid, rid)
+	} catch (e) {
+		console.log('[play] fetchDefaultFavFolder error aid=' + rid.toString())
+		console.log(e)
+		const failed = new FavFolderResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 快速收藏切换（源 actionFavVideo type='default'）：
+ * 查默认收藏夹 → 未收藏则加入、已收藏则移出 → 重新确认收藏态。
+ */
+export async function toggleDefaultFav(aid: number): Promise<FavToggleResult> {
+	const result = new FavToggleResult()
+	try {
+		if (!userState.isLogin) {
+			result.message = '账号未登录'
+			return result
+		}
+		const folder = await fetchDefaultFavFolder(userState.info.mid, aid)
+		if (!folder.status || folder.folderId <= 0) {
+			result.message = folder.message
+			return result
+		}
+		const addIds = folder.favState == 0 ? folder.folderId.toString() : ''
+		const delIds = folder.favState == 1 ? folder.folderId.toString() : ''
+		const action = await favVideo(aid, addIds, delIds)
+		if (!action.status) {
+			result.message = action.message
+			return result
+		}
+		const state = await hasFav(aid)
+		if (state.status) {
+			result.faved = state.value
+		} else {
+			result.faved = folder.favState == 0
+		}
+		result.status = true
+		return result
+	} catch (e) {
+		console.log('[play] toggleDefaultFav error aid=' + aid.toString())
+		console.log(e)
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+}
+
+async function addWatchLaterRaw(bvid: string): Promise<ActionResult> {
+	const params = new Params()
+	params.set('bvid', bvid)
+	return await postWithCsrf('/x/v2/history/toview/add', params)
+}
+
+/** 稍后再看（源 UserHttp.toViewLater） */
+export async function addWatchLater(bvid: string): Promise<ActionResult> {
+	try {
+		return await addWatchLaterRaw(bvid)
+	} catch (e) {
+		console.log('[play] addWatchLater error bvid=' + bvid)
+		console.log(e)
+		const failed = new ActionResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}

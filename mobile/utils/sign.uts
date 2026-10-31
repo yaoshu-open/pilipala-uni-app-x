@@ -1,0 +1,69 @@
+import { md5 } from './md5.uts'
+import { Params } from './params.uts'
+
+/** WBI 混淆表（源：lib/utils/wbi_sign.dart mixinKeyEncTab） */
+const MIXIN_KEY_ENC_TAB: number[] = [
+	46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28,
+	14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54,
+	21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52
+]
+
+function mixinKey(origin: string): string {
+	let temp = ''
+	for (let i = 0; i < MIXIN_KEY_ENC_TAB.length; i++) {
+		const index = MIXIN_KEY_ENC_TAB[i]
+		temp = temp + origin.substring(index, index + 1)
+	}
+	return temp.substring(0, 32)
+}
+
+/** 从 wbi_img 的图片地址取 key（去掉路径与扩展名） */
+export function keyFromUrl(url: string): string {
+	const slash = url.lastIndexOf('/')
+	const name = slash >= 0 ? url.substring(slash + 1) : url
+	const dot = name.indexOf('.')
+	return dot > 0 ? name.substring(0, dot) : name
+}
+
+/** 生成 WBI 的 wts / w_rid（返回带签名的参数副本） */
+export function wbiSign(params: Params, imgKey: string, subKey: string): Params {
+	const mixin = mixinKey(imgKey + subKey)
+	const now = Date.now()
+	const wts = Math.floor(now / 1000).toString()
+	const filterPattern = new RegExp("[!'()*]", 'g')
+	const withWts = params.clone()
+	withWts.set('wts', wts)
+	const keys = withWts.keys().slice()
+	keys.sort()
+	const queryParts: string[] = []
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i]
+		const value = withWts.get(key)
+		if (value == null) {
+			continue
+		}
+		let text = value
+		text = text.replace(filterPattern, '')
+		queryParts.push(encodeURIComponent(key) + '=' + encodeURIComponent(text))
+	}
+	const query = queryParts.join('&')
+	const rid = md5(query + mixin)
+	withWts.set('w_rid', rid)
+	return withWts
+}
+
+/** APP 接口签名（源：lib/utils/utils.dart appSign） */
+export function appSign(params: Params, appkey: string, appsec: string): string {
+	const parts: string[] = []
+	for (let i = 0; i < params.size(); i++) {
+		const key = params.keys()[i]
+		const value = params.get(key)
+		if (value == null) {
+			continue
+		}
+		parts.push(key + '=' + encodeURIComponent(value))
+	}
+	parts.push('appkey=' + appkey)
+	parts.sort()
+	return md5(parts.join('&') + appsec)
+}

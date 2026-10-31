@@ -1,0 +1,142 @@
+<template>
+	<view class="pvcv" @click="onTap">
+		<view class="pvcv-cover" :style="coverStyle">
+			<network-img :src="pic" width="100%" height="100%" radius="10px"></network-img>
+			<view v-if="duration > 0" class="pvcv-duration">
+				<p-badge :text="durationText" type="gray" size="small" :font-size="9"></p-badge>
+			</view>
+		</view>
+		<view class="pvcv-body">
+			<text class="pvcv-title" :style="titleStyle" :max-lines="2">{{ title }}</text>
+			<view class="pvcv-stat">
+				<p-stat icon="play-circle-outlined" :text="viewText" :icon-size="13"></p-stat>
+				<view class="pvcv-gap8"></view>
+				<p-stat icon="subtitles-outlined" :text="danmuText" :icon-size="14"></p-stat>
+				<view class="pvcv-spacer"></view>
+				<!-- 发布时间缺失（app 端推荐接口不返回 pubdate）时不渲染，避免显示「56年前」 -->
+				<text v-if="pubdate > 0" class="pvcv-time" :style="secondaryStyle">{{ timeText }}</text>
+			</view>
+			<view class="pvcv-owner">
+				<view v-if="gotoType == 'bangumi'" class="pvcv-tag">
+					<p-badge text="番剧" type="line" size="small" :font-size="9"></p-badge>
+				</view>
+				<view v-if="rcmdReason.length > 0" class="pvcv-tag">
+					<p-badge :text="rcmdReason" type="color" size="small" :font-size="9"></p-badge>
+				</view>
+				<view v-if="gotoType == 'picture'" class="pvcv-tag">
+					<p-badge text="动态" type="line" size="small" :font-size="9"></p-badge>
+				</view>
+				<view v-if="isFollowed == 1" class="pvcv-tag">
+					<p-badge text="已关注" type="color" size="small" :font-size="9"></p-badge>
+				</view>
+				<text class="pvcv-owner-name" :style="secondaryStyle" :max-lines="1">{{ ownerName }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import PBadge from '../p-badge/p-badge.uvue'
+import PStat from '../p-stat/p-stat.uvue'
+import { numFormat, timeFormat, relativeTime } from '../../utils/format.uts'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 竖向视频卡（源头：`lib/common/widgets/video_card_v.dart` VideoCardV）。
+ *
+ * 结构：封面（16:10、圆角 10、右下时长角标）→ 标题（2 行）→ 数据行（播放量/弹幕数/相对时间）
+ * → UP 主行（番剧/动态/已关注/推荐理由角标 + 名称）。卡片底色透明（首页渐变背景透出）。
+ * 卡高固定 = 封面高 + 86（源 mainAxisExtent 同款），标题区不撑开卡片。
+ * 字段扁平传入（不传 class 实例）：跨组件对象类型在 uts 下的序列化行为未实测，不用作设计前提。
+ */
+const props = defineProps({
+	pic: { type: String, default: '' },
+	title: { type: String, default: '' },
+	duration: { type: Number, default: 0 },
+	viewCount: { type: Number, default: 0 },
+	danmuCount: { type: Number, default: 0 },
+	pubdate: { type: Number, default: 0 },
+	ownerName: { type: String, default: '' },
+	rcmdReason: { type: String, default: '' },
+	gotoType: { type: String, default: 'av' },
+	isFollowed: { type: Number, default: 0 },
+	coverHeight: { type: Number, default: 110 }
+})
+
+const emit = defineEmits(['tap'])
+
+const coverStyle = computed((): string => 'height:' + props.coverHeight.toString() + 'px;')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const durationText = computed((): string => timeFormat(props.duration))
+const viewText = computed((): string => numFormat(props.viewCount))
+const danmuText = computed((): string => numFormat(props.danmuCount))
+const timeText = computed((): string => relativeTime(props.pubdate))
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	.pvcv {
+		display: flex;
+		flex-direction: column;
+	}
+	.pvcv-cover {
+		position: relative;
+		width: 100%;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.pvcv-duration {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+	}
+	.pvcv-body {
+		height: 86px;
+		display: flex;
+		flex-direction: column;
+		padding-left: 5px;
+		padding-right: 5px;
+		padding-top: 8px;
+		padding-bottom: 4px;
+	}
+	.pvcv-title {
+		font-size: 14px;
+		line-height: 20px;
+		height: 40px;
+	}
+	.pvcv-stat {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 2px;
+	}
+	.pvcv-gap8 {
+		width: 8px;
+	}
+	.pvcv-spacer {
+		flex: 1;
+	}
+	.pvcv-time {
+		font-size: 11px;
+	}
+	.pvcv-owner {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+	}
+	.pvcv-tag {
+		margin-right: 5px;
+	}
+	.pvcv-owner-name {
+		flex: 1;
+		font-size: 12px;
+	}
+</style>

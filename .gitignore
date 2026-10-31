@@ -134,3 +134,16 @@ app.*.symbols
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
 !.vscode/settings.json
+.yaoshu/
+
+# 本地调试截图（不入库）
+/custombase.png
+/minecheck.png
+/newdetail.png
+/now.png
+/old1.png
+
+# uni-app x 构建产物（可本地再生成）
+/mobile/dist/
+/mobile/unpackage/
+/mobile/node_modules/

@@ -1,0 +1,112 @@
+<template>
+	<view class="page">
+		<text class="title">只读接口联调（开发用）</text>
+		<scroll-view class="log" direction="vertical">
+			<text class="log-text">{{ logText }}</text>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, onMounted } from 'vue'
+import { apiGet } from '../../utils/request.uts'
+import { Params } from '../../utils/params.uts'
+
+const logText = ref<string>('')
+
+function append(line: string) {
+	logText.value = logText.value + line + "\n"
+	console.log('[API] ' + line)
+}
+
+async function testRcmd() {
+	const p = new Params()
+	p.setNum('version', 1)
+	p.set('feed_version', 'V3')
+	p.setNum('homepage_ver', 1)
+	p.setNum('ps', 10)
+	p.setNum('fresh_idx', 0)
+	p.setNum('brush', 0)
+	p.setNum('fresh_type', 4)
+	const res = await apiGet('/x/web-interface/index/top/feed/rcmd', p)
+	if (res == null) {
+		append('rcmd null')
+		return
+	}
+	const code = res.getNumber('code')
+	const data = res.getJSON('data')
+	const items = data != null ? data.getArray('item') : null
+	append('rcmd code=' + (code != null ? code.toString() : '?') + ' items=' + (items != null ? items.length.toString() : '0'))
+}
+
+async function testHot() {
+	const p = new Params()
+	p.setNum('pn', 1)
+	p.setNum('ps', 20)
+	const res = await apiGet('/x/web-interface/popular', p)
+	if (res == null) {
+		append('hot null')
+		return
+	}
+	const code = res.getNumber('code')
+	const data = res.getJSON('data')
+	const list = data != null ? data.getArray('list') : null
+	append('hot code=' + (code != null ? code.toString() : '?') + ' list=' + (list != null ? list.length.toString() : '0'))
+}
+
+async function testSuggest() {
+	const p = new Params()
+	p.set('term', '原神')
+	p.set('main_ver', 'v1')
+	p.set('highlight', '原神')
+	const res = await apiGet('https://s.search.bilibili.com/main/suggest', p)
+	if (res == null) {
+		append('suggest null')
+		return
+	}
+	const code = res.getNumber('code')
+	const result = res.getJSON('result')
+	const tags = result != null ? result.getArray('tag') : null
+	append('suggest code=' + (code != null ? code.toString() : '?') + ' tags=' + (tags != null ? tags.length.toString() : '0'))
+}
+
+async function runAll() {
+	try {
+		await testRcmd()
+		await testHot()
+		await testSuggest()
+	} catch (e) {
+		append('EX')
+		console.log(e)
+	}
+}
+
+onMounted(() => {
+	runAll()
+})
+</script>
+
+<style>
+	.page {
+		flex: 1;
+		padding: 24rpx;
+		background-color: #F6F7F8;
+	}
+	.title {
+		font-size: 30rpx;
+		font-weight: bold;
+		color: #18191C;
+	}
+	.log {
+		margin-top: 16rpx;
+		flex: 1;
+		background-color: #FFFFFF;
+		border-radius: 12rpx;
+		padding: 16rpx;
+	}
+	.log-text {
+		font-size: 24rpx;
+		color: #303540;
+		line-height: 36rpx;
+	}
+</style>

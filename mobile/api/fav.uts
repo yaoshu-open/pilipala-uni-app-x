@@ -1,0 +1,199 @@
+import { apiGet, apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { arrOf, objOf } from '../utils/json.uts'
+import {
+	FavFolderItem, FavFolderPage, FavDetailItem, FavDetailInfo,
+	FavFolderResult, FavDetailResult, FavActionResult
+} from '../models/fav.uts'
+
+/**
+ * 收藏域接口层（源头：`lib/http/fav.dart` + `lib/http/user.dart` 收藏相关条目）。
+ *
+ * 约定与既有 api/video.uts、api/play.uts 一致：
+ *  - 内部 `xxxRaw` 负责请求 + 解析，导出函数统一 try/catch 兜底，异常落失败结果；
+ *  - 失败不伪装成空：message 优先取接口 message；
+ *  - 写操作统一走 `postWithCsrf`：csrf（cookie 镜像里的 bili_jct）取不到时明确失败
+ *    「登录凭据缺失，请重新登录后再试」，不发无凭据请求、不假成功（口径见设计 §4.3）。
+ */
+
+function codeOf(res: UTSJSONObject): number {
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+function messageOf(res: UTSJSONObject): string {
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+/** 带 csrf 的写请求（凭据缺失时明确失败，不静默当成功） */
+async function postWithCsrf(path: string, params: Params, successToast: string): Promise<FavActionResult> {
+	const result = new FavActionResult()
+	result.successToast = successToast
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[fav] csrf empty path=' + path)
+		return result
+	}
+	const body = params.clone()
+	body.set('csrf', csrf)
+	const res = await apiPost(path, body.toObject())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		console.log('[fav] post fail path=' + path + ' code=' + result.code.toString())
+		return result
+	}
+	result.status = true
+	return result
+}
+
+// ---------------------------------------------------------------- 读接口
+
+/** 收藏夹列表（源 UserHttp.userfavFolder：/x/v3/fav/folder/created/list） */
+async function fetchFavFolderRaw(mid: number, pn: number, ps: number): Promise<FavFolderResult> {
+	const result = new FavFolderResult()
+	const params = new Params()
+	params.setNum('pn', pn)
+	params.setNum('ps', ps)
+	params.setNum('up_mid', mid)
+	const res = await apiGet('/x/v3/fav/folder/created/list', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '收藏夹为空'
+		return result
+	}
+	const rawCount = data.getNumber('count')
+	result.page.count = rawCount == null ? 0 : rawCount
+	const hasMore = data.getBoolean('has_more')
+	result.page.hasMore = hasMore == null ? false : hasMore
+	const list = arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		result.items.push(FavFolderItem.from(list[i]))
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchFavFolder(mid: number, pn: number, ps: number): Promise<FavFolderResult> {
+	try {
+		return await fetchFavFolderRaw(mid, pn, ps)
+	} catch (e) {
+		console.log('[fav] fetchFavFolder error')
+		console.log(e)
+		const failed = new FavFolderResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 收藏夹内容列表（源 UserHttp.userFavFolderDetail：/x/v3/fav/resource/list） */
+async function fetchFavDetailRaw(mediaId: number, pn: number, ps: number, keyword: string): Promise<FavDetailResult> {
+	const result = new FavDetailResult()
+	const params = new Params()
+	params.setNum('media_id', mediaId)
+	params.setNum('pn', pn)
+	params.setNum('ps', ps)
+	params.set('keyword', keyword)
+	params.set('order', 'mtime')
+	params.setNum('type', 0)
+	params.setNum('tid', 0)
+	params.set('platform', 'web')
+	const res = await apiGet('/x/v3/fav/resource/list', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	result.code = codeOf(res)
+	if (result.code != 0) {
+		result.message = messageOf(res)
+		return result
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		result.message = '数据解析异常，请稍后重试'
+		return result
+	}
+	result.info = FavDetailInfo.from(objOf(data, 'info'))
+	const hasMore = data.getBoolean('has_more')
+	result.hasMore = hasMore == null ? false : hasMore
+	const medias = arrOf(data, 'medias')
+	for (let i = 0; i < medias.length; i++) {
+		result.items.push(FavDetailItem.from(medias[i]))
+	}
+	result.status = true
+	return result
+}
+
+export async function fetchFavDetail(mediaId: number, pn: number, ps: number, keyword: string = ''): Promise<FavDetailResult> {
+	try {
+		return await fetchFavDetailRaw(mediaId, pn, ps, keyword)
+	} catch (e) {
+		console.log('[fav] fetchFavDetail error')
+		console.log(e)
+		const failed = new FavDetailResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 写接口
+
+/** 新建收藏夹（源 FavHttp.addFolder：title/intro/cover/privacy） */
+export async function favFolderAdd(title: string, intro: string, privacy: number): Promise<FavActionResult> {
+	const params = new Params()
+	params.set('title', title)
+	params.set('intro', intro)
+	params.set('cover', '')
+	params.setNum('privacy', privacy)
+	return postWithCsrf('/x/v3/fav/folder/add', params, '新建成功')
+}
+
+/** 编辑收藏夹（源 FavHttp.editFolder：+ media_id） */
+export async function favFolderEdit(mediaId: number, title: string, intro: string, privacy: number): Promise<FavActionResult> {
+	const params = new Params()
+	params.set('title', title)
+	params.set('intro', intro)
+	params.setNum('media_id', mediaId)
+	params.set('cover', '')
+	params.setNum('privacy', privacy)
+	return postWithCsrf('/x/v3/fav/folder/edit', params, '编辑成功')
+}
+
+/** 删除收藏夹（源 UserHttp.delFavFolder：media_ids + platform=web） */
+export async function favFolderDel(mediaId: number): Promise<FavActionResult> {
+	const params = new Params()
+	params.setNum('media_ids', mediaId)
+	params.set('platform', 'web')
+	return postWithCsrf('/x/v3/fav/folder/del', params, '操作成功')
+}
+
+/**
+ * 取消收藏单条视频（源 VideoHttp.favVideo：rid=aid、type=2、del_media_ids=mediaId）。
+ * fav-detail「×」与 fav-search（searchType=0）「×」共用。
+ */
+export async function favVideoRemove(aid: number, mediaId: number): Promise<FavActionResult> {
+	const params = new Params()
+	params.setNum('rid', aid)
+	params.setNum('type', 2)
+	params.set('add_media_ids', '')
+	params.setNum('del_media_ids', mediaId)
+	return postWithCsrf('/x/v3/fav/resource/deal', params, '取消收藏')
+}

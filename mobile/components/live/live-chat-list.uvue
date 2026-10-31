@@ -1,0 +1,226 @@
+<template>
+	<view class="lcl">
+		<scroll-view
+			class="lcl-scroll"
+			:show-scrollbar="false"
+			:scroll-into-view="anchorId"
+			:scroll-with-animation="true"
+			@scroll="onScroll"
+			@scrolltolower="onReachBottom"
+		>
+			<view class="lcl-inner">
+				<view
+					v-for="(msg, index) in messages"
+					:id="'m' + index.toString()"
+					:key="'m' + index.toString()"
+					class="lcl-row"
+					:style="rowStyle(index)"
+				>
+					<view class="lcl-bubble" :style="bubbleStyle()">
+						<view class="lcl-line">
+							<text v-if="msg.userName.length > 0" class="lcl-name">{{ msg.userName }}: </text>
+							<!-- segments 为空（解析失败/纯文本消息）时按 message 兜底，与设计「空数组走纯文本」一致 -->
+							<text v-if="msg.segments.length == 0" class="lcl-text">{{ msg.message }}</text>
+							<!-- 行内表情：文本/图片片段按源 buildMessageTextSpan 的切段顺序横排换行 -->
+							<view v-for="(seg, segIndex) in msg.segments" :key="'s' + segIndex.toString()" class="lcl-seg">
+								<text v-if="seg.kind == 'text'" class="lcl-text">{{ seg.text }}</text>
+								<network-img
+									v-else
+									class="lcl-emote"
+									:src="seg.url"
+									:width="emoteSize(seg.width)"
+									:height="emoteSize(seg.height)"
+								></network-img>
+							</view>
+						</view>
+					</view>
+				</view>
+			</view>
+		</scroll-view>
+
+		<!-- 新消息回底：源为 ElevatedButton.icon（right 20 / bottom = 安全区+80），
+		     本组件宿主底边 = 页面底部 −(90+安全区)，故组件内取 bottom 10 与源位置等价 -->
+		<view v-if="!following" class="lcl-new" @click="backToBottom">
+			<text class="lcl-new-icon" :style="newIconStyle">{{ downGlyph }}</text>
+			<text class="lcl-new-text">新消息</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, watch } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { LiveMessage, LiveChatSeg } from '../../models/live.uts'
+import { liveGlyphOf, liveIconStyle } from '../../utils/iconsLive.uts'
+
+/**
+ * 直播聊天列表（源头：`lib/pages/live_room/view.dart#buildMessageListUI`）。
+ *
+ * 视觉：气泡左对齐，底 `grey 10%`（竖屏直播间 `black 30%`），圆角 20，内边距 竖 3 横 10，
+ * 外边距 上（首条 20 / 其余 0）下 6 左右 14；昵称白色 60% + 「: 」；正文白色；表情按接口宽高内嵌。
+ *
+ * 滚动：默认跟随最新（新消息到时滚到底）；用户上滑即停跟随并浮出「新消息」按钮，
+ * 点按钮回底并恢复跟随（源 _onScroll + _shouldAutoScroll 同款）。
+ *
+ * 与源的差异：源用 ShaderMask 让列表顶部渐隐（dstIn 遮罩文字本身）；App 端无 alpha 遮罩文字能力，
+ * 顶部不做渐隐（登记 设计_直播域 §十一）。
+ */
+const props = defineProps({
+	messages: {
+		type: Array,
+		default() {
+			return [] as Array<LiveMessage>
+		}
+	},
+	/** 竖屏直播间：气泡底改 30% 黑（源 isPortrait 分支） */
+	portrait: { type: Boolean, default: false }
+})
+
+const following = ref<boolean>(true)
+const anchorId = ref<string>('')
+
+const downGlyph = liveGlyphOf('keyboard-arrow-down')
+const newIconStyle = liveIconStyle('keyboard-arrow-down', 18, '#FFFFFF')
+
+function emoteSize(value: number): string {
+	const size = value > 0 ? Math.round(value) : 20
+	return size.toString() + 'px'
+}
+
+function rowStyle(index: number): string {
+	return index == 0 ? 'margin-top:20px;' : 'margin-top:0px;'
+}
+
+function bubbleStyle(): string {
+	const color = props.portrait ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.1)'
+	return 'background-color:' + color + ';'
+}
+
+/** 滚到底：把锚点设成最后一条（值变化才会触发滚动） */
+function scrollToBottom() {
+	const total = props.messages.length
+	if (total <= 0) {
+		return
+	}
+	anchorId.value = 'm' + (total - 1).toString()
+}
+
+function backToBottom() {
+	following.value = true
+	scrollToBottom()
+}
+
+function onScroll(event: any) {
+	// 用户上滑（内容位移为负）= 停止跟随最新
+	const detail = event.detail
+	if (detail == null) {
+		return
+	}
+	if (detail.deltaY < 0 && following.value) {
+		following.value = false
+	}
+}
+
+function onReachBottom() {
+	// 到底即恢复跟随
+	following.value = true
+}
+
+watch((): number => props.messages.length, (value: number) => {
+	if (!following.value) {
+		return
+	}
+	if (value > 0) {
+		anchorId.value = 'm' + (value - 1).toString()
+	}
+})
+</script>
+
+<style>
+	.lcl {
+		flex: 1;
+		position: relative;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.lcl-scroll {
+		flex: 1;
+	}
+
+	.lcl-inner {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.lcl-row {
+		display: flex;
+		flex-direction: row;
+		justify-content: flex-start;
+		margin-bottom: 6px;
+		margin-left: 14px;
+		margin-right: 14px;
+	}
+
+	.lcl-bubble {
+		border-radius: 20px;
+		padding-left: 10px;
+		padding-right: 10px;
+		padding-top: 3px;
+		padding-bottom: 3px;
+	}
+
+	.lcl-line {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+
+	.lcl-seg {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.lcl-name {
+		font-size: 14px;
+		line-height: 20px;
+		color: rgba(255, 255, 255, 0.6);
+	}
+
+	.lcl-text {
+		font-size: 14px;
+		line-height: 20px;
+		color: #FFFFFF;
+	}
+
+	.lcl-emote {
+		margin-left: 2px;
+		margin-right: 2px;
+	}
+
+	.lcl-new {
+		position: absolute;
+		right: 20px;
+		bottom: 10px;
+		height: 40px;
+		padding-left: 14px;
+		padding-right: 16px;
+		border-radius: 20px;
+		background-color: rgba(40, 40, 44, 0.92);
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.lcl-new-icon {
+		font-family: MaterialIcons;
+	}
+
+	.lcl-new-text {
+		margin-left: 2px;
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+</style>

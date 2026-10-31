@@ -1,0 +1,309 @@
+/**
+ * 本地存储。
+ * 源工程使用 Hive 5 个 box；目标端沿用同名 key 语义，统一走 uni storage。
+ * 设置项默认值保持「读取点传默认值」的方式（与源实现一致），不在中心表里另立一份默认值。
+ */
+
+/** 设置项 key（源：lib/utils/storage.dart SettingBoxKey，64 项；末 6 项弹幕设置为本端新增） */
+export class SK {
+	static btmProgressBehavior: string = 'btmProgressBehavior'
+	static defaultVideoSpeed: string = 'defaultVideoSpeed'
+	// ---- 倍速设置（源存 video box 的 VideoBoxKey.{playSpeedSystem,playSpeedDefault,longPressSpeedDefault}；
+	//      新端把「系统预设 + 自定义」两键合并为一个可编辑档位列表，默认值取源 generatePlaySpeedList） ----
+	/** 倍速档位列表（本端新增键：源 playSpeedSystem 与 customSpeedsList 合并；默认 0.25~2.0 步进 0.25） */
+	static playSpeedList: string = 'playSpeedList'
+	/** 默认倍速（播放器初值，源 playSpeedDefault 默认 1.0） */
+	static playSpeedDefault: string = 'playSpeedDefault'
+	/** 默认长按倍速（动态长按倍速关闭时生效，源 longPressSpeedDefault 默认 2.0） */
+	static playSpeedLongPressDefault: string = 'playSpeedLongPressDefault'
+	static autoUpgradeEnable: string = 'autoUpgradeEnable'
+	static feedBackEnable: string = 'feedBackEnable'
+	static defaultVideoQa: string = 'defaultVideoQa'
+	static defaultLiveQa: string = 'defaultLiveQa'
+	static defaultAudioQa: string = 'defaultAudioQa'
+	static autoPlayEnable: string = 'autoPlayEnable'
+	static fullScreenMode: string = 'fullScreenMode'
+	static defaultDecode: string = 'defaultDecode'
+	static danmakuEnable: string = 'danmakuEnable'
+	static defaultToastOp: string = 'defaultToastOp'
+	static defaultPicQa: string = 'defaultPicQa'
+	static enableHA: string = 'enableHA'
+	static enableOnlineTotal: string = 'enableOnlineTotal'
+	static enableAutoBrightness: string = 'enableAutoBrightness'
+	static enableAutoEnter: string = 'enableAutoEnter'
+	static enableAutoExit: string = 'enableAutoExit'
+	static p1080: string = 'p1080'
+	static enableCDN: string = 'enableCDN'
+	static autoPiP: string = 'autoPiP'
+	static enableAutoLongPressSpeed: string = 'enableAutoLongPressSpeed'
+	static enablePlayerControlAnimation: string = 'enablePlayerControlAnimation'
+	static defaultAoOutput: string = 'defaultAoOutput'
+	static enableGATMode: string = 'enableGATMode'
+	static enableQuickDouble: string = 'enableQuickDouble'
+	static enableShowDanmaku: string = 'enableShowDanmaku'
+	static enableBackgroundPlay: string = 'enableBackgroundPlay'
+	static fullScreenGestureMode: string = 'fullScreenGestureMode'
+	static blackMidsList: string = 'blackMidsList'
+	static enableRcmdDynamic: string = 'enableRcmdDynamic'
+	static defaultRcmdType: string = 'defaultRcmdType'
+	static enableSaveLastData: string = 'enableSaveLastData'
+	static minDurationForRcmd: string = 'minDurationForRcmd'
+	static minLikeRatioForRecommend: string = 'minLikeRatioForRecommend'
+	static exemptFilterForFollowed: string = 'exemptFilterForFollowed'
+	// 源 filterUnfollowedRatio 在 storage.dart 中已注释停用，本端不设该键
+	static applyFilterToRelatedVideos: string = 'applyFilterToRelatedVideos'
+	static autoUpdate: string = 'autoUpdate'
+	static replySortType: string = 'replySortType'
+	static defaultDynamicType: string = 'defaultDynamicType'
+	static enableHotKey: string = 'enableHotKey'
+	static enableQuickFav: string = 'enableQuickFav'
+	static enableWordRe: string = 'enableWordRe'
+	static enableSearchWord: string = 'enableSearchWord'
+	static enableSystemProxy: string = 'enableSystemProxy'
+	static enableAi: string = 'enableAi'
+	static defaultHomePage: string = 'defaultHomePage'
+	static enableRelatedVideo: string = 'enableRelatedVideo'
+	static themeMode: string = 'themeMode'
+	/** 字号缩放（源键名即 'textScale'，SettingBoxKey.defaultTextScale = 'textScale'） */
+	static defaultTextScale: string = 'textScale'
+	static dynamicColor: string = 'dynamicColor'
+	static customColor: string = 'customColor'
+	static enableSingleRow: string = 'enableSingleRow'
+	static displayMode: string = 'displayMode'
+	static customRows: string = 'customRows'
+	static enableMYBar: string = 'enableMYBar'
+	static hideSearchBar: string = 'hideSearchBar'
+	static hideTabBar: string = 'hideTabBar'
+	static tabbarSort: string = 'tabbarSort'
+	static dynamicBadgeMode: string = 'dynamicBadgeMode'
+	static enableGradientBg: string = 'enableGradientBg'
+	static navBarSort: string = 'navBarSort'
+	static actionTypeSort: string = 'actionTypeSort'
+	// ---- 弹幕设置（源：LocalCacheKey 的弹幕相关 6 项；渲染层统一经下面的 getDanmakuXxx 读取） ----
+	/** 屏蔽的弹幕项编号数组：5 顶部 / 2 滚动 / 4 底部 / 6 彩色（源设置面板的 value），空数组 = 不屏蔽 */
+	static danmakuBlockType: string = 'danmakuBlockType'
+	/** 弹幕显示区域：0.25 1/4屏 / 0.5 半屏 / 0.75 3/4屏 / 1.0 满屏 */
+	static danmakuShowArea: string = 'danmakuShowArea'
+	/** 弹幕不透明度 0~1 */
+	static danmakuOpacity: string = 'danmakuOpacity'
+	/** 弹幕字号缩放倍数（1.0 为基准） */
+	static danmakuFontScale: string = 'danmakuFontScale'
+	/** 单条弹幕滚动时长（秒）：越小越快 */
+	static danmakuDuration: string = 'danmakuDuration'
+	/** 弹幕描边宽度 */
+	/** 弹幕描边宽度（源键名 LocalCacheKey.strokeWidth） */
+	static danmakuStrokeWidth: string = 'strokeWidth'
+}
+
+/** 缓存与非设置类 key（源：LocalCacheKey + box 名） */
+export class CK {
+	static historyPause: string = 'historyPause'
+	static isDisableBatteryOptLocal: string = 'isDisableBatteryOptLocal'
+	static videoFit: string = 'videoFit'
+	static wbiKeys: string = 'wbiKeys'
+	static timeStamp: string = 'timeStamp'
+	static accessKey: string = 'accessKey'
+	/** 登录用户信息（源 Hive box 'userInfo'，本端同键名存 JSON） */
+	static userInfoCache: string = 'userInfo'
+	static historyWord: string = 'historyWord'
+	static videoBox: string = 'video'
+}
+
+// ---------------------------------------------------------------- access_key（app 端推荐）
+// 源头：LocalCacheKey.accessKey 存 {'mid': userInfo.mid, 'value': access_token}。
+// 目标端沿用同一形态（JSON 字符串），读写只走下面两个函数，避免各处自行 parse。
+
+/** 读取 access_key 值（未换取过 / 内容损坏返回空串） */
+export function getAccessKeyValue(): string {
+	const raw = uni.getStorageSync(CK.accessKey)
+	if (raw == null) {
+		return ''
+	}
+	const text = raw as string
+	if (text.length == 0) {
+		return ''
+	}
+	try {
+		const obj = JSON.parse<UTSJSONObject>(text)
+		if (obj == null) {
+			return ''
+		}
+		const value = obj.getString('value')
+		return value == null ? '' : value
+	} catch (e) {
+		return ''
+	}
+}
+
+/** 写入 access_key（mid 不参与推荐请求，只作溯源记录） */
+export function setAccessKey(mid: number, value: string) {
+	const obj: UTSJSONObject = {}
+	obj.set('mid', mid)
+	obj.set('value', value)
+	uni.setStorageSync(CK.accessKey, JSON.stringify(obj))
+}
+
+export function getString(key: string, def: string): string {
+	const raw = uni.getStorageSync(key)
+	if (raw == null) {
+		return def
+	}
+	const text = raw as string
+	return text.length == 0 ? def : text
+}
+
+export function getBool(key: string, def: boolean): boolean {
+	const raw = uni.getStorageSync(key)
+	if (raw == null) {
+		return def
+	}
+	if (typeof raw == 'boolean') {
+		return raw as boolean
+	}
+	const text = raw as string
+	if (text == 'true') {
+		return true
+	}
+	if (text == 'false') {
+		return false
+	}
+	return def
+}
+
+export function getNumber(key: string, def: number): number {
+	const raw = uni.getStorageSync(key)
+	if (raw == null) {
+		return def
+	}
+	if (typeof raw == 'number') {
+		return raw as number
+	}
+	const parsed = parseFloat(raw as string)
+	if (isNaN(parsed)) {
+		return def
+	}
+	return parsed
+}
+
+/**
+ * 数组读取一律先判内容形态再 parse：
+ * App 端 `JSON.parse('')` 抛出的 SyntaxError 不会被 UTS 的 try/catch 兜住（真机实测，
+ * app-service.js getNumberArray 位置裸抛 → 外层 Promise 链断，页面直接落到错误态）。
+ * 因此空串 / 未写入 / 非字符串一律直接返回默认值，parse 只处理真正的 JSON 文本。
+ */
+export function getStringArray(key: string, def: string[]): string[] {
+	const raw = uni.getStorageSync(key)
+	if (raw == null) {
+		return def
+	}
+	if (typeof raw != 'string') {
+		// 原生数组形态（uni storage 直接存数组时）原样返回
+		return raw as string[]
+	}
+	const text = raw as string
+	if (text.length == 0) {
+		return def
+	}
+	try {
+		const arr = JSON.parse<string[]>(text)
+		return arr == null ? def : arr
+	} catch (e) {
+		return def
+	}
+}
+
+export function getNumberArray(key: string, def: number[]): number[] {
+	const raw = uni.getStorageSync(key)
+	if (raw == null) {
+		return def
+	}
+	if (typeof raw != 'string') {
+		return raw as number[]
+	}
+	const text = raw as string
+	if (text.length == 0) {
+		return def
+	}
+	try {
+		const arr = JSON.parse<number[]>(text)
+		return arr == null ? def : arr
+	} catch (e) {
+		return def
+	}
+}
+
+// ---------------------------------------------------------------- 弹幕设置读取
+// 默认值随读取函数给出（源头：lib/utils/global_data_cache.dart 的 defaultValue）。
+// 弹幕渲染层统一走这里的 getter，避免同一个默认值在多处各写一份。
+
+/** 屏蔽的弹幕项编号（空数组 = 不屏蔽） */
+export function getDanmakuBlockType(): number[] {
+	return getNumberArray(SK.danmakuBlockType, [])
+}
+
+/** 弹幕显示区域 0.25 / 0.5 / 0.75 / 1.0，默认 0.5（半屏） */
+export function getDanmakuShowArea(): number {
+	return getNumber(SK.danmakuShowArea, 0.5)
+}
+
+/** 弹幕不透明度 0~1，默认 1.0 */
+export function getDanmakuOpacity(): number {
+	return getNumber(SK.danmakuOpacity, 1.0)
+}
+
+/** 弹幕字号缩放倍数，默认 1.0 */
+export function getDanmakuFontScale(): number {
+	return getNumber(SK.danmakuFontScale, 1.0)
+}
+
+/** 单条弹幕滚动时长（秒），默认 4.0 */
+export function getDanmakuDuration(): number {
+	return getNumber(SK.danmakuDuration, 4.0)
+}
+
+/** 弹幕描边宽度，默认 1.5 */
+export function getDanmakuStrokeWidth(): number {
+	return getNumber(SK.danmakuStrokeWidth, 1.5)
+}
+
+export function setString(key: string, value: string) {
+	uni.setStorageSync(key, value)
+}
+
+export function setBool(key: string, value: boolean) {
+	uni.setStorageSync(key, value)
+}
+
+export function setNumber(key: string, value: number) {
+	uni.setStorageSync(key, value)
+}
+
+export function setStringArray(key: string, value: string[]) {
+	uni.setStorageSync(key, JSON.stringify(value))
+}
+
+export function setNumberArray(key: string, value: number[]) {
+	uni.setStorageSync(key, JSON.stringify(value))
+}
+
+export function removeKey(key: string) {
+	uni.removeStorageSync(key)
+}
+
+export function clearAll() {
+	uni.clearStorageSync()
+}
+
+/**
+ * 倍速档位默认值（源 `generatePlaySpeedList`：0.25~2.0 步进 0.25）。
+ * 播放器与倍速设置页共用这一处默认值——两处各写一份必然漂移（P10 教训：默认值是接线的一部分）。
+ */
+export function defaultSpeedList(): number[] {
+	const list: number[] = []
+	let speed = 0.25
+	while (speed <= 2.0) {
+		list.push(Math.round(speed * 100) / 100)
+		speed = speed + 0.25
+	}
+	return list
+}

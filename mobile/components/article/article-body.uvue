@@ -1,0 +1,145 @@
+<template>
+	<view class="ab">
+		<view v-for="(paragraph, pi) in paragraphs" :key="'p-' + pi.toString()" class="ab-para">
+			<!-- 文本段：富词节点逐段拼接（粗体/字色/字号 ×0.95；R·G 颠倒动效降级静态着色） -->
+			<text
+				v-if="paragraph.paraType == 1 || paragraph.paraType == 8 || paragraph.paraType == 9"
+				class="ab-text"
+				:style="paragraphStyle(paragraph)"
+			>
+				<text
+					v-for="(word, wi) in paragraph.words"
+					:key="'w-' + pi.toString() + '-' + wi.toString()"
+					class="ab-word"
+					:style="wordStyle(word, paragraph)"
+				>{{ word.words }}</text>
+			</text>
+			<!-- 图片段：宽 =（屏宽−32）× scale，高 = 宽 / aspectRatio；点击全图预览 -->
+			<view v-else-if="paragraph.paraType == 2" class="ab-pics">
+				<view
+					v-for="(pic, idx) in paragraph.pics"
+					:key="'pic-' + pi.toString() + '-' + idx.toString()"
+					class="ab-pic-wrap"
+					@click="onPreview(pic.url)"
+				>
+					<image class="ab-pic" :style="picStyle(pic)" :src="pic.url" mode="aspectFit"></image>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { ArticleParagraph, ArticleWord, ArticlePic } from '../../models/article.uts'
+import { textPrimary } from '../../utils/theme.uts'
+
+/**
+ * 图文/专栏结构化正文渲染（源 `lib/pages/opus/text_helper.dart` + opus/read 两页的段落循环）。
+ *
+ * 段落类型：1 文本段 / 2 图片段（源仅渲染这两类）；8、9 为站方新增的标题段
+ * （源 ModuleParagraph 同样收到但视图未渲染 → 标题丢失）。本端把 8/9 按文本段渲染
+ * （字重与字号取节点自带 font_size），属「只更好不更差」的补全，差异登记在迁移清单。
+ *
+ * 词节点样式（源 buildTextSpan 同款）：fontSize = font_size × 0.95（缺省 14）、bold → 700、
+ * color #RRGGBB 着色（缺省主题正文色）；行高 align==1 ? 2 : 1.5 的视觉等价常量 21 / 28。
+ * R·G 颠倒字（源翻转动效）降级为静态着色——uts 无该动画等价，仅装饰性。
+ *
+ * 图片段：宽 =（屏宽 − 32）× scale（scale = width/600，源 Pic.fromJson 同款），高 = 宽 / aspectRatio；
+ * 点击 `uni.previewImage` 打开全图。
+ */
+const props = defineProps({
+	paragraphs: { type: Array, default: () => [] as Array<ArticleParagraph> }
+})
+
+const screenWidth = ((): number => {
+	try {
+		return uni.getWindowInfo().windowWidth
+	} catch (e) {
+		return 390
+	}
+})()
+
+const allPicUrls = computed((): Array<string> => {
+	const urls: Array<string> = []
+	const list = props.paragraphs as Array<ArticleParagraph>
+	for (let i = 0; i < list.length; i++) {
+		const pics = list[i].pics
+		for (let j = 0; j < pics.length; j++) {
+			urls.push(pics[j].url)
+		}
+	}
+	return urls
+})
+
+function paragraphStyle(paragraph: ArticleParagraph): string {
+	const align = paragraph.align
+	let textAlign = 'left'
+	if (align == 1) {
+		textAlign = 'center'
+	} else if (align == 2) {
+		textAlign = 'right'
+	}
+	// 标题段（8/9）居中标签外的文本段保持左对齐
+	return 'text-align:' + textAlign + ';'
+}
+
+function wordStyle(word: ArticleWord, paragraph: ArticleParagraph): string {
+	const base = word.fontSize > 0 ? word.fontSize * 0.95 : 14
+	const lineHeight = paragraph.align == 1 ? Math.round(base * 2) : Math.round(base * 1.5)
+	let color = textPrimary()
+	if (word.colorHex.length >= 7) {
+		color = word.colorHex.substring(0, 7)
+	}
+	const weight = word.bold ? '700' : '400'
+	return 'font-size:' + base.toString() + 'px;line-height:' + lineHeight.toString() + 'px;color:' + color + ';font-weight:' + weight + ';'
+}
+
+function picStyle(pic: ArticlePic): string {
+	const width = (screenWidth - 32) * pic.scale
+	const height = pic.aspectRatio > 0 ? width / pic.aspectRatio : width
+	return 'width:' + Math.round(width).toString() + 'px;height:' + Math.round(height).toString() + 'px;'
+}
+
+function onPreview(url: string) {
+	const urls = allPicUrls.value
+	if (urls.length == 0) {
+		return
+	}
+	uni.previewImage({
+		urls: urls,
+		current: url
+	})
+}
+</script>
+
+<style>
+	.ab {
+		display: flex;
+		flex-direction: column;
+	}
+	.ab-para {
+		display: flex;
+		flex-direction: column;
+		margin-bottom: 10px;
+	}
+	.ab-text {
+		width: 100%;
+	}
+	.ab-word {
+		font-size: 14px;
+		line-height: 21px;
+	}
+	.ab-pics {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+	.ab-pic-wrap {
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.ab-pic {
+		border-radius: 4px;
+	}
+</style>

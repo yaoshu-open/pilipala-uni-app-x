@@ -1,0 +1,294 @@
+<template>
+	<view class="lni">
+		<view class="lni-row" @click="onTap">
+			<!-- 层叠头像：1 人整圆 50；2-3 人按 2×2 象限各 25（源 SizedBox 50 + Positioned 计算） -->
+			<view class="lni-avatar-wrap" @click.stop="onAvatarTap">
+				<view
+					v-for="(user, index) in stackedUsers"
+					:key="'stack-' + index.toString()"
+					class="lni-stack-cell"
+					:style="cellStyle(index)"
+				>
+					<network-img
+						:src="user.avatar"
+						:width="avatarSize"
+						:height="avatarSize"
+						:radius="avatarRadius"
+					></network-img>
+				</view>
+			</view>
+			<view class="lni-main">
+				<view class="lni-title">
+					<text class="lni-names" :style="nameStyle" :max-lines="2">{{ nicknameText }}</text>
+					<text class="lni-rest" :style="secondaryStyle" :max-lines="2">{{ restText }}</text>
+				</view>
+				<text class="lni-time" :style="secondaryStyle">{{ timeText }}</text>
+			</view>
+			<!-- 右侧缩略：video=封面 60×60；reply=标题文本框 60×60 -->
+			<view v-if="isVideo" class="lni-thumb">
+				<network-img :src="image" width="60px" height="60px" radius="4px"></network-img>
+			</view>
+			<view v-else-if="isReply" class="lni-root">
+				<text class="lni-root-text" :style="secondaryStyle" :max-lines="4">{{ titleText }}</text>
+			</view>
+			<!-- 其余来源类型（动态等）：接口给了封面就出封面，无封面不留空占位 -->
+			<view v-else-if="image.length > 0" class="lni-thumb">
+				<network-img :src="image" width="60px" height="60px" radius="4px"></network-img>
+			</view>
+		</view>
+
+		<!-- 多人展开：左侧压暗 74（点击收起）+ 右侧横向头像列表（宽=屏宽-74，源 AnimatedContainer 终态） -->
+		<view v-if="expanded" class="lni-mask" @click.stop="onCollapse"></view>
+		<view v-if="expanded" class="lni-panel" :style="panelStyle">
+			<scroll-view class="lni-panel-scroll" direction="horizontal" :show-scrollbar="false">
+				<view class="lni-panel-row">
+					<view
+						v-for="(user, index) in users"
+						:key="'panel-' + index.toString()"
+						class="lni-panel-cell"
+						@click.stop="onPanelUserTap(user)"
+					>
+						<network-img :src="user.avatar" width="42px" height="42px" radius="21px"></network-img>
+						<text class="lni-panel-name" :style="secondaryStyle" :max-lines="1">{{ user.nickname }}</text>
+					</view>
+				</view>
+			</scroll-view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { LikeNoticeItem, LikeNoticeContent, NoticeUser } from '../../models/message.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary, cardBackground } from '../../utils/theme.uts'
+
+/**
+ * 收到的赞条目（源头：`lib/pages/message/like/view.dart` LikeItem）。
+ *
+ *  - 层叠头像：1 人 = 整圆 50 直跳 member；2-3 人按 2×2 象限各 25（源 top=i%2*25 / left=(i/2)*25），
+ *    点击展开右侧横向头像列表遮罩（宽=屏宽-74，左侧 74 压暗层点收起）；
+ *  - 文案：「昵称A、昵称B」+（总数>1 时「等总计N人」）+「赞了我的<business>」；
+ *  - 右侧缩略：video 出封面 60×60、reply 出标题文本框 60×60；
+ *  - 整条点击进视频详情（页面解析 uri → bvid → ab2c 取 cid，失败 toast「视频可能失效了」）。
+ *
+ * 与源的差异：源用 AnimatedContainer 做 300ms 宽度过渡；蒸汽端多值 transition 会静默失效，
+ * 这里取「静态展开」（终态布局与源一致，仅无动画），不做逐帧动画。
+ */
+const props = defineProps({
+	item: { type: Object, default: null }
+})
+
+const emit = defineEmits(['tap', 'open-user'])
+
+const expanded = ref<boolean>(false)
+
+const windowWidth: number = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowWidth
+	} catch (e) {
+		return 375
+	}
+})()
+
+const notice = computed((): LikeNoticeItem => props.item as LikeNoticeItem)
+const content = computed((): LikeNoticeContent => notice.value.item)
+const users = computed((): Array<NoticeUser> => notice.value.users)
+const stackCount = computed((): number => users.value.length > 3 ? 3 : users.value.length)
+const stackedUsers = computed((): Array<NoticeUser> => {
+	if (stackCount.value >= users.value.length) {
+		return users.value
+	}
+	return users.value.slice(0, 3)
+})
+const single = computed((): boolean => stackCount.value <= 1)
+const avatarSize = computed((): string => single.value ? '50px' : '25px')
+const avatarRadius = computed((): string => single.value ? '25px' : '12.5px')
+
+const nicknameText = computed((): string => {
+	const names: string[] = []
+	const limit = users.value.length > 2 ? 2 : users.value.length
+	for (let i = 0; i < limit; i++) {
+		const name = users.value[i].nickname
+		if (name.length > 0) {
+			names.push(name)
+		}
+	}
+	return names.join('、')
+})
+
+const restText = computed((): string => {
+	const counts = notice.value.counts > 0 ? notice.value.counts : users.value.length
+	const prefix = counts > 1 ? ' 等总计' + counts.toString() + '人' : ''
+	const business = content.value.business.length > 0 ? content.value.business : '内容'
+	return prefix + ' 赞了我的' + business
+})
+
+const timeText = computed((): string => dateFormat(notice.value.likeTime, 'detail'))
+const isVideo = computed((): boolean => content.value.type == 'video')
+const isReply = computed((): boolean => content.value.type == 'reply')
+const image = computed((): string => content.value.image)
+const titleText = computed((): string => content.value.title)
+
+const nameStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const panelStyle = computed((): string => {
+	return 'width:' + (windowWidth - 74).toString() + 'px;background-color:' + cardBackground() + ';'
+})
+
+function cellStyle(index: number): string {
+	if (single.value) {
+		return 'left:0px;top:0px;'
+	}
+	// 源口径：top = (i%2) * 25，left = floor(i/2) * 25（列优先填 2×2）
+	const top = (index % 2) * 25
+	const left = Math.floor(index / 2) * 25
+	return 'left:' + left.toString() + 'px;top:' + top.toString() + 'px;'
+}
+
+function onTap() {
+	emit('tap')
+}
+
+function onAvatarTap() {
+	if (single.value) {
+		// 单人：头像即入口，直跳 member（源 usersLen == 1 分支）
+		if (users.value.length == 0) {
+			return
+		}
+		const first = users.value[0]
+		if (first.mid > 0) {
+			emit('open-user', first.mid.toString())
+		}
+		return
+	}
+	// 多人：切换展开层（源 expandedUsersAvatar）
+	expanded.value = !expanded.value
+}
+
+function onCollapse() {
+	expanded.value = false
+}
+
+function onPanelUserTap(user: NoticeUser) {
+	if (user.mid <= 0) {
+		return
+	}
+	emit('open-user', user.mid.toString())
+}
+</script>
+
+<style>
+	.lni {
+		position: relative;
+	}
+	.lni-row {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		padding: 14px;
+	}
+	.lni-avatar-wrap {
+		position: relative;
+		width: 50px;
+		height: 50px;
+		flex-shrink: 0;
+	}
+	.lni-stack-cell {
+		position: absolute;
+	}
+	.lni-main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 10px;
+	}
+	.lni-title {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+	.lni-names {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.lni-rest {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	/* 时间：源 Text 无字号覆盖 → bodyMedium 14sp */
+	.lni-time {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 4px;
+	}
+	.lni-thumb {
+		width: 60px;
+		height: 60px;
+		margin-left: 25px;
+		flex-shrink: 0;
+	}
+	.lni-root {
+		width: 60px;
+		height: 60px;
+		padding: 4px;
+		margin-left: 25px;
+		flex-shrink: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.lni-root-text {
+		font-size: 12px;
+		line-height: 15px;
+	}
+	/* 展开层：左侧压暗 74 + 右侧面板贴条目右缘（源 Stack 两层 Positioned） */
+	.lni-mask {
+		position: absolute;
+		left: 0px;
+		top: 0px;
+		bottom: 0px;
+		width: 74px;
+		background-color: rgba(0, 0, 0, 0.3);
+	}
+	.lni-panel {
+		position: absolute;
+		right: 0px;
+		top: 0px;
+		bottom: 0px;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+	}
+	.lni-panel-scroll {
+		width: 100%;
+		height: 100%;
+		/* 横向 scroll-view 三要素之一：容器自身显式 row（缺省按 column 排布会子项叠压/末项截断） */
+		flex-direction: row;
+	}
+	.lni-panel-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		height: 100%;
+	}
+	.lni-panel-cell {
+		width: 68px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		margin-left: 4px;
+		margin-right: 4px;
+	}
+	.lni-panel-name {
+		width: 68px;
+		font-size: 12px;
+		line-height: 16px;
+		margin-top: 6px;
+		text-align: center;
+	}
+</style>

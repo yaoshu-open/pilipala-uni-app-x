@@ -1,0 +1,87 @@
+<template>
+	<!-- 关注中正在直播：横滑头像圈（源 LiveFollowingListView：高 100，项 padding(3,12,3,0)） -->
+	<scroll-view class="lfr" direction="horizontal" :show-scrollbar="false">
+		<view class="lfr-row">
+			<view v-for="item in list" :key="item.roomId.toString()" class="lfr-item" @click="onTap(item)">
+				<view class="lfr-face" :style="faceStyle">
+					<network-img :src="item.face" width="50px" height="50px" radius="25px"></network-img>
+				</view>
+				<text class="lfr-name" :max-lines="1">{{ item.uname }}</text>
+			</view>
+		</view>
+	</scroll-view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { LiveFollowingItem } from '../../models/live.uts'
+import { themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 关注横滑行（源头：`lib/pages/live/view.dart#LiveFollowingListView`）。
+ *
+ * 取值：整行高 100；单元 padding 上 12（左 3 右 3 下 0）；头像圈 54×54、padding 2、圆角 27、
+ * 描边 1.5 主色、内图 50×50；昵称与头像间距 6；昵称宽 62 固定、12 号、居中、单行。
+ * 横向滚动三要素：容器 flex-direction:row（本组件容器由 scroll-view 承担，内容行显式 row）+
+ * 确定宽度（页面给 flex:1）+ 子项 flex-shrink:0。
+ */
+const props = defineProps({
+	list: {
+		type: Array,
+		default() {
+			return [] as Array<LiveFollowingItem>
+		}
+	}
+})
+
+const emit = defineEmits(['tap'])
+
+const primary = themeColor(currentThemeIndex())
+const faceStyle = computed((): string => 'border-color:' + primary + ';')
+
+function onTap(item: LiveFollowingItem) {
+	emit('tap', item)
+}
+</script>
+
+<style>
+	.lfr {
+		height: 100px;
+	}
+
+	.lfr-row {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+	}
+
+	.lfr-item {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-left: 3px;
+		padding-right: 3px;
+		padding-top: 12px;
+		flex-shrink: 0;
+	}
+
+	.lfr-face {
+		width: 54px;
+		height: 54px;
+		border-radius: 27px;
+		border-width: 1.5px;
+		border-style: solid;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lfr-name {
+		width: 62px;
+		margin-top: 6px;
+		font-size: 12px;
+		text-align: center;
+	}
+</style>

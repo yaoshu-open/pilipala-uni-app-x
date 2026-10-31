@@ -1,0 +1,77 @@
+/**
+ * UTSJSONObject 读取工具。
+ * 接口字段一律走 getString/getNumber/getJSON/getArray（基座实测结论：
+ * UTSJSONObject 不能当动态 Map 用，keys() 运行时会抛异常）。
+ */
+
+export function strOf(obj: UTSJSONObject, key: string): string {
+	const value = obj.getString(key)
+	return value == null ? '' : value
+}
+
+export function numOf(obj: UTSJSONObject, key: string): number {
+	const value = obj.getNumber(key)
+	return value == null ? 0 : value
+}
+
+export function boolOf(obj: UTSJSONObject, key: string): boolean {
+	const value = obj.getBoolean(key)
+	return value == null ? false : value
+}
+
+export function objOf(obj: UTSJSONObject, key: string): UTSJSONObject | null {
+	return obj.getJSON(key)
+}
+
+export function arrOf(obj: UTSJSONObject, key: string): Array<UTSJSONObject> {
+	const raw = obj.getArray(key)
+	const list: Array<UTSJSONObject> = []
+	if (raw == null) {
+		return list
+	}
+	for (let i = 0; i < raw.length; i++) {
+		const item = raw[i]
+		if (item != null) {
+			list.push(item as UTSJSONObject)
+		}
+	}
+	return list
+}
+
+/** 数字数组（如 accept_quality: [80,64,32]）；元素非数字时跳过，不抛异常 */
+export function numArrayOf(obj: UTSJSONObject, key: string): Array<number> {
+	const raw = obj.getArray(key)
+	const list: Array<number> = []
+	if (raw == null) {
+		return list
+	}
+	for (let i = 0; i < raw.length; i++) {
+		const item = raw[i]
+		if (item == null) {
+			continue
+		}
+		if (typeof item == 'number') {
+			list.push(item as number)
+		}
+	}
+	return list
+}
+
+/** 字符串数组（如 accept_description）；元素非字符串时跳过，不抛异常 */
+export function strArrayOf(obj: UTSJSONObject, key: string): Array<string> {
+	const raw = obj.getArray(key)
+	const list: Array<string> = []
+	if (raw == null) {
+		return list
+	}
+	for (let i = 0; i < raw.length; i++) {
+		const item = raw[i]
+		if (item == null) {
+			continue
+		}
+		if (typeof item == 'string') {
+			list.push(item as string)
+		}
+	}
+	return list
+}

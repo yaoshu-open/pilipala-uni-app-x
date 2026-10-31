@@ -1,0 +1,277 @@
+<template>
+	<view class="mr" :style="pageStyle">
+		<app-navbar title="回复我的" :title-size="22"></app-navbar>
+
+		<!-- 错误态（含未登录 -101：重试按钮行为=去登录） -->
+		<view v-if="state == 'error'" class="mr-fill">
+			<p-http-error :message="errorText" @retry="onErrorAction"></p-http-error>
+		</view>
+
+		<scroll-view
+			v-else
+			class="mr-scroll"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:lower-threshold="200"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+		>
+			<!-- 加载态：8 行骨架（头像 42 + 双行条 + 右侧 60 缩略，源条目骨架形态） -->
+			<!-- 骨架：常驻渲染 + display 切换（实测蒸汽模式下该子树 v-if 转 false 后节点不卸载，
+				会与空态/列表叠在一起；同 P5 页「骨架与内容分容器」同源问题的可靠解） -->
+			<view class="mr-skeleton" :style="state == 'loading' ? '' : 'display:none;'">
+				<view v-for="n in 8" :key="'sk-' + n.toString()" class="mr-sk-row">
+					<skeleton-block width="42px" height="42px" radius="21px"></skeleton-block>
+					<view class="mr-sk-lines">
+						<skeleton-block width="45%" height="14px" radius="4px"></skeleton-block>
+						<view class="mr-sk-gap"></view>
+						<skeleton-block width="80%" height="12px" radius="4px"></skeleton-block>
+					</view>
+					<skeleton-block width="60px" height="60px" radius="4px"></skeleton-block>
+				</view>
+			</view>
+
+			<!-- 空态（与骨架用独立 v-if：uvue 蒸汽模式下 v-else-if 链在 scroll-view 内实测会残留上一分支节点） -->
+			<view v-if="state == 'empty'" class="mr-empty">
+				<empty-illus text="没有数据"></empty-illus>
+			</view>
+
+			<!-- 列表 -->
+			<view v-if="state == 'ready'" class="mr-list">
+				<view v-for="(item, index) in items" :key="itemKey(item, index)">
+					<reply-notice-item
+						:item="item"
+						@tap="onItemTap(index)"
+						@open-user="onOpenUser"
+					></reply-notice-item>
+					<view v-if="index < items.length - 1" class="mr-divider"></view>
+				</view>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import { onLoad, onShow } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import ReplyNoticeItem from '../../components/message/reply-notice-item.uvue'
+import { fetchMessageReply } from '../../api/message.uts'
+import { ReplyNoticeItem as ReplyNoticeModel, NoticeCursor, bvidFromUri } from '../../models/message.uts'
+import { ab2c } from '../../api/search.uts'
+import { refreshLoginState, ensureLoginState } from '../../composables/useLogin.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground } from '../../utils/theme.uts'
+
+/**
+ * 回复我的（源头：`lib/pages/message/reply/{view,controller}.dart`）。
+ *
+ *  - 端点：GET /x/msgfeed/reply（api.bilibili.com），游标分页 = id + reply_time（首页两个参数都不传）；
+ *    响应 cursor.is_end 为 true 即没有更多（源 controller.queryMessageReply 同口径）；
+ *  - 触底加载：200px 阈值触发下一页（源无「没有更多」尾标，本页同样不渲染）；
+ *  - 下拉刷新：重拉首页并重置游标（源 RefreshIndicator → type='init'）；
+ *  - 条目：`reply-notice-item`（头像 42 + 昵称/动作 + @人高亮正文 + 被回复摘要 + 时间 + 右侧缩略）；
+ *  - 点击：整条 → 解析 uri 取 bvid，ab2c 换 cid 后跳视频详情（源同款；cid 取不到时仅带 bvid 进页，
+ *    视频页自身按 bvid 兜底取 cid）；头像与 @人 → member 页；
+ *  - 未登录：错误态「账号未登录」，重试按钮跳登录页，返回后自动重试（工程 P4/P5 同款链路）。
+ *
+ * 与源差异：源触底用 EasyThrottle 1s 节流，这里用 loadingMore 互斥（同一时刻只发一页请求），
+ * 行为等价且少一个定时器；加载态源为空屏，这里按设计 §七 给 8 行骨架。
+ */
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const errorCode = ref<number>(0)
+const items = ref<Array<ReplyNoticeModel>>([])
+const refreshing = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const finished = ref<boolean>(false)
+
+let cursor: NoticeCursor = new NoticeCursor()
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+
+function itemKey(item: ReplyNoticeModel, index: number): string {
+	return 'reply-' + item.id.toString() + '-' + index.toString()
+}
+
+// ---------------------------------------------------------------- 数据加载
+
+async function loadFirst(retried: boolean = false) {
+	state.value = 'loading'
+	const res = await fetchMessageReply(0, 0)
+	if (!res.status) {
+		// -101：cookie 有效但内存登录态尚未恢复（冷启动 nav 未返回）→ 静默校正后重试一次
+		if (res.code == -101 && !retried) {
+			const ok = await refreshLoginState()
+			if (ok) {
+				return await loadFirst(true)
+			}
+		}
+		state.value = 'error'
+		errorCode.value = res.code
+		errorText.value = res.message
+		return
+	}
+	cursor = res.cursor
+	finished.value = res.cursor.isEnd || res.items.length == 0
+	items.value = res.items
+	state.value = res.items.length == 0 ? 'empty' : 'ready'
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value || refreshing.value || finished.value) {
+		return
+	}
+	loadingMore.value = true
+	const res = await fetchMessageReply(cursor.id, cursor.time)
+	if (res.status) {
+		const next: Array<ReplyNoticeModel> = items.value.slice()
+		for (let i = 0; i < res.items.length; i++) {
+			next.push(res.items[i])
+		}
+		items.value = next
+		cursor = res.cursor
+		if (res.cursor.isEnd || res.items.length == 0) {
+			finished.value = true
+		}
+	} else {
+		uni.showToast({ title: res.message, icon: 'none' })
+	}
+	loadingMore.value = false
+}
+
+async function onRefresh() {
+	if (state.value == 'loading') {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	const res = await fetchMessageReply(0, 0)
+	if (res.status) {
+		cursor = res.cursor
+		finished.value = res.cursor.isEnd || res.items.length == 0
+		items.value = res.items
+		state.value = res.items.length == 0 ? 'empty' : 'ready'
+	} else {
+		uni.showToast({ title: res.message, icon: 'none' })
+	}
+	refreshing.value = false
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+function onErrorAction() {
+	if (errorCode.value == -101) {
+		uni.navigateTo({ url: '/pages/login/login' })
+	} else {
+		loadFirst()
+	}
+}
+
+// ---------------------------------------------------------------- 交互
+
+async function onItemTap(index: number) {
+	if (index < 0 || index >= items.value.length) {
+		return
+	}
+	const notice = items.value[index]
+	const bvid = bvidFromUri(notice.item.uri)
+	if (bvid.length == 0) {
+		uni.showToast({ title: '视频可能失效了', icon: 'none' })
+		return
+	}
+	const cid = await ab2c(0, bvid)
+	let url = '/pages/video/video?bvid=' + bvid
+	if (cid > 0) {
+		url = url + '&cid=' + cid.toString()
+	}
+	uni.navigateTo({ url: url })
+}
+
+function onOpenUser(mid: string) {
+	if (mid.length == 0 || mid == '0') {
+		return
+	}
+	uni.navigateTo({ url: '/pages/member/member?mid=' + mid })
+}
+
+// ---------------------------------------------------------------- 生命周期
+
+onLoad(() => {
+	// 冷启动先静默恢复登录态（cookie 有效但内存态未恢复时不再误判未登录）
+	ensureLoginState().then(() => {
+		loadFirst()
+	})
+})
+
+/** 登录态由 App 层静默校正到位后（冷启动 nav 晚于首屏），若当前是错误态则自动重载 */
+watch((): boolean => userState.isLogin, (value: boolean) => {
+	if (value && state.value == 'error') {
+		loadFirst()
+	}
+})
+
+onShow(() => {
+	// 登录返回后的自动重试（-101 才自动重试，其它错误等用户点重试）
+	if (state.value == 'error' && errorCode.value == -101) {
+		loadFirst()
+	}
+})
+</script>
+
+<style>
+	.mr {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* 源 HttpError = SizedBox(height: 400)，内容在 400 盒内居中（不是整屏居中） */
+	.mr-fill {
+		height: 400px;
+		display: flex;
+		flex-direction: column;
+	}
+	.mr-scroll {
+		flex: 1;
+	}
+	.mr-skeleton {
+		display: flex;
+		flex-direction: column;
+	}
+	.mr-sk-row {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		padding: 14px;
+	}
+	.mr-sk-lines {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 10px;
+		margin-right: 25px;
+	}
+	.mr-sk-gap {
+		height: 8px;
+	}
+	.mr-empty {
+		display: flex;
+		flex-direction: column;
+	}
+	.mr-list {
+		display: flex;
+		flex-direction: column;
+	}
+	/* 分割线：indent 66 / endIndent 14（源头像 42 + 左 14 + 间距 10） */
+	.mr-divider {
+		height: 1px;
+		background-color: rgba(128, 128, 128, 0.1);
+		margin-left: 66px;
+		margin-right: 14px;
+	}
+</style>

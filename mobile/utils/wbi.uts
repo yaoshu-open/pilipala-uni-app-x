@@ -1,0 +1,105 @@
+import { apiGet } from './request.uts'
+import { Params } from './params.uts'
+import { keyFromUrl, wbiSign } from './sign.uts'
+import { getString, setString } from './storage.uts'
+
+/**
+ * WBI 签名所需的 imgKey / subKey。
+ *
+ * 来源：`GET /x/web-interface/nav` 的 `data.wbi_img.{img_url,sub_url}`，
+ * 取文件名去扩展名（源 lib/utils/wbi_sign.dart 同款）。
+ * 缓存：storage:wbiKeys（`{imgKey, subKey, ts}`），有效期 6 小时（源按日缓存，此处取更保守值）。
+ */
+const WBI_KEY: string = 'wbiKeys'
+const WBI_TTL: number = 6 * 60 * 60 * 1000
+
+class WbiKeys {
+	imgKey: string = ''
+	subKey: string = ''
+}
+
+function readCache(): WbiKeys {
+	const keys = new WbiKeys()
+	const raw = getString(WBI_KEY, '')
+	if (raw.length == 0) {
+		return keys
+	}
+	try {
+		const obj = JSON.parse<UTSJSONObject>(raw)
+		const ts = obj.getNumber('ts')
+		if (ts == null || (Date.now() - ts) > WBI_TTL) {
+			return keys
+		}
+		const img = obj.getString('imgKey')
+		const sub = obj.getString('subKey')
+		keys.imgKey = img == null ? '' : img
+		keys.subKey = sub == null ? '' : sub
+	} catch (e) {
+		console.log('[wbi] cache parse failed')
+	}
+	return keys
+}
+
+async function fetchKeys(): Promise<WbiKeys> {
+	const keys = new WbiKeys()
+	const res = await apiGet('/x/web-interface/nav')
+	if (res == null) {
+		return keys
+	}
+	const data = res.getJSON('data')
+	if (data == null) {
+		return keys
+	}
+	const img = data.getJSON('wbi_img')
+	if (img == null) {
+		return keys
+	}
+	const imgUrl = img.getString('img_url')
+	const subUrl = img.getString('sub_url')
+	if (imgUrl == null || subUrl == null) {
+		return keys
+	}
+	keys.imgKey = keyFromUrl(imgUrl)
+	keys.subKey = keyFromUrl(subUrl)
+	if (keys.imgKey.length > 0 && keys.subKey.length > 0) {
+		const cache: UTSJSONObject = {}
+		cache.set('imgKey', keys.imgKey)
+		cache.set('subKey', keys.subKey)
+		cache.set('ts', Date.now())
+		setString(WBI_KEY, JSON.stringify(cache))
+	}
+	return keys
+}
+
+/** 取签名 key（缓存命中优先；force=true 强制重取） */
+export async function ensureWbiKeys(force: boolean): Promise<WbiKeys> {
+	if (!force) {
+		const cached = readCache()
+		if (cached.imgKey.length > 0 && cached.subKey.length > 0) {
+			return cached
+		}
+	}
+	return await fetchKeys()
+}
+
+/** 带 WBI 签名的 GET；首次失败（key 失效）时重取 key 再试一次 */
+export async function wbiGet(path: string, params: Params): Promise<UTSJSONObject | null> {
+	const keys = await ensureWbiKeys(false)
+	if (keys.imgKey.length == 0) {
+		return null
+	}
+	const signed = wbiSign(params, keys.imgKey, keys.subKey)
+	const res = await apiGet(path, signed)
+	if (res == null) {
+		return null
+	}
+	const code = res.getNumber('code')
+	if (code != null && code == 0) {
+		return res
+	}
+	const retryKeys = await ensureWbiKeys(true)
+	if (retryKeys.imgKey.length == 0) {
+		return res
+	}
+	return await apiGet(path, wbiSign(params, retryKeys.imgKey, retryKeys.subKey))
+}

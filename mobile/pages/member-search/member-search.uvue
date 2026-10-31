@@ -1,0 +1,350 @@
+<template>
+	<view class="mse" :style="pageStyle">
+		<!-- 顶栏：返回 + 输入框（hint「搜索」）+ 清空 + 提交（基线_P5_member_search 裸顶栏形态） -->
+		<view class="mse-nav" :style="navStyle">
+			<view class="mse-back" @click="onBackTap">
+				<p-icon name="arrow-back" :size="24" :color="iconColor"></p-icon>
+			</view>
+			<view class="mse-field">
+				<input
+					class="mse-input"
+					:style="inputStyle"
+					:value="keyword"
+					placeholder="搜索"
+					placeholder-class="mse-placeholder"
+					:focus="autoFocus"
+					confirm-type="search"
+					@input="onInput"
+					@confirm="submit"
+				/>
+				<view v-if="keyword.length > 0" class="mse-clear" @click="onClear">
+					<p-icon name="clear-outlined" :size="20" :color="clearColor"></p-icon>
+				</view>
+			</view>
+			<view class="mse-submit" @click="submit">
+				<p-icon name="search" :size="22" :color="iconColor"></p-icon>
+			</view>
+		</view>
+
+		<!-- 初始态：中央引导文案（源：搜索「uname」的动态、视频） -->
+		<view v-if="phase == 'init'" class="mse-hint">
+			<text class="mse-hint-text" :style="secondaryTextStyle">搜索「{{ uname }}」的动态、视频</text>
+		</view>
+
+		<view v-else class="mse-body">
+			<view v-if="state == 'error'" class="mse-fill">
+				<p-http-error :message="errorText" @retry="submit"></p-http-error>
+			</view>
+			<view v-else-if="state == 'empty'" class="mse-fill">
+				<list-state state="empty" empty-text="没有搜索到相关投稿" @retry="submit"></list-state>
+			</view>
+			<scroll-view
+				v-else
+				class="mse-scroll"
+				:lower-threshold="300"
+				@scrolltolower="onLoadMore"
+			>
+				<view v-if="state == 'loading'" class="mse-list">
+					<view v-for="n in 10" :key="'sk-' + n.toString()">
+						<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+					</view>
+				</view>
+				<view v-else class="mse-list">
+					<p-video-card-h
+						v-for="item in items"
+						:key="item.bvid.length > 0 ? item.bvid : item.aid.toString()"
+						:pic="item.pic"
+						:title="item.title"
+						:duration="durationSeconds(item.length)"
+						:view-count="item.play"
+						:danmu-count="item.videoReview"
+						:pubdate="item.created"
+						:owner-name="item.author"
+						:show-pubdate="false"
+						:card-height="cardHeight"
+						@tap="openDetail(item)"
+					></p-video-card-h>
+					<view class="mse-footer">
+						<text class="mse-footer-text" :style="secondaryTextStyle">{{ footerText }}</text>
+					</view>
+				</view>
+			</scroll-view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PVideoCardH from '../../components/p-video-card-h/p-video-card-h.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import ListState from '../../components/list-state/list-state.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import { fetchMemberArchive } from '../../api/member.uts'
+import { VListItem } from '../../models/member.uts'
+import { cardBackground, pageBackground, textPrimary, textSecondary } from '../../utils/theme.uts'
+import { statusBarPaddingTop } from '../../utils/safeArea.uts'
+import { durationToSeconds } from '../../utils/format.uts'
+
+/**
+ * 主页搜索页（源头：`lib/pages/member_search/view.dart` + controller.dart）。
+ *
+ * 只实现投稿搜索（源 searchDynamic 为空方法、memberDynamicSearch 硬编码调试残留，
+ * 均不迁移）。形态照源与基线：裸顶栏（返回+输入框+清空+提交）、初始态中央
+ * 「搜索「uname」的动态、视频」、结果=横向视频卡列表（带 UP 行、无发布时间）。
+ * 清空键语义照源：有关键词→清词；无关键词→返回上级。
+ * 分页：pn 递增 + count 比对终止；触底 300px + 1s 节流（源同款）。
+ */
+const mid = ref<number>(0)
+const uname = ref<string>('')
+const keyword = ref<string>('')
+const autoFocus = ref<boolean>(true)
+/** init=未提交；result=已提交（内含 loading/ready/empty/error） */
+const phase = ref<string>('init')
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const items = ref<Array<VListItem>>([])
+const page = ref<number>(1)
+const count = ref<number>(0)
+const isLoading = ref<boolean>(false)
+const noMore = ref<boolean>(false)
+let lastLoadAt: number = 0
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const navStyle = computed((): string => 'background-color:' + cardBackground() + ';' + statusBarPaddingTop(0))
+const iconColor = textPrimary()
+const clearColor = textSecondary()
+const inputStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const footerText = computed((): string => {
+	if (isLoading.value) {
+		return '加载中...'
+	}
+	if (noMore.value) {
+		return '没有更多了'
+	}
+	return ''
+})
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return Math.max(88, Math.round(((info.windowWidth - 24 - 48) / 2) / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+function durationSeconds(text: string): number {
+	return durationToSeconds(text)
+}
+
+function onInput(event: UniInputEvent) {
+	keyword.value = event.detail.value
+}
+
+/** 提交搜索（空关键词不请求，保持初始态） */
+function submit() {
+	const text = keyword.value.trim()
+	if (text.length == 0) {
+		uni.showToast({ title: '请输入搜索关键词', icon: 'none' })
+		return
+	}
+	keyword.value = text
+	phase.value = 'result'
+	items.value = []
+	count.value = 0
+	page.value = 1
+	noMore.value = false
+	loadPage(1)
+}
+
+async function loadPage(pn: number) {
+	if (isLoading.value) {
+		return
+	}
+	isLoading.value = true
+	if (pn == 1) {
+		state.value = 'loading'
+		errorText.value = ''
+	}
+	const res = await fetchMemberArchive(mid.value, pn, 'pubdate', keyword.value)
+	isLoading.value = false
+	if (!res.status) {
+		if (pn == 1) {
+			state.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	const next: Array<VListItem> = pn == 1 ? [] : items.value.slice()
+	for (let i = 0; i < res.items.length; i++) {
+		next.push(res.items[i])
+	}
+	items.value = next
+	count.value = res.count
+	noMore.value = count.value > 0 && next.length >= count.value
+	page.value = pn + 1
+	if (pn == 1) {
+		state.value = next.length > 0 ? 'ready' : 'empty'
+	}
+}
+
+function onLoadMore() {
+	if (state.value != 'ready' || isLoading.value || noMore.value) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadAt < 1000) {
+		return
+	}
+	lastLoadAt = now
+	loadPage(page.value)
+}
+
+/** 清空键：有关键词清词、无关键词返回（源 onClear 同款） */
+function onClear() {
+	if (keyword.value.length > 0) {
+		keyword.value = ''
+		return
+	}
+	onBackTap()
+}
+
+function onBackTap() {
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+function openDetail(item: VListItem) {
+	if (item.bvid.length == 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + item.bvid })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	if (rawMid == null || (rawMid as string).length == 0) {
+		phase.value = 'result'
+		state.value = 'error'
+		errorText.value = '缺少用户参数（mid），请从用户主页进入'
+		return
+	}
+	const parsed = parseInt(rawMid as string)
+	mid.value = isNaN(parsed) ? 0 : parsed
+	if (mid.value <= 0) {
+		phase.value = 'result'
+		state.value = 'error'
+		errorText.value = '用户参数不合法，请从用户主页进入'
+		return
+	}
+	const rawName = options != null ? options['uname'] : null
+	if (rawName != null) {
+		uname.value = decodeURIComponent(rawName as string)
+	}
+})
+</script>
+
+<style>
+	.mse {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mse-nav {
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.mse-back {
+		width: 56px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mse-field {
+		flex: 1;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.mse-input {
+		flex: 1;
+		height: 40px;
+		font-size: 15px;
+	}
+	/* placeholder 色走静态类（对齐 video 页 vd-dm-placeholder 的实现口径） */
+	.mse-placeholder {
+		font-size: 15px;
+		color: #8A94A6;
+	}
+	.mse-clear {
+		width: 32px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mse-submit {
+		width: 48px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mse-hint {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 24px;
+		padding-right: 24px;
+	}
+	.mse-hint-text {
+		font-size: 14px;
+	}
+	.mse-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mse-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mse-scroll {
+		flex: 1;
+	}
+	.mse-list {
+		display: flex;
+		flex-direction: column;
+		padding-top: 2px;
+	}
+	.mse-footer {
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+		padding-top: 16px;
+		padding-bottom: 24px;
+	}
+	.mse-footer-text {
+		font-size: 13px;
+	}
+</style>

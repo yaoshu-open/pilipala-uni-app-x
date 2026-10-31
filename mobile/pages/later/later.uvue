@@ -1,0 +1,493 @@
+<template>
+	<view class="lt">
+		<app-navbar :title="navTitle">
+			<template v-slot:right>
+				<view v-if="items.length > 0" class="lt-nav-text-btn" @click="onRemoveWatchedTap">
+			<text class="lt-nav-text" :style="goldTextStyle">移除已看</text>
+				</view>
+				<view v-if="items.length > 0" class="lt-nav-btn" @click="onClearAllTap">
+					<p-icon name="clear-all-outlined" :size="21" :color="clearIconColor"></p-icon>
+				</view>
+				<view class="lt-nav-tail"></view>
+			</template>
+		</app-navbar>
+
+		<view v-if="state == 'error'" class="lt-fill">
+			<p-http-error :message="errorText" @retry="onErrorAction"></p-http-error>
+		</view>
+
+		<scroll-view v-if="state == 'loading'" class="lt-list">
+			<view v-for="n in 10" :key="'sk-' + n.toString()">
+				<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+			</view>
+		</scroll-view>
+
+		<scroll-view v-if="state != 'loading' && state != 'error'" class="lt-list">
+			<view v-if="state == 'empty'" :key="'empty'">
+				<empty-illus text="没有数据"></empty-illus>
+			</view>
+			<view v-for="video in items" :key="video.aid.toString()">
+				<view class="lt-row" :style="rowHeightStyle">
+					<view class="lt-row-cover" :style="coverStyle" @click="openDetail(video)">
+						<network-img :src="video.pic" width="100%" height="100%" radius="10px"></network-img>
+						<view class="lt-row-duration">
+							<p-badge :text="durationText(video)" type="gray" size="small" :font-size="11"></p-badge>
+						</view>
+					</view>
+					<view class="lt-row-body" @click="openDetail(video)">
+						<text class="lt-row-title" :style="titleStyle" :max-lines="2">{{ video.title }}</text>
+						<view class="lt-row-spacer"></view>
+						<text v-if="video.owner.name.length > 0" class="lt-row-owner" :style="secondaryStyle" :max-lines="1">{{ video.owner.name }}</text>
+						<view class="lt-row-stat">
+							<p-stat icon="play-circle-outlined" :text="playText(video)" :icon-size="13"></p-stat>
+							<view class="lt-row-gap8"></view>
+							<p-stat icon="subtitles-outlined" :text="danmuText(video)" :icon-size="14"></p-stat>
+							<view class="lt-row-spacer2"></view>
+							<view class="lt-row-remove" @click.stop="onRemoveOneTap(video)">
+								<p-icon name="clear-outlined" :size="18" :color="removeColor"></p-icon>
+							</view>
+						</view>
+					</view>
+				</view>
+			</view>
+			<view :key="'footer'">
+				<view class="lt-footer"></view>
+			</view>
+		</scroll-view>
+
+		<view v-if="confirmAction.length > 0" class="lt-confirm-mask" @click="onConfirmCancel">
+			<view class="lt-confirm" :style="confirmStyle" @click.stop="noop">
+				<text class="lt-confirm-title" :style="titleStyle">{{ confirmTitle }}</text>
+				<text class="lt-confirm-content" :style="secondaryStyle">{{ confirmContent }}</text>
+				<view class="lt-confirm-actions">
+					<view class="lt-confirm-btn" @click.stop="onConfirmCancel">
+						<text class="lt-confirm-cancel" :style="secondaryStyle">取消</text>
+					</view>
+					<view class="lt-confirm-btn" @click.stop="onConfirmOk">
+						<text class="lt-confirm-ok" :style="goldTextStyle">{{ confirmOkText }}</text>
+					</view>
+				</view>
+			</view>
+		</view>
+
+		<view v-if="items.length > 0 && state == 'ready'" class="lt-fab-row" :style="fabRowStyle">
+			<view class="lt-fab" :style="fabStyle" @click="onPlayAll">
+				<p-icon name="playlist-play" :size="20" :color="fabContentColor"></p-icon>
+				<text class="lt-fab-text" :style="fabTextStyle">播放全部</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow, onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PBadge from '../../components/p-badge/p-badge.uvue'
+import PStat from '../../components/p-stat/p-stat.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchLater, laterDel, laterClear, HistoryActionResult } from '../../api/history.uts'
+import { HotVideoItem, ListResult } from '../../models/video.uts'
+import { userState } from '../../stores/user.uts'
+import { numFormat, timeFormat } from '../../utils/format.uts'
+import { cardBackground, textPrimary, textSecondary } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 稍后再看（源头：`lib/pages/later/view.dart` + controller）。
+ *
+ *  - 顶栏：标题动态「稍后再看 (N)」（空列表无计数）+「移除已看」文字按钮（基线实测固定暗金）+
+ *    一键清空图标（clear_all，源码语义即清空；基线图目测形似排序图标，以源码为准）；
+ *  - 一次全量列表（无分页），条目=源 VideoCardH source='later'（标题/UP/播放弹幕 + 行末×）；
+ *  - 确认弹层三种（源逐字）：单条×「即将移除该视频，确定是否移除/取消+确认移除」、
+ *    移除已看「即将删除所有已观看视频，此操作不可恢复。确定是否删除？/取消+确认删除」、
+ *    清空「清空确认/确定要清空你的稍后再看列表吗？/取消+确认」；
+ *  - 右下「播放全部」悬浮胶囊，取首条跳视频详情（不做连播上下文）。
+ */
+const items = ref<Array<HotVideoItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const errorCode = ref<number>(0)
+/** 弹层动作：removeOne 单条移除 / removeWatched 移除已看 / clearAll 清空 */
+const confirmAction = ref<string>('')
+const removeTarget = ref<HotVideoItem | null>(null)
+
+/** 金色语言（基线 P5_later 实测）：移除已看/排序图标 #7A6017；播放全部 FAB 鹅黄底 #F7D999 + 黑字 */
+const GOLD_ACCENT: string = '#7A6017'
+const FAB_BG: string = '#F7D999'
+const fabContentColor: string = '#18191C'
+
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const goldTextStyle: string = 'color:' + GOLD_ACCENT + ';'
+const removeColor: string = textSecondary()
+const confirmStyle: string = 'background-color:' + cardBackground() + ';'
+const fabStyle: string = 'background-color:' + FAB_BG + ';'
+const fabTextStyle: string = 'color:' + fabContentColor + ';'
+const clearIconColor: string = GOLD_ACCENT
+
+const navTitle = computed((): string => items.value.length > 0 ? '稍后再看 (' + items.value.length.toString() + ')' : '稍后再看')
+
+const confirmTitle = computed((): string => confirmAction.value == 'clearAll' ? '清空确认' : '提示')
+
+const confirmContent = computed((): string => {
+	if (confirmAction.value == 'removeOne') {
+		return '即将移除该视频，确定是否移除'
+	}
+	if (confirmAction.value == 'removeWatched') {
+		return '即将删除所有已观看视频，此操作不可恢复。确定是否删除？'
+	}
+	if (confirmAction.value == 'clearAll') {
+		return '确定要清空你的稍后再看列表吗？'
+	}
+	return ''
+})
+
+const confirmOkText = computed((): string => {
+	if (confirmAction.value == 'removeOne') {
+		return '确认移除'
+	}
+	if (confirmAction.value == 'removeWatched') {
+		return '确认删除'
+	}
+	return '确认'
+})
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		const half = (info.windowWidth - 24 - 48) / 2
+		return Math.max(88, Math.round(half / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+const coverStyle = computed((): string => {
+	const width = Math.round(cardHeight * 1.6)
+	return 'width:' + width.toString() + 'px;height:' + cardHeight.toString() + 'px;'
+})
+
+const rowHeightStyle = computed((): string => 'height:' + cardHeight.toString() + 'px;')
+
+const fabRowStyle = computed((): string => {
+	return 'bottom:' + (safeAreaBottom() + 16).toString() + 'px;'
+})
+
+function durationText(video: HotVideoItem): string {
+	return timeFormat(video.duration)
+}
+
+function playText(video: HotVideoItem): string {
+	return numFormat(video.stat.view)
+}
+
+function danmuText(video: HotVideoItem): string {
+	return numFormat(video.stat.danmaku)
+}
+
+async function loadFirst() {
+	if (!userState.isLogin) {
+		state.value = 'error'
+		errorCode.value = -101
+		errorText.value = '账号未登录'
+		return
+	}
+	const res: ListResult<HotVideoItem> = await fetchLater()
+	if (!res.status) {
+		state.value = 'error'
+		errorCode.value = res.code
+		errorText.value = res.message
+		return
+	}
+	items.value = []
+	for (let i = 0; i < res.items.length; i++) {
+		items.value.push(res.items[i])
+	}
+	state.value = items.value.length > 0 ? 'ready' : 'empty'
+}
+
+function onErrorAction() {
+	if (errorCode.value == -101) {
+		uni.navigateTo({ url: '/pages/login/login' })
+	} else {
+		state.value = 'loading'
+		loadFirst()
+	}
+}
+
+function openDetail(video: HotVideoItem) {
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + video.bvid })
+}
+
+function onRemoveOneTap(video: HotVideoItem) {
+	confirmAction.value = 'removeOne'
+	removeTarget.value = video
+}
+
+function onRemoveWatchedTap() {
+	confirmAction.value = 'removeWatched'
+}
+
+function onClearAllTap() {
+	confirmAction.value = 'clearAll'
+}
+
+function onConfirmCancel() {
+	confirmAction.value = ''
+	removeTarget.value = null
+}
+
+/** 弹层卡片阻断冒泡（点卡片空白不关闭） */
+function noop() {
+}
+
+async function onConfirmOk() {
+	const action = confirmAction.value
+	confirmAction.value = ''
+	if (action == 'removeOne') {
+		const target = removeTarget.value
+		removeTarget.value = null
+		if (target == null) {
+			return
+		}
+		const res: HistoryActionResult = await laterDel(target.aid)
+		if (res.status) {
+			const kept: Array<HotVideoItem> = []
+			for (let i = 0; i < items.value.length; i++) {
+				if (items.value[i].aid != target.aid) {
+					kept.push(items.value[i])
+				}
+			}
+			items.value = kept
+			if (kept.length == 0) {
+				state.value = 'empty'
+			}
+		}
+		uni.showToast({ title: res.status ? res.successToast : res.message, icon: 'none' })
+		return
+	}
+	if (action == 'removeWatched') {
+		const res: HistoryActionResult = await laterDel(0)
+		if (res.status) {
+			await loadFirst()
+		}
+		uni.showToast({ title: res.status ? res.successToast : res.message, icon: 'none' })
+		return
+	}
+	if (action == 'clearAll') {
+		const res: HistoryActionResult = await laterClear()
+		if (res.status) {
+			items.value = []
+			state.value = 'empty'
+		}
+		uni.showToast({ title: res.status ? res.successToast : res.message, icon: 'none' })
+	}
+}
+
+function onPlayAll() {
+	if (items.value.length == 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + items.value[0].bvid })
+}
+
+onBackPress((): boolean => {
+	if (confirmAction.value.length > 0) {
+		confirmAction.value = ''
+		removeTarget.value = null
+		return true
+	}
+	return false
+})
+
+onLoad(() => {
+	loadFirst()
+})
+
+onShow(() => {
+	// 去登录返回本页后自动重试
+	if (state.value == 'error' && errorCode.value == -101 && userState.isLogin) {
+		state.value = 'loading'
+		loadFirst()
+	}
+})
+</script>
+
+<style>
+	.lt {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.lt-nav-text-btn {
+		height: 56px;
+		padding-left: 12px;
+		padding-right: 4px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.lt-nav-text {
+		font-size: 15px;
+	}
+	.lt-nav-btn {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.lt-nav-tail {
+		width: 8px;
+	}
+	.lt-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.lt-list {
+		flex: 1;
+	}
+	.lt-row {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 5px;
+		margin-bottom: 5px;
+	}
+	.lt-row-cover {
+		position: relative;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.lt-row-duration {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+	}
+	.lt-row-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-top: 2px;
+		padding-right: 6px;
+	}
+	.lt-row-title {
+		font-size: 14px;
+		font-weight: 500;
+		line-height: 20px;
+	}
+	.lt-row-spacer {
+		flex: 1;
+	}
+	.lt-row-owner {
+		font-size: 11px;
+	}
+	.lt-row-stat {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 2px;
+	}
+	.lt-row-gap8 {
+		width: 8px;
+	}
+	.lt-row-spacer2 {
+		flex: 1;
+	}
+	.lt-row-remove {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.lt-footer {
+		height: 60px;
+	}
+	.lt-confirm-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.lt-confirm {
+		width: 300px;
+		border-radius: 12px;
+		display: flex;
+		flex-direction: column;
+		padding-left: 24px;
+		padding-right: 24px;
+		padding-top: 20px;
+		padding-bottom: 12px;
+	}
+	.lt-confirm-title {
+		font-size: 16px;
+		font-weight: 500;
+	}
+	.lt-confirm-content {
+		font-size: 14px;
+		line-height: 20px;
+		margin-top: 12px;
+	}
+	.lt-confirm-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+		margin-top: 8px;
+	}
+	.lt-confirm-btn {
+		height: 44px;
+		padding-left: 16px;
+		padding-right: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.lt-confirm-cancel {
+		font-size: 14px;
+	}
+	.lt-confirm-ok {
+		font-size: 14px;
+	}
+	.lt-fab-row {
+		position: fixed;
+		right: 16px;
+		display: flex;
+		flex-direction: row;
+		justify-content: flex-end;
+	}
+	.lt-fab {
+		height: 44px;
+		padding-left: 18px;
+		padding-right: 18px;
+		border-radius: 22px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.lt-fab-text {
+		font-size: 14px;
+		margin-left: 6px;
+	}
+</style>

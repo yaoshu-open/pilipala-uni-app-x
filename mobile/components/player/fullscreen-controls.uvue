@@ -1,0 +1,500 @@
+<template>
+	<view class="fc">
+		<!-- 锁定态：只留解锁按钮，其余控件一律不渲染（源 view.dart 的 controlsLock 行为） -->
+		<view v-if="locked" class="fc-locked" :style="lockedStyle">
+			<view class="fc-unlock" @click="onUnlock">
+				<text class="fc-unlock-text">解锁</text>
+			</view>
+		</view>
+
+		<!-- 顶部：返回 + 标题（1 行省略）+ 锁定 -->
+		<view v-if="!locked" class="fc-top" :style="topStyle">
+			<view class="fc-btn" @click="onExit">
+				<text class="fc-glyph" :style="backIconStyle">{{ backGlyph }}</text>
+			</view>
+			<text class="fc-title" :style="titleStyle" :max-lines="1">{{ title }}</text>
+			<view class="fc-btn" @click="onLock">
+				<text class="fc-btn-text">锁定</text>
+			</view>
+		</view>
+
+		<!-- 底部：进度条 + 播放/暂停 + 时间 + 弹幕占位 + 倍速 -->
+		<view v-if="!locked" class="fc-bottom" :style="bottomStyle">
+			<view
+				class="fc-bar-area"
+				@touchstart="onBarStart"
+				@touchmove="onBarMove"
+				@touchend="onBarEnd"
+				@touchcancel="onBarEnd"
+			>
+				<view class="fc-track">
+					<view class="fc-fill" :style="fillStyle"></view>
+					<view class="fc-thumb" :style="thumbStyle"></view>
+				</view>
+			</view>
+			<view class="fc-row">
+				<view class="fc-play" @click="onPlayPause">
+					<text class="fc-glyph" :style="playIconStyle">{{ playing ? pauseGlyph : playGlyph }}</text>
+				</view>
+				<text class="fc-time">{{ timeText }}</text>
+				<view class="fc-gap"></view>
+				<!-- 弹幕开关：与详情页 Tab 栏「弹」同一设置键（SK.enableShowDanmaku），点击回页面写回 -->
+				<view class="fc-chip" @click="onToggleDanmaku">
+					<text class="fc-chip-text" :style="danmakuTextStyle">{{ danmakuEnabled ? '弹幕 开' : '弹幕 关' }}</text>
+				</view>
+				<view class="fc-chip" @click="onCycleRate">
+					<text class="fc-chip-text">{{ rateText }}</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { timeFormat } from '../../utils/format.uts'
+import { statusBarHeight, safeAreaBottom, safeAreaLeft, safeAreaRight } from '../../utils/safeArea.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+import { SK, getNumberArray, defaultSpeedList } from '../../utils/storage.uts'
+import { themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 全屏控制层（源头：`lib/pages/video/detail/widgets/header_control.dart` 1164-1367 头部控制
+ * + `pl_player/view.dart` 的底部控制条；配色/层级见 设计_视频详情域 §七）。
+ *
+ * 归属：只画控件、只抛意图。播放/暂停、seek、锁定、退出、倍速全部由页面执行
+ * （video 上下文在页面侧，组件不持有播放器句柄）。
+ *
+ * 事件契约（页面按此绑定）：
+ *  - `play-pause`            播放/暂停意图
+ *  - `seek`    (秒: number)  进度条拖动松手后的目标位置
+ *  - `lock`    (锁定: boolean) 锁定/解锁意图
+ *  - `exit`                  返回上一页（页面负责回传播放位置并恢复系统 UI）
+ *  - `rate`    (倍速: number) 倍速按钮循环切换的目标值
+ *    ↑ 设计稿列出的四个事件不含 `rate`；倍速必须真正改到播放器，而播放器在页面侧，
+ *      所以这里多抛一个 `rate`，并配套一个 `rate` 入参用于显示（页面持有唯一真值）。
+ *      控制层会随「显示/隐藏」卸载重建，倍速若存在组件内部，重建后标签会退回 1.0X
+ *      而实际速率没变——显示与真实不一致，故倍速状态归页面所有。
+ *
+ * 安全区：上下左右全部走 `utils/safeArea.uts`（statusBarHeight / safeAreaBottom / safeAreaLeft / safeAreaRight），
+ * 不在组件内自行读系统桥。
+ *
+ * 视觉：播放区底色恒为黑，控件色固定白（不参与明暗主题，同 player-stage）。
+ */
+const props = defineProps({
+	playing: { type: Boolean, default: false },
+	position: { type: Number, default: 0 },
+	duration: { type: Number, default: 0 },
+	locked: { type: Boolean, default: false },
+	title: { type: String, default: '' },
+	/** 当前选定倍速（页面持有；仅用于按钮文案，改速率由页面执行） */
+	rate: { type: Number, default: 1.0 },
+	/** 弹幕开关当前态（页面持有；点击只上报，不改本地态） */
+	danmakuEnabled: { type: Boolean, default: false }
+})
+
+const emit = defineEmits(['play-pause', 'seek', 'lock', 'exit', 'rate', 'toggle-danmaku'])
+
+const OVERLAY_TEXT = '#FFFFFF'
+
+// 版式常量（样式表里是同一组数字，页面侧按同样数字判断「触摸是否落在控制条上」）：
+//   顶部条内容高 44 / 底部块 = 进度区 22 + 操作行 40 + 底距 6，均不含安全区
+// 改任一边必须同步 pages/video/fullscreen.uvue 的 inControlBar()。
+const TOP_BAR_CONTENT_H = 44
+const BOTTOM_PAD = 6
+const BAR_PAD = 12
+/**
+ * 倍速档位：读设置项 SK.playSpeedList（倍速设置子页维护，默认 0.25~2.0 步进 0.25）。
+ * 源全屏控制条的倍速列表同样来自 video box 的 playSpeedSystem + customSpeedsList，改档位后即时生效。
+ */
+// 档位默认值与详情页/倍速设置页共用 storage.uts#defaultSpeedList（各处自写必然漂移）
+const RATES: number[] = getNumberArray(SK.playSpeedList, defaultSpeedList())
+
+const backGlyph = glyphOf('arrow-back')
+const playGlyph = glyphOf('play-arrow')
+const pauseGlyph = glyphOf('pause')
+const backIconStyle = iconStyle('arrow-back', 22, OVERLAY_TEXT)
+const playIconStyle = iconStyle('play-arrow', 24, OVERLAY_TEXT)
+
+// 横屏左右安全区的取值口径统一走 utils/safeArea.uts（safeAreaLeft / safeAreaRight）
+function windowWidthOf(): number {
+	let width = 390
+	try {
+		width = uni.getWindowInfo().windowWidth
+	} catch (e) {
+		width = 390
+	}
+	return width
+}
+
+function windowHeightOf(): number {
+	let height = 844
+	try {
+		height = uni.getWindowInfo().windowHeight
+	} catch (e) {
+		height = 844
+	}
+	return height
+}
+
+// 横屏全屏下状态栏被页面隐藏，不预留（竖屏/方向未生效时才避让状态栏）
+const landscapeAtMount = windowWidthOf() > windowHeightOf()
+const topInset = landscapeAtMount ? 0 : statusBarHeight()
+const bottomInset = safeAreaBottom()
+const leftInset = safeAreaLeft()
+const rightInset = safeAreaRight()
+
+// 标题最大宽度：App 端 max-width 只接受 number/px（百分比被静默丢弃），按窗口宽取 55%
+const titleMaxWidth = Math.round(windowWidthOf() * 0.55)
+
+// 固定高度容器必须把 padding 算进 height（uvue 默认 border-box，height 含 padding）：
+// 顶部条 = 状态栏留白 + 44 内容高，所以 height 取「和」，内容区才真的是 44
+const topStyle = computed((): string => {
+	return 'height:' + (TOP_BAR_CONTENT_H + topInset).toString() + 'px;' +
+		'padding-top:' + topInset.toString() + 'px;' +
+		'padding-left:' + (14 + leftInset).toString() + 'px;' +
+		'padding-right:' + (14 + rightInset).toString() + 'px;'
+})
+
+const bottomStyle = computed((): string => {
+	return 'padding-left:' + (BAR_PAD + leftInset).toString() + 'px;' +
+		'padding-right:' + (BAR_PAD + rightInset).toString() + 'px;' +
+		'padding-bottom:' + (BOTTOM_PAD + bottomInset).toString() + 'px;'
+})
+
+const lockedStyle = computed((): string => {
+	return 'padding-left:' + (16 + leftInset).toString() + 'px;'
+})
+
+const titleStyle = computed((): string => {
+	return 'max-width:' + titleMaxWidth.toString() + 'px;'
+})
+
+const barDragging = ref<boolean>(false)
+const dragSec = ref<number>(0)
+
+const totalSec = computed((): number => {
+	return props.duration > 0 ? props.duration : 0
+})
+
+const displaySec = computed((): number => {
+	return barDragging.value ? dragSec.value : props.position
+})
+
+const timeText = computed((): string => {
+	return timeFormat(displaySec.value) + ' / ' + timeFormat(totalSec.value)
+})
+
+const ratio = computed((): number => {
+	const total = totalSec.value
+	if (total <= 0) {
+		return 0
+	}
+	let value = displaySec.value / total
+	if (value < 0) {
+		value = 0
+	}
+	if (value > 1) {
+		value = 1
+	}
+	return value
+})
+
+const fillStyle = computed((): string => {
+	return 'width:' + (Math.round(ratio.value * 1000) / 10).toString() + '%;'
+})
+
+const thumbStyle = computed((): string => {
+	return 'left:' + (Math.round(ratio.value * 1000) / 10).toString() + '%;'
+})
+
+const rateText = computed((): string => {
+	return rateLabel(props.rate)
+})
+
+/** 弹幕开关文案色：开 = 主题主色（与详情页「弹」一致），关 = 覆盖层灰白 */
+const danmakuTextStyle = computed((): string => {
+	return 'color:' + (props.danmakuEnabled ? themeColor(currentThemeIndex()) : OVERLAY_TEXT) + ';'
+})
+
+function onToggleDanmaku() {
+	emit('toggle-danmaku')
+}
+
+function rateLabel(rate: number): string {
+	if (rate === 0.75) {
+		return '0.75X'
+	}
+	if (rate === 0.5) {
+		return '0.5X'
+	}
+	return rate.toFixed(1) + 'X'
+}
+
+function onPlayPause() {
+	emit('play-pause')
+}
+
+function onExit() {
+	emit('exit')
+}
+
+function onLock() {
+	emit('lock', true)
+}
+
+function onUnlock() {
+	emit('lock', false)
+}
+
+/** 0.5 → 0.75 → 1.0 → 1.25 → 1.5 → 2.0 → 0.5 循环（当前值不在预设列表时从 1.0X 起步） */
+function onCycleRate() {
+	let index = -1
+	for (let i = 0; i < RATES.length; i++) {
+		if (RATES[i] === props.rate) {
+			index = i
+			break
+		}
+	}
+	if (index < 0) {
+		index = 2
+	}
+	emit('rate', RATES[(index + 1) % RATES.length])
+}
+
+/** 触摸位置 → 进度比例（触摸时现取窗口宽，横竖屏切换后依然正确） */
+function ratioFromEvent(event: TouchEvent): number {
+	let touch: Touch | null = null
+	if (event.touches.length > 0) {
+		touch = event.touches[0]
+	} else if (event.changedTouches.length > 0) {
+		touch = event.changedTouches[0]
+	}
+	if (touch == null) {
+		return -1
+	}
+	let trackWidth = 0
+	try {
+		trackWidth = uni.getWindowInfo().windowWidth - leftInset - rightInset - BAR_PAD * 2
+	} catch (e) {
+		trackWidth = 0
+	}
+	if (trackWidth <= 0) {
+		return -1
+	}
+	let value = (touch.pageX - leftInset - BAR_PAD) / trackWidth
+	if (value < 0) {
+		value = 0
+	}
+	if (value > 1) {
+		value = 1
+	}
+	return value
+}
+
+function onBarStart(event: TouchEvent) {
+	const value = ratioFromEvent(event)
+	if (value < 0) {
+		return
+	}
+	barDragging.value = true
+	dragSec.value = value * totalSec.value
+}
+
+function onBarMove(event: TouchEvent) {
+	if (!barDragging.value) {
+		return
+	}
+	const value = ratioFromEvent(event)
+	if (value < 0) {
+		return
+	}
+	dragSec.value = value * totalSec.value
+}
+
+function onBarEnd(event: TouchEvent) {
+	if (!barDragging.value) {
+		return
+	}
+	barDragging.value = false
+	const value = ratioFromEvent(event)
+	const target = value < 0 ? dragSec.value : value * totalSec.value
+	emit('seek', target)
+}
+</script>
+
+<style>
+	.fc {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+	}
+
+	.fc-top {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		background-color: rgba(0, 0, 0, 0.38);
+	}
+
+	.fc-btn {
+		width: 44px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.fc-glyph {
+		font-family: MaterialIcons;
+	}
+
+	.fc-btn-text {
+		font-size: 12px;
+		color: #FFFFFF;
+	}
+
+	.fc-title {
+		flex: 1;
+		font-size: 15px;
+		color: #FFFFFF;
+		margin-left: 6px;
+		margin-right: 6px;
+	}
+
+	.fc-bottom {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		background-color: rgba(0, 0, 0, 0.42);
+	}
+
+	.fc-bar-area {
+		height: 22px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.fc-track {
+		flex: 1;
+		height: 3px;
+		border-radius: 2px;
+		background-color: rgba(255, 255, 255, 0.3);
+		position: relative;
+	}
+
+	.fc-fill {
+		position: absolute;
+		left: 0;
+		top: 0;
+		height: 3px;
+		border-radius: 2px;
+		background-color: #5CB67B;
+	}
+
+	.fc-thumb {
+		position: absolute;
+		top: -3px;
+		width: 9px;
+		height: 9px;
+		margin-left: -4px;
+		border-radius: 5px;
+		background-color: #FFFFFF;
+	}
+
+	.fc-row {
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.fc-play {
+		width: 44px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.fc-time {
+		font-size: 12px;
+		color: #FFFFFF;
+		margin-left: 2px;
+	}
+
+	.fc-gap {
+		flex: 1;
+	}
+
+	.fc-chip {
+		height: 26px;
+		padding-left: 10px;
+		padding-right: 10px;
+		border-radius: 13px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		background-color: rgba(255, 255, 255, 0.16);
+	}
+
+	.fc-chip-text {
+		font-size: 12px;
+		color: #FFFFFF;
+	}
+
+	.fc-chip-off {
+		height: 26px;
+		padding-left: 10px;
+		padding-right: 10px;
+		border-radius: 13px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-right: 8px;
+		background-color: rgba(255, 255, 255, 0.06);
+	}
+
+	.fc-chip-off-text {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.42);
+	}
+
+	.fc-locked {
+		position: absolute;
+		left: 0;
+		top: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.fc-unlock {
+		width: 64px;
+		height: 44px;
+		border-radius: 22px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		background-color: rgba(0, 0, 0, 0.5);
+	}
+
+	.fc-unlock-text {
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+</style>

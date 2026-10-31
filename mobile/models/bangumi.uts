@@ -1,0 +1,195 @@
+import { strOf, numOf, objOf, arrOf } from '../utils/json.uts'
+
+/**
+ * 番剧域模型（源头：`lib/models/bangumi/info.dart` 的 BangumiInfoModel / EpisodeItem）。
+ *
+ * 字段口径与源码对齐的差异点（对照视频详情 models/video-detail.uts）：
+ *  - `/pgc/view/web/season` 响应体挂在 **result** 字段（不是 data），由 api 层负责取层；
+ *  - stat 字段名是番剧口径：views / danmakus / coins / **favorite**（视频是 view / danmaku / favorite→fav 语义）；
+ *  - 评分在 rating.score（Map，源码同款；0 或缺失 = 未开分，展示「暂无」）；
+ *  - 追番态在 user_status.follow（0/1）；完结状态行文案 = new_ep.desc 原文（如「已完结, 全12话」），不自行拼接。
+ */
+
+/** 番剧分集（episodes[]；badge 非空串如「会员」为大会员标记） */
+export class BangumiEpisode {
+	id: number = 0
+	aid: number = 0
+	bvid: string = ''
+	cid: number = 0
+	title: string = ''
+	longTitle: string = ''
+	badge: string = ''
+	badgeType: number = 0
+	duration: number = 0
+	cover: string = ''
+	pubTime: number = 0
+
+	static from(obj: UTSJSONObject): BangumiEpisode {
+		const ep = new BangumiEpisode()
+		ep.id = numOf(obj, 'id')
+		ep.aid = numOf(obj, 'aid')
+		ep.bvid = strOf(obj, 'bvid')
+		ep.cid = numOf(obj, 'cid')
+		ep.title = strOf(obj, 'title')
+		ep.longTitle = strOf(obj, 'long_title')
+		ep.badge = strOf(obj, 'badge')
+		ep.badgeType = numOf(obj, 'badge_type')
+		ep.duration = numOf(obj, 'duration')
+		ep.cover = strOf(obj, 'cover')
+		ep.pubTime = numOf(obj, 'pub_time')
+		return ep
+	}
+}
+
+/** 番剧统计（pgc season 口径，字段名与视频 stat 不同） */
+export class BangumiStat {
+	views: number = 0
+	danmakus: number = 0
+	likes: number = 0
+	coins: number = 0
+	favorite: number = 0
+	reply: number = 0
+	share: number = 0
+
+	static from(obj: UTSJSONObject | null): BangumiStat {
+		const stat = new BangumiStat()
+		if (obj == null) {
+			return stat
+		}
+		stat.views = numOf(obj, 'views')
+		stat.danmakus = numOf(obj, 'danmakus')
+		stat.likes = numOf(obj, 'likes')
+		stat.coins = numOf(obj, 'coins')
+		stat.favorite = numOf(obj, 'favorite')
+		stat.reply = numOf(obj, 'reply')
+		stat.share = numOf(obj, 'share')
+		return stat
+	}
+}
+
+/** 番剧详情（result 层） */
+export class BangumiInfo {
+	seasonId: number = 0
+	title: string = ''
+	cover: string = ''
+	/** 简介（源 evaluate 字段） */
+	evaluate: string = ''
+	/** 声优（源 actors 字段，可能为超长纯文本） */
+	actors: string = ''
+	total: number = 0
+	/** 评分（rating.score；0 = 未开分） */
+	ratingScore: number = 0
+	/** 地区名（areas[0].name，可空） */
+	areaName: string = ''
+	/** 放送时间文本（publish.pub_time_show） */
+	pubTimeShow: string = ''
+	/** 完结/更新状态行文案（new_ep.desc 原文，如「已完结, 全12话」） */
+	newEpDesc: string = ''
+	/** 追番态（user_status.follow：0/1；未登录恒 0） */
+	followed: number = 0
+	stat: BangumiStat = new BangumiStat()
+	episodes: Array<BangumiEpisode> = []
+
+	static from(obj: UTSJSONObject | null): BangumiInfo {
+		const info = new BangumiInfo()
+		if (obj == null) {
+			return info
+		}
+		info.seasonId = numOf(obj, 'season_id')
+		info.title = strOf(obj, 'title')
+		info.cover = strOf(obj, 'cover')
+		info.evaluate = strOf(obj, 'evaluate')
+		info.actors = strOf(obj, 'actors')
+		info.total = numOf(obj, 'total')
+		const rating = objOf(obj, 'rating')
+		if (rating != null) {
+			info.ratingScore = numOf(rating, 'score')
+		}
+		const areas = arrOf(obj, 'areas')
+		if (areas.length > 0) {
+			info.areaName = strOf(areas[0], 'name')
+		}
+		const publish = objOf(obj, 'publish')
+		if (publish != null) {
+			info.pubTimeShow = strOf(publish, 'pub_time_show')
+		}
+		const newEp = objOf(obj, 'new_ep')
+		if (newEp != null) {
+			info.newEpDesc = strOf(newEp, 'desc')
+		}
+		const userStatus = objOf(obj, 'user_status')
+		if (userStatus != null) {
+			info.followed = numOf(userStatus, 'follow')
+		}
+		info.stat = BangumiStat.from(objOf(obj, 'stat'))
+		const eps = arrOf(obj, 'episodes')
+		for (let i = 0; i < eps.length; i++) {
+			info.episodes.push(BangumiEpisode.from(eps[i]))
+		}
+		return info
+	}
+}
+
+/** 番剧详情请求结果 */
+export class BangumiInfoResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	data: BangumiInfo | null = null
+}
+
+/**
+ * 番剧列表条目（源 `lib/models/bangumi/list.dart#BangumiListItemModel`）。
+ * badge 空串按「无角标」处理（源 fromJson 同款：badge=='' → null）；order 为追番量文案（如「1770.3万追番」）。
+ */
+export class BangumiListItem {
+	seasonId: number = 0
+	mediaId: number = 0
+	title: string = ''
+	cover: string = ''
+	badge: string = ''
+	order: string = ''
+	indexShow: string = ''
+	progress: string = ''
+	subTitle: string = ''
+	score: string = ''
+
+	static from(obj: UTSJSONObject): BangumiListItem {
+		const item = new BangumiListItem()
+		item.seasonId = numOf(obj, 'season_id')
+		item.mediaId = numOf(obj, 'media_id')
+		item.title = strOf(obj, 'title')
+		item.cover = strOf(obj, 'cover')
+		item.badge = strOf(obj, 'badge')
+		item.order = strOf(obj, 'order')
+		item.indexShow = strOf(obj, 'index_show')
+		item.progress = strOf(obj, 'progress')
+		item.subTitle = strOf(obj, 'sub_title')
+		item.score = strOf(obj, 'score')
+		return item
+	}
+}
+
+/** 番剧列表数据（推荐 / 最近追番共用一个响应形态） */
+export class BangumiListData {
+	hasNext: number = 0
+	total: number = 0
+	list: Array<BangumiListItem> = []
+}
+
+/** 番剧列表请求结果 */
+export class BangumiListResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	data: BangumiListData | null = null
+}
+
+/** 追番/取消追番请求结果（POST /pgc/web/follow/add|del；成功文案在 result.toast） */
+export class BangumiFollowResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	/** 接口返回的操作结果文案（如「追番成功」），成功态优先展示它 */
+	toast: string = ''
+}

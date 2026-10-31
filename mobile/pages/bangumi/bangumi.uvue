@@ -1,0 +1,374 @@
+<template>
+	<view class="bgm">
+		<scroll-view
+			class="bgm-scroll"
+			direction="vertical"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:scroll-top="scrollTop"
+			:lower-threshold="200"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+		>
+			<!-- 最近追番（源 Visibility(visible: userLogin)：未登录整段不占位；登录但无追番显示「还没有追番」） -->
+			<view class="bgm-follow" :style="followSectionStyle">
+				<view class="bgm-follow-head">
+					<text class="bgm-section-title" :style="titleStyle">最近追番</text>
+					<view class="bgm-refresh" @click="loadFollow">
+						<p-icon name="refresh" :size="20" :color="primary"></p-icon>
+					</view>
+				</view>
+				<view class="bgm-follow-body" :style="followBodyStyle">
+					<view v-if="followItems.length > 0" class="bgm-follow-row">
+						<view
+							v-for="(item, index) in followItems"
+							:key="'f-' + item.seasonId.toString()"
+							class="bgm-follow-cell"
+							:style="followCellStyle(index)"
+						>
+							<bangumi-card-v :item="item" :width="followCardWidth" :text-extra="50"></bangumi-card-v>
+						</view>
+					</view>
+					<view v-else class="bgm-follow-empty">
+						<text class="bgm-follow-empty-text" :style="secondaryStyle">还没有追番</text>
+					</view>
+				</view>
+			</view>
+
+			<view class="bgm-sec-head">
+				<text class="bgm-section-title" :style="titleStyle">推荐</text>
+			</view>
+
+			<!-- 骨架（蒸汽端 v-if 不卸载节点：状态层统一 display 切换） -->
+			<view class="bgm-grid" :style="skeletonStyle">
+				<view v-for="n in 6" :key="'sk-' + n.toString()" class="bgm-sk-cell" :style="skCellStyle">
+					<view class="bgm-sk-cover"></view>
+					<view class="bgm-sk-line"></view>
+					<view class="bgm-sk-line2"></view>
+				</view>
+			</view>
+
+			<!-- 推荐网格（3 列；卡宽高比 0.75 + 文本区 42） -->
+			<view class="bgm-grid" :style="gridStyle">
+				<view
+					v-for="item in items"
+					:key="'g-' + item.seasonId.toString()"
+					class="bgm-grid-cell"
+					:style="gridCellStyle"
+				>
+					<bangumi-card-v :item="item" :width="cardWidth" :text-extra="42"></bangumi-card-v>
+				</view>
+			</view>
+
+			<view class="bgm-footer">
+				<text class="bgm-footer-text" :style="secondaryStyle">{{ footerText }}</text>
+			</view>
+			<view class="bgm-bottom" :style="bottomStyle"></view>
+		</scroll-view>
+
+		<view class="bgm-error" :style="errorStyle">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch, onMounted } from 'vue'
+import BangumiCardV from '../../components/media/bangumi-card-v.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import { fetchBangumiList, fetchBangumiFollow } from '../../api/bangumi.uts'
+import { BangumiListItem } from '../../models/bangumi.uts'
+import { userState } from '../../stores/user.uts'
+import { ensureLoginState } from '../../composables/useLogin.uts'
+import { bangumiRefreshSeq, bangumiTopSeq } from '../../stores/tabSignal.uts'
+import { textPrimary, textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 番剧频道（源头：`lib/pages/bangumi/view.dart` + `controller.dart`）。
+ *
+ * 结构（1:1）：登录时「最近追番」标题 + 刷新钮 → 横滑卡（宽 = 屏宽/3，宽高比 0.75）；
+ *              「推荐」标题 → 3 列网格（分页 20/页，触底加载；下拉刷新保留已加载页，源 insertAll 同款）。
+ * 空态：推荐网格空数据源以空 SizedBox 占位（源 childCount=10 空项）——本端用骨架块占位，
+ *       避免整屏空白；追番区登录但无数据时显示「还没有追番」（源 SizedBox + Center 文案）。
+ * 频道差异：本页是首页「番剧」频道的保活组件（v-show 切换），不注册独立路由；
+ *       点击「回顶/刷新」由 stores/tabSignal 的 bangumiTopSeq / bangumiRefreshSeq 驱动。
+ */
+const PAGE_SIZE: number = 20
+
+const items = ref<Array<BangumiListItem>>([])
+const followItems = ref<Array<BangumiListItem>>([])
+/** 追番接口是否成功取到（失败时整段不渲染，源 data.status=false → SizedBox 同款） */
+const followReady = ref<boolean>(false)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const refreshing = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const page = ref<number>(1)
+const scrollTop = ref<number>(0)
+const noMore = ref<boolean>(false)
+
+const screenWidth = ((): number => {
+	try {
+		return uni.getWindowInfo().windowWidth
+	} catch (e) {
+		return 390
+	}
+})()
+/** 源 StyleString.safeSpace = 12 / cardSpace = 8 */
+const SAFE_SPACE: number = 12
+const CARD_SPACE: number = 8
+const cardWidth: number = Math.floor((screenWidth - SAFE_SPACE * 2 - CARD_SPACE * 2) / 3)
+const followCardWidth: number = Math.floor(screenWidth / 3)
+
+const primary = themeColor(currentThemeIndex())
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const followSectionStyle = computed((): string => userState.isLogin && followReady.value ? 'display:flex;' : 'display:none;')
+const followBodyStyle = computed((): string => {
+	const h = Math.round(followCardWidth / 0.75) + 50
+	return 'height:' + h.toString() + 'px;'
+})
+const gridStyle = computed((): string => state.value == 'ready' || state.value == 'empty' ? 'display:flex;' : 'display:none;')
+const skeletonStyle = computed((): string => state.value == 'loading' ? 'display:flex;' : 'display:none;')
+const errorStyle = computed((): string => state.value == 'error' ? 'display:flex;' : 'display:none;')
+const gridCellStyle = computed((): string => 'width:' + cardWidth.toString() + 'px;margin-bottom:' + (CARD_SPACE - 2).toString() + 'px;')
+const skCellStyle = computed((): string => 'width:' + cardWidth.toString() + 'px;margin-bottom:' + (CARD_SPACE - 2).toString() + 'px;')
+const bottomStyle = computed((): string => 'height:' + (safeAreaBottom() + 8).toString() + 'px;')
+const footerText = computed((): string => {
+	if (loadingMore.value) {
+		return '加载中…'
+	}
+	return noMore.value ? '没有更多了' : ''
+})
+
+function followCellStyle(index: number): string {
+	const right = index == followItems.value.length - 1 ? SAFE_SPACE : 0
+	return 'margin-left:' + SAFE_SPACE.toString() + 'px;margin-right:' + right.toString() + 'px;'
+}
+
+async function loadFirst() {
+	state.value = 'loading'
+	errorText.value = ''
+	const res = await fetchBangumiList(1)
+	if (!res.status || res.data == null) {
+		console.log('[bangumi] page list fail msg=' + res.message + ' code=' + res.code.toString())
+		state.value = 'error'
+		errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		return
+	}
+	items.value = res.data.list
+	page.value = 2
+	noMore.value = res.data.list.length < PAGE_SIZE
+	state.value = items.value.length > 0 ? 'ready' : 'empty'
+}
+
+async function loadFollow() {
+	await ensureLoginState()
+	if (!userState.isLogin) {
+		followItems.value = []
+		followReady.value = false
+		return
+	}
+	const res = await fetchBangumiFollow(userState.info.mid)
+	if (res.status && res.data != null) {
+		followItems.value = res.data.list
+		followReady.value = true
+	} else {
+		followItems.value = []
+		followReady.value = false
+		console.log('[bangumi] page follow fail msg=' + res.message + ' code=' + res.code.toString())
+	}
+}
+
+async function onRefreshGesture() {
+	refreshing.value = true
+	const res = await fetchBangumiList(1)
+	if (res.status && res.data != null) {
+		// 源刷新前插并保留已加载后续页
+		const merged: Array<BangumiListItem> = []
+		for (let i = 0; i < res.data.list.length; i++) {
+			merged.push(res.data.list[i])
+		}
+		for (let j = 0; j < items.value.length; j++) {
+			merged.push(items.value[j])
+		}
+		items.value = merged
+		if (state.value != 'ready') {
+			state.value = merged.length > 0 ? 'ready' : 'empty'
+		}
+	}
+	await loadFollow()
+	refreshing.value = false
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value || noMore.value) {
+		return
+	}
+	loadingMore.value = true
+	const res = await fetchBangumiList(page.value)
+	if (res.status && res.data != null) {
+		if (res.data.list.length == 0) {
+			noMore.value = true
+		} else {
+			const merged = items.value.slice()
+			for (let i = 0; i < res.data.list.length; i++) {
+				merged.push(res.data.list[i])
+			}
+			items.value = merged
+			page.value = page.value + 1
+			noMore.value = res.data.list.length < PAGE_SIZE
+		}
+	} else {
+		uni.showToast({ title: res.message.length > 0 ? res.message : '加载失败', icon: 'none' })
+	}
+	loadingMore.value = false
+}
+
+function reload() {
+	loadFirst()
+	loadFollow()
+}
+
+function backToTop() {
+	scrollTop.value = scrollTop.value == 0 ? 1 : 0
+}
+
+watch(bangumiRefreshSeq, (_next: number, _prev: number) => {
+	reload()
+})
+
+watch(bangumiTopSeq, (_next: number, _prev: number) => {
+	backToTop()
+})
+
+onMounted(() => {
+	loadFirst()
+	loadFollow()
+})
+</script>
+
+<style>
+	.bgm {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.bgm-scroll {
+		flex: 1;
+	}
+	.bgm-follow {
+		display: flex;
+		flex-direction: column;
+		padding-top: 12px;
+		padding-bottom: 10px;
+	}
+	.bgm-follow-head {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding-left: 16px;
+		padding-right: 12px;
+		height: 32px;
+	}
+	.bgm-section-title {
+		font-size: 16px;
+		font-weight: 500;
+	}
+	.bgm-refresh {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bgm-follow-body {
+		display: flex;
+		flex-direction: column;
+	}
+	.bgm-follow-row {
+		display: flex;
+		flex-direction: row;
+	}
+	.bgm-follow-cell {
+		flex-shrink: 0;
+	}
+	.bgm-follow-empty {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bgm-follow-empty-text {
+		font-size: 14px;
+	}
+	.bgm-sec-head {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-top: 10px;
+		padding-bottom: 10px;
+		padding-left: 16px;
+	}
+	.bgm-grid {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		justify-content: space-between;
+		padding-left: 12px;
+		padding-right: 12px;
+	}
+	.bgm-grid-cell {
+		display: flex;
+		flex-direction: column;
+	}
+	.bgm-sk-cell {
+		display: flex;
+		flex-direction: column;
+	}
+	.bgm-sk-cover {
+		width: 100%;
+		height: 130px;
+		border-radius: 10px;
+		background-color: rgba(0, 0, 0, 0.06);
+	}
+	.bgm-sk-line {
+		width: 80%;
+		height: 12px;
+		margin-top: 7px;
+		border-radius: 4px;
+		background-color: rgba(0, 0, 0, 0.06);
+	}
+	.bgm-sk-line2 {
+		width: 50%;
+		height: 10px;
+		margin-top: 5px;
+		border-radius: 4px;
+		background-color: rgba(0, 0, 0, 0.06);
+	}
+	.bgm-footer {
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bgm-footer-text {
+		font-size: 12px;
+	}
+	.bgm-error {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+	}
+</style>

@@ -1,0 +1,1143 @@
+<template>
+	<view class="sr" :style="rootStyle">
+		<view class="sr-nav" :style="navStyle">
+			<view class="sr-nav-row" @click="onNavTap">
+				<view class="sr-nav-leading">
+					<text class="sr-nav-back" :style="iconTextStyle">←</text>
+				</view>
+				<text class="sr-nav-title" :style="titleStyle" :max-lines="1">{{ keyword }}</text>
+			</view>
+		</view>
+
+		<view class="sr-tabs" :style="tabsStyle">
+			<scroll-view class="sr-tabs-scroll" direction="horizontal" :show-scrollbar="false">
+				<view class="sr-tabs-row">
+					<view
+						v-for="(t, i) in SEARCH_TYPES"
+						:key="t.type"
+						class="sr-tab"
+						:style="tabStyle(i)"
+						@click="onTabTap(i)"
+					>
+						<text class="sr-tab-text" :style="tabTextStyle(i)">{{ t.label }}{{ countText(i) }}</text>
+					</view>
+				</view>
+			</scroll-view>
+		</view>
+
+		<view class="sr-panels">
+			<!-- 0 视频 -->
+			<view v-if="panelLoaded[0]" v-show="curTab == 0" class="sr-panel">
+				<search-filter-bar
+					mode="video"
+					:order="orders[0]"
+					:duration="duration"
+					:tids="tids"
+					:sheet-visible="filterSheetVisible"
+					@orderTap="onVideoOrderTap"
+					@filterTap="onVideoFilterTap"
+					@funnelTap="onFunnelTap"
+					@sheetClose="onSheetClose"
+				></search-filter-bar>
+				<list-view v-if="statuses[0] == 'loading'" class="sr-panel-list">
+					<list-item v-for="n in 15" :key="'vsk' + n.toString()" :type="1">
+						<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+					</list-item>
+				</list-view>
+				<view v-else-if="statuses[0] == 'error'" class="sr-state">
+					<p-http-error :message="errors[0]" @retry="retryCurrent"></p-http-error>
+				</view>
+				<list-view
+					v-else
+					class="sr-panel-list"
+					:refresher-enabled="true"
+					:refresher-triggered="refreshings[0]"
+					:scroll-top="scrollTops[0]"
+					lower-threshold="100"
+					@refresherrefresh="onRefresherRefresh"
+					@scrolltolower="onLoadMore"
+					@scroll="onPanelScroll"
+				>
+					<list-item v-if="videos.length == 0" :key="'v-empty'" :type="2">
+						<empty-illus text="没有相关数据"></empty-illus>
+					</list-item>
+					<list-item v-for="(v, vi) in videos" :key="videoKey(v, vi)" :type="3">
+						<view class="sr-vrow" :style="rowStyle" @click="onVideoTap(v)">
+							<view class="sr-vcover" :style="coverStyle">
+								<network-img :src="v.pic" width="100%" height="100%" radius="10px"></network-img>
+								<view v-if="v.duration > 0" class="sr-vduration">
+									<p-badge :text="durationText(v)" type="gray" size="small" :font-size="11"></p-badge>
+								</view>
+								<view v-if="v.type.length > 0 && v.type != 'video'" class="sr-vtype">
+									<p-badge :text="v.type" type="primary" size="small" :font-size="11"></p-badge>
+								</view>
+							</view>
+							<view class="sr-vbody">
+								<view class="sr-seg-title">
+									<template v-for="(seg, si) in v.titleSegs" :key="si">
+										<text v-if="seg.type == 'em'" class="sr-seg sr-seg-em" :style="segEmStyle">{{ seg.text }}</text>
+										<text v-else class="sr-seg" :style="segTextStyle">{{ seg.text }}</text>
+									</template>
+								</view>
+								<view class="sr-vspacer"></view>
+								<text class="sr-vtime" :style="metaTextStyle">{{ pubdateText(v) }}</text>
+								<text class="sr-vowner" :style="metaTextStyle" :max-lines="1">{{ v.owner.name }}</text>
+								<view class="sr-vstat">
+									<p-stat icon="play-circle-outlined" :text="viewText(v)" :icon-size="13"></p-stat>
+									<view class="sr-vgap8"></view>
+									<p-stat icon="subtitles-outlined" :text="danmuText(v)" :icon-size="14"></p-stat>
+								</view>
+							</view>
+						</view>
+					</list-item>
+					<list-item v-if="videos.length > 0 && noMores[0]" :key="'v-end'" :type="5">
+						<view class="sr-footer"><text class="sr-footer-text" :style="metaTextStyle">没有更多了</text></view>
+					</list-item>
+				</list-view>
+			</view>
+
+			<!-- 1 番剧 -->
+			<view v-if="panelLoaded[1]" v-show="curTab == 1" class="sr-panel">
+				<list-view v-if="statuses[1] == 'loading'" class="sr-panel-list">
+					<list-item v-for="n in 15" :key="'bsk' + n.toString()" :type="1">
+						<skeleton-media-bangumi></skeleton-media-bangumi>
+					</list-item>
+				</list-view>
+				<view v-else-if="statuses[1] == 'error'" class="sr-state">
+					<p-http-error :message="errors[1]" @retry="retryCurrent"></p-http-error>
+				</view>
+				<list-view
+					v-else
+					class="sr-panel-list"
+					:refresher-enabled="true"
+					:refresher-triggered="refreshings[1]"
+					:scroll-top="scrollTops[1]"
+					lower-threshold="100"
+					@refresherrefresh="onRefresherRefresh"
+					@scrolltolower="onLoadMore"
+					@scroll="onPanelScroll"
+				>
+					<list-item v-if="bangumis.length == 0" :key="'b-empty'" :type="2">
+						<empty-illus text="没有相关数据"></empty-illus>
+					</list-item>
+					<list-item v-for="(b, bi) in bangumis" :key="mediaKey(b, bi)" :type="3">
+						<bangumi-result-card :item="b" :badge-text="mediaBadge(b)" @tap="onBangumiTap(b)"></bangumi-result-card>
+					</list-item>
+					<list-item v-if="bangumis.length > 0 && noMores[1]" :key="'b-end'" :type="5">
+						<view class="sr-footer"><text class="sr-footer-text" :style="metaTextStyle">没有更多了</text></view>
+					</list-item>
+				</list-view>
+			</view>
+
+			<!-- 2 影视 -->
+			<view v-if="panelLoaded[2]" v-show="curTab == 2" class="sr-panel">
+				<list-view v-if="statuses[2] == 'loading'" class="sr-panel-list">
+					<list-item v-for="n in 15" :key="'fsk' + n.toString()" :type="1">
+						<skeleton-media-bangumi></skeleton-media-bangumi>
+					</list-item>
+				</list-view>
+				<view v-else-if="statuses[2] == 'error'" class="sr-state">
+					<p-http-error :message="errors[2]" @retry="retryCurrent"></p-http-error>
+				</view>
+				<list-view
+					v-else
+					class="sr-panel-list"
+					:refresher-enabled="true"
+					:refresher-triggered="refreshings[2]"
+					:scroll-top="scrollTops[2]"
+					lower-threshold="100"
+					@refresherrefresh="onRefresherRefresh"
+					@scrolltolower="onLoadMore"
+					@scroll="onPanelScroll"
+				>
+					<list-item v-if="fts.length == 0" :key="'f-empty'" :type="2">
+						<empty-illus text="没有相关数据"></empty-illus>
+					</list-item>
+					<list-item v-for="(f, fi) in fts" :key="'ft' + mediaKey(f, fi)" :type="3">
+						<bangumi-result-card :item="f" badge-text="影视" @tap="onBangumiTap(f)"></bangumi-result-card>
+					</list-item>
+					<list-item v-if="fts.length > 0 && noMores[2]" :key="'f-end'" :type="5">
+						<view class="sr-footer"><text class="sr-footer-text" :style="metaTextStyle">没有更多了</text></view>
+					</list-item>
+				</list-view>
+			</view>
+
+			<!-- 3 直播间 -->
+			<view v-if="panelLoaded[3]" v-show="curTab == 3" class="sr-panel">
+				<list-view v-if="statuses[3] == 'loading'" class="sr-panel-list">
+					<list-item v-for="n in 10" :key="'lsk' + n.toString()" :type="1">
+						<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+					</list-item>
+				</list-view>
+				<view v-else-if="statuses[3] == 'error'" class="sr-state">
+					<p-http-error :message="errors[3]" @retry="retryCurrent"></p-http-error>
+				</view>
+				<list-view
+					v-else
+					class="sr-panel-list"
+					:refresher-enabled="true"
+					:refresher-triggered="refreshings[3]"
+					:scroll-top="scrollTops[3]"
+					lower-threshold="100"
+					@refresherrefresh="onRefresherRefresh"
+					@scrolltolower="onLoadMore"
+					@scroll="onPanelScroll"
+				>
+					<list-item v-if="lives.length == 0" :key="'l-empty'" :type="2">
+						<empty-illus text="没有相关数据"></empty-illus>
+					</list-item>
+					<list-item v-for="(row, ri) in liveRows" :key="'lr' + ri.toString()" :type="3">
+						<view class="sr-live-row">
+							<view v-for="(live, li) in row" :key="'lc' + ri.toString() + '-' + li.toString()" class="sr-live-card" :style="liveCardStyle" @click="onLiveTap(live)">
+								<view class="sr-live-cover" :style="liveCoverStyle">
+									<network-img :src="live.cover" width="100%" height="100%" radius="10px"></network-img>
+									<view class="sr-live-badge">
+										<p-badge text="Live" type="primary" size="small" :font-size="10"></p-badge>
+									</view>
+									<view class="sr-live-statbar">
+										<text class="sr-live-cate" :max-lines="1">{{ live.cateName }}</text>
+										<text class="sr-live-online">围观:{{ onlineText(live) }}</text>
+									</view>
+								</view>
+								<view class="sr-live-body">
+									<view class="sr-live-title">
+										<template v-for="(seg, si) in live.titleSegs" :key="si">
+											<text v-if="seg.type == 'em'" class="sr-live-title-seg sr-seg-em" :style="segEmStyle">{{ seg.text }}</text>
+											<text v-else class="sr-live-title-seg" :style="segTextStyle">{{ seg.text }}</text>
+										</template>
+									</view>
+									<text class="sr-live-uname" :style="metaTextStyle" :max-lines="1">{{ live.uname }}</text>
+								</view>
+							</view>
+							<view v-if="row.length == 1" class="sr-live-card sr-live-holder" :style="liveCardStyle"></view>
+						</view>
+					</list-item>
+					<list-item v-if="lives.length > 0 && noMores[3]" :key="'l-end'" :type="5">
+						<view class="sr-footer"><text class="sr-footer-text" :style="metaTextStyle">没有更多了</text></view>
+					</list-item>
+				</list-view>
+			</view>
+
+			<!-- 4 用户 -->
+			<view v-if="panelLoaded[4]" v-show="curTab == 4" class="sr-panel">
+				<list-view v-if="statuses[4] == 'loading'" class="sr-panel-list">
+					<list-item v-for="n in 15" :key="'usk' + n.toString()" :type="1">
+						<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+					</list-item>
+				</list-view>
+				<view v-else-if="statuses[4] == 'error'" class="sr-state">
+					<p-http-error :message="errors[4]" @retry="retryCurrent"></p-http-error>
+				</view>
+				<list-view
+					v-else
+					class="sr-panel-list"
+					:refresher-enabled="true"
+					:refresher-triggered="refreshings[4]"
+					:scroll-top="scrollTops[4]"
+					lower-threshold="100"
+					@refresherrefresh="onRefresherRefresh"
+					@scrolltolower="onLoadMore"
+					@scroll="onPanelScroll"
+				>
+					<list-item v-if="users.length == 0" :key="'u-empty'" :type="2">
+						<empty-illus text="没有相关数据"></empty-illus>
+					</list-item>
+					<list-item v-for="(u, ui) in users" :key="userKey(u, ui)" :type="3">
+						<user-result-card :user="u" @tap="onUserTap(u)"></user-result-card>
+					</list-item>
+					<list-item v-if="users.length > 0 && noMores[4]" :key="'u-end'" :type="5">
+						<view class="sr-footer"><text class="sr-footer-text" :style="metaTextStyle">没有更多了</text></view>
+					</list-item>
+				</list-view>
+			</view>
+
+			<!-- 5 专栏 -->
+			<view v-if="panelLoaded[5]" v-show="curTab == 5" class="sr-panel">
+				<search-filter-bar
+					mode="article"
+					:order="orders[5]"
+					:duration="duration"
+					:tids="tids"
+					:sheet-visible="false"
+					@orderTap="onArticleOrderTap"
+					@filterTap="onSheetClose"
+					@funnelTap="onSheetClose"
+					@sheetClose="onSheetClose"
+				></search-filter-bar>
+				<list-view v-if="statuses[5] == 'loading'" class="sr-panel-list">
+					<list-item v-for="n in 15" :key="'ask' + n.toString()" :type="1">
+						<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+					</list-item>
+				</list-view>
+				<view v-else-if="statuses[5] == 'error'" class="sr-state">
+					<p-http-error :message="errors[5]" @retry="retryCurrent"></p-http-error>
+				</view>
+				<list-view
+					v-else
+					class="sr-panel-list"
+					:refresher-enabled="true"
+					:refresher-triggered="refreshings[5]"
+					:scroll-top="scrollTops[5]"
+					lower-threshold="100"
+					@refresherrefresh="onRefresherRefresh"
+					@scrolltolower="onLoadMore"
+					@scroll="onPanelScroll"
+				>
+					<list-item v-if="articles.length == 0" :key="'a-empty'" :type="2">
+						<empty-illus text="没有相关数据"></empty-illus>
+					</list-item>
+					<list-item v-for="(a, ai) in articles" :key="articleKey(a, ai)" :type="3">
+						<view class="sr-arow" :style="rowStyle" @click="onArticleTap(a)">
+							<view v-if="a.imageUrls.length > 0" class="sr-acover" :style="coverStyle">
+								<network-img :src="a.imageUrls[0]" width="100%" height="100%" radius="10px"></network-img>
+							</view>
+							<view class="sr-abody">
+								<view class="sr-seg-title">
+									<template v-for="(seg, si) in a.titleSegs" :key="si">
+										<text v-if="seg.type == 'em'" class="sr-seg sr-seg-em" :style="segEmStyle">{{ seg.text }}</text>
+										<text v-else class="sr-seg" :style="segTextStyle">{{ seg.text }}</text>
+									</template>
+								</view>
+								<view class="sr-vspacer"></view>
+								<text class="sr-vtime" :style="metaTextStyle">{{ articleTimeText(a) }}</text>
+								<view class="sr-astat">
+									<text class="sr-vtime" :style="metaTextStyle">{{ viewCountText(a) }}浏览</text>
+									<text class="sr-vtime" :style="metaTextStyle"> • </text>
+									<text class="sr-vtime" :style="metaTextStyle">{{ replyCountText(a) }}评论</text>
+								</view>
+							</view>
+						</view>
+					</list-item>
+					<list-item v-if="articles.length > 0 && noMores[5]" :key="'a-end'" :type="5">
+						<view class="sr-footer"><text class="sr-footer-text" :style="metaTextStyle">没有更多了</text></view>
+					</list-item>
+				</list-view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, reactive, computed } from 'vue'
+import { onLoad, onBackPress } from '@dcloudio/uni-app'
+import SearchFilterBar from '../../components/search/search-filter-bar.uvue'
+import BangumiResultCard from '../../components/search/bangumi-result-card.uvue'
+import UserResultCard from '../../components/search/user-result-card.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import PBadge from '../../components/p-badge/p-badge.uvue'
+import PStat from '../../components/p-stat/p-stat.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import SkeletonMediaBangumi from '../../components/skeleton/skeleton-media-bangumi.uvue'
+import {
+	searchVideos,
+	searchMedias,
+	searchLives,
+	searchUsers,
+	searchArticles,
+	fetchSearchCounts,
+	ab2c,
+	matchAvorBv
+} from '../../api/search.uts'
+import {
+	SEARCH_TYPES,
+	SearchCounts,
+	SearchVideoItem,
+	SearchMBangumiItem,
+	SearchLiveItem,
+	SearchUserItem,
+	SearchArticleItem
+} from '../../models/search.uts'
+import { numFormat, timeFormat, dateFormat } from '../../utils/format.uts'
+import {
+	textPrimary,
+	textSecondary,
+	themeColor,
+	currentThemeIndex,
+	cardBackground,
+	pageBackground,
+	withAlpha,
+	isDarkMode
+} from '../../utils/theme.uts'
+import { statusBarPaddingTop } from '../../utils/safeArea.uts'
+import { RT } from '../../utils/routes.uts'
+
+/**
+ * 搜索结果页（源头：lib/pages/search_result/{view,controller}.dart + search_panel/ 三件）。
+ *
+ *  - 导航栏：返回箭头 + 标题=关键词，整行点击返回搜索页（源 GestureDetector Get.back）；
+ *  - Tab 栏：六类（视频/番剧/影视/直播间/用户/专栏；影视=media_ft 为基线图新增，源枚举未启用）
+ *    横滑、胶囊指示器（圆角 20、内边距 3/8、文字 13），计数徽标 99+ 封顶、0 不显示；
+ *  - 面板保活：v-if 首次进入渲染 + v-show 切换（源 AutomaticKeepAliveClientMixin 等价；
+ *    未用 swiper——面板独立滚动容器 + 显隐切换即保活，无滑动联动诉求）；
+ *  - 分页：scrolltolower 触底（距底 100px）+ 1s 节流（源 EasyThrottle 同款）；空页 →「没有更多了」；
+ *  - 下拉刷新：list-view refresher，page=1 整表替换；
+ *  - 视频筛选：排序 6 档 chips 即点即重搜；时长 5 档/分区 22 项在半屏弹层选择后重搜
+ *    （重搜期间整面板回骨架态——源 SmartDialog loading 遮罩的等价简化）；
+ *  - AV/BV 直达：首屏结果与关键词吻合 → pagelist 取 cid 直接跳视频详情（源 onPushDetail 判定）；
+ *  - 事件处理器统一读 curTab——隐藏面板（v-show:none）不产生交互事件，一套 handler 服务六面板。
+ */
+const primary: string = themeColor(currentThemeIndex())
+
+const keyword = ref<string>('')
+const curTab = ref<number>(0)
+const counts = ref<SearchCounts | null>(null)
+/** 筛选弹层可见态（页面持有：onBackPress 在页面层消费返回键关闭弹层） */
+const filterSheetVisible = ref<boolean>(false)
+const duration = ref<number>(0)
+const tids = ref<number>(-1)
+
+const videos = ref<Array<SearchVideoItem>>([])
+const bangumis = ref<Array<SearchMBangumiItem>>([])
+const fts = ref<Array<SearchMBangumiItem>>([])
+const lives = ref<Array<SearchLiveItem>>([])
+const users = ref<Array<SearchUserItem>>([])
+const articles = ref<Array<SearchArticleItem>>([])
+
+const panelLoaded = reactive<boolean[]>([true, false, false, false, false, false])
+const statuses = reactive<string[]>(['loading', 'idle', 'idle', 'idle', 'idle', 'idle'])
+const errors = reactive<string[]>(['', '', '', '', '', ''])
+const pages = reactive<number[]>([1, 1, 1, 1, 1, 1])
+const noMores = reactive<boolean[]>([false, false, false, false, false, false])
+const loadings = reactive<boolean[]>([false, false, false, false, false, false])
+const refreshings = reactive<boolean[]>([false, false, false, false, false, false])
+const scrollTops = reactive<number[]>([0, 0, 0, 0, 0, 0])
+const scrollPos = reactive<number[]>([0, 0, 0, 0, 0, 0])
+/** orders 仅 video(0) 与 article(5) 消费；专栏默认 totalrank（源面板初始化） */
+const orders = reactive<string[]>(['', '', '', '', '', 'totalrank'])
+/** 触底加载节流（源 EasyThrottle 1s） */
+const lastLoadMoreAt: number[] = [0, 0, 0, 0, 0, 0]
+
+/** 视频行卡高（源 VideoCardH：(容器宽−36)/2 再 /1.6；容器宽=屏宽−24） */
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return Math.max(88, Math.round(((info.windowWidth - 24 - 36) / 2) / 1.6))
+	} catch (e) {
+		return 98
+	}
+})()
+const rowStyle: string = 'height:' + cardHeight.toString() + 'px;'
+const coverStyle: string = (() => {
+	const width = Math.round(cardHeight * 1.6)
+	return 'width:' + width.toString() + 'px;height:' + cardHeight.toString() + 'px;'
+})()
+
+/** 直播卡列宽（源 GridView 2 列、crossAxisSpacing 8） */
+const liveCardWidth = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return Math.floor((info.windowWidth - 24 - 8) / 2)
+	} catch (e) {
+		return 171
+	}
+})()
+const liveCoverHeight = Math.round(liveCardWidth / 1.6)
+const liveCardStyle: string = 'width:' + liveCardWidth.toString() + 'px;'
+const liveCoverStyle: string = 'height:' + liveCoverHeight.toString() + 'px;'
+
+const rootStyle: string = 'background-color:' + pageBackground() + ';'
+const navStyle: string = 'background-color:' + cardBackground() + ';border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:' +
+	(isDarkMode() ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)') + ';' + statusBarPaddingTop(0)
+const tabsStyle: string = 'background-color:' + cardBackground() + ';border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:' +
+	(isDarkMode() ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)') + ';'
+const iconTextStyle: string = 'color:' + textPrimary() + ';'
+const titleStyle: string = 'color:' + textPrimary() + ';'
+const metaTextStyle: string = 'color:' + textSecondary() + ';'
+const segTextStyle: string = 'color:' + textPrimary() + ';'
+const segEmStyle: string = 'color:' + primary + ';font-weight:bold;'
+
+function tabStyle(i: number): string {
+	const selected = curTab.value == i
+	return 'background-color:' + (selected ? withAlpha(primary, 0.14) : 'rgba(0,0,0,0)') + ';' +
+		'margin-right:6px;' + (selected ? '' : 'margin-top:3px;margin-bottom:3px;')
+}
+
+function tabTextStyle(i: number): string {
+	const selected = curTab.value == i
+	return 'font-size:13px;color:' + (selected ? primary : textSecondary()) + ';' + (selected ? 'font-weight:bold;' : '')
+}
+
+function countText(i: number): string {
+	const c = counts.value
+	if (c == null) {
+		return ''
+	}
+	const count = c.countOf(SEARCH_TYPES[i].type)
+	if (count <= 0) {
+		return ''
+	}
+	return count > 99 ? ' 99+' : ' ' + count.toString()
+}
+
+function videoKey(v: SearchVideoItem, index: number): string {
+	return (v.bvid.length > 0 ? v.bvid : 'a' + v.aid.toString()) + '-' + index.toString()
+}
+
+function mediaKey(m: SearchMBangumiItem, index: number): string {
+	return 'm' + m.mediaId.toString() + '-' + index.toString()
+}
+
+function userKey(u: SearchUserItem, index: number): string {
+	return 'u' + u.mid.toString() + '-' + index.toString()
+}
+
+function articleKey(a: SearchArticleItem, index: number): string {
+	return 'ar' + a.id.toString() + '-' + index.toString()
+}
+
+function durationText(v: SearchVideoItem): string {
+	return timeFormat(v.duration)
+}
+
+function viewText(v: SearchVideoItem): string {
+	return numFormat(v.stat.view)
+}
+
+function danmuText(v: SearchVideoItem): string {
+	return numFormat(v.stat.danmaku)
+}
+
+function pubdateText(v: SearchVideoItem): string {
+	return v.pubdate == 0 ? '' : dateFormat(v.pubdate, 'list')
+}
+
+function onlineText(live: SearchLiveItem): string {
+	return numFormat(live.online)
+}
+
+function articleTimeText(a: SearchArticleItem): string {
+	return a.pubTime == 0 ? '' : dateFormat(a.pubTime, 'detail')
+}
+
+function viewCountText(a: SearchArticleItem): string {
+	return numFormat(a.view)
+}
+
+function replyCountText(a: SearchArticleItem): string {
+	return numFormat(a.reply)
+}
+
+/** 番剧 tab 类型角标（源 ternary：mediaType==1 番剧/其余国创；影视 tab 由模板直接传「影视」） */
+function mediaBadge(m: SearchMBangumiItem): string {
+	return m.mediaType == 1 ? '番剧' : '国创'
+}
+
+/** 直播两列分块（源 GridView 2 列等价行容器） */
+const liveRows = computed((): Array<Array<SearchLiveItem>> => {
+	const rows: Array<Array<SearchLiveItem>> = []
+	const items = lives.value
+	for (let i = 0; i < items.length; i += 2) {
+		const row: Array<SearchLiveItem> = []
+		row.push(items[i])
+		if (i + 1 < items.length) {
+			row.push(items[i + 1])
+		}
+		rows.push(row)
+	}
+	return rows
+})
+
+onLoad((query) => {
+	if (query != null) {
+		const raw = query['keyword']
+		if (raw != null && (raw as string).length > 0) {
+			keyword.value = decodeURIComponent(raw as string)
+		}
+	}
+	if (keyword.value.length == 0) {
+		statuses[0] = 'error'
+		errors[0] = '缺少搜索关键词'
+		return
+	}
+	loadPanel(0, 'init')
+	loadCounts()
+})
+
+/** 筛选弹层打开时消费返回键（页面级钩子——组件内 onBackPress 无效） */
+onBackPress(() : boolean => {
+	if (filterSheetVisible.value) {
+		filterSheetVisible.value = false
+		return true
+	}
+	return false
+})
+
+async function loadCounts() {
+	const c = await fetchSearchCounts(keyword.value)
+	if (c != null) {
+		counts.value = c
+	}
+}
+
+function listLength(i: number): number {
+	if (i == 0) { return videos.value.length }
+	if (i == 1) { return bangumis.value.length }
+	if (i == 2) { return fts.value.length }
+	if (i == 3) { return lives.value.length }
+	if (i == 4) { return users.value.length }
+	return articles.value.length
+}
+
+async function loadPanel(i: number, mode: string): Promise<void> {
+	if (loadings[i]) {
+		return
+	}
+	loadings[i] = true
+	const isFirst = mode == 'init' || mode == 'refresh'
+	if (isFirst) {
+		statuses[i] = 'loading'
+		noMores[i] = false
+	}
+	const page = isFirst ? 1 : pages[i]
+	let ok = false
+	let message = ''
+	if (i == 0) {
+		const r = await searchVideos(keyword.value, page, orders[0], duration.value, tids.value)
+		ok = r.status
+		message = r.message
+		if (ok) {
+			if (isFirst) {
+				videos.value = r.items
+			} else {
+				for (let k = 0; k < r.items.length; k++) {
+					videos.value.push(r.items[k])
+				}
+			}
+			finishPage(i, page, r.items.length)
+			if (isFirst) {
+				tryDirectNav()
+			}
+		}
+	} else if (i == 1) {
+		const r = await searchMedias('media_bangumi', keyword.value, page)
+		ok = r.status
+		message = r.message
+		if (ok) {
+			if (isFirst) {
+				bangumis.value = r.items
+			} else {
+				for (let k = 0; k < r.items.length; k++) {
+					bangumis.value.push(r.items[k])
+				}
+			}
+			finishPage(i, page, r.items.length)
+		}
+	} else if (i == 2) {
+		const r = await searchMedias('media_ft', keyword.value, page)
+		ok = r.status
+		message = r.message
+		if (ok) {
+			if (isFirst) {
+				fts.value = r.items
+			} else {
+				for (let k = 0; k < r.items.length; k++) {
+					fts.value.push(r.items[k])
+				}
+			}
+			finishPage(i, page, r.items.length)
+		}
+	} else if (i == 3) {
+		const r = await searchLives(keyword.value, page)
+		ok = r.status
+		message = r.message
+		if (ok) {
+			if (isFirst) {
+				lives.value = r.items
+			} else {
+				for (let k = 0; k < r.items.length; k++) {
+					lives.value.push(r.items[k])
+				}
+			}
+			finishPage(i, page, r.items.length)
+		}
+	} else if (i == 4) {
+		const r = await searchUsers(keyword.value, page)
+		ok = r.status
+		message = r.message
+		if (ok) {
+			if (isFirst) {
+				users.value = r.items
+			} else {
+				for (let k = 0; k < r.items.length; k++) {
+					users.value.push(r.items[k])
+				}
+			}
+			finishPage(i, page, r.items.length)
+		}
+	} else {
+		const r = await searchArticles(keyword.value, page, orders[5])
+		ok = r.status
+		message = r.message
+		if (ok) {
+			if (isFirst) {
+				articles.value = r.items
+			} else {
+				for (let k = 0; k < r.items.length; k++) {
+					articles.value.push(r.items[k])
+				}
+			}
+			finishPage(i, page, r.items.length)
+		}
+	}
+	loadings[i] = false
+	if (!ok) {
+		if (listLength(i) == 0) {
+			statuses[i] = 'error'
+			errors[i] = message.length == 0 ? '请求错误' : message
+		} else {
+			// 首屏已有数据时失败保留旧列表（源 FutureBuilder 已完成态同款）
+			statuses[i] = 'done'
+		}
+	}
+}
+
+/** 页码与「没有更多」推进（空页 → noMore；源 page.value++ 同构） */
+function finishPage(i: number, page: number, added: number) {
+	if (added == 0) {
+		noMores[i] = true
+	} else {
+		pages[i] = page + 1
+	}
+	statuses[i] = 'done'
+}
+
+function onTabTap(i: number) {
+	if (curTab.value == i) {
+		scrollToTop(i)
+		return
+	}
+	curTab.value = i
+	if (!panelLoaded[i]) {
+		statuses[i] = 'loading'
+		panelLoaded[i] = true
+		loadPanel(i, 'init')
+	}
+}
+
+function scrollToTop(i: number) {
+	// 先置当前值再归零，保证 scroll-top 绑定值发生变化触发滚动
+	scrollTops[i] = scrollPos[i]
+	setTimeout(() => {
+		scrollTops[i] = 0
+	}, 50)
+}
+
+function onPanelScroll(event: UniScrollEvent) {
+	scrollPos[curTab.value] = event.detail.scrollTop
+}
+
+function onLoadMore() {
+	const i = curTab.value
+	if (statuses[i] != 'done' || noMores[i] || loadings[i]) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadMoreAt[i] < 1000) {
+		return
+	}
+	lastLoadMoreAt[i] = now
+	loadPanel(i, 'more')
+}
+
+async function onRefresherRefresh() {
+	const i = curTab.value
+	refreshings[i] = true
+	await loadPanel(i, 'refresh')
+	refreshings[i] = false
+}
+
+function retryCurrent() {
+	loadPanel(curTab.value, 'init')
+}
+
+function onVideoOrderTap(order: string) {
+	orders[0] = order
+	loadPanel(0, 'refresh')
+}
+
+function onArticleOrderTap(order: string) {
+	orders[5] = order
+	loadPanel(5, 'refresh')
+}
+
+function onVideoFilterTap(d: number, t: number) {
+	filterSheetVisible.value = false
+	duration.value = d
+	tids.value = t
+	loadPanel(0, 'refresh')
+}
+
+function onFunnelTap() {
+	filterSheetVisible.value = true
+}
+
+function onSheetClose() {
+	filterSheetVisible.value = false
+}
+
+/** AV/BV 直达（源 onPushDetail：BV/AV 吻合首条结果或纯数字关键词==aid → pagelist 取 cid 跳详情） */
+async function tryDirectNav() {
+	if (videos.value.length == 0) {
+		return
+	}
+	const first = videos.value[0]
+	const match = matchAvorBv(keyword.value)
+	let hit = false
+	if (match.matched && match.kind == 'BV' && match.bvid == first.bvid) {
+		hit = true
+	}
+	if (match.matched && match.kind == 'AV' && match.aid == first.aid) {
+		hit = true
+	}
+	if (!match.matched) {
+		const parsed = parseInt(keyword.value)
+		if (!isNaN(parsed) && parsed == first.aid) {
+			hit = true
+		}
+	}
+	if (!hit) {
+		return
+	}
+	const cid = await ab2c(first.aid, first.bvid)
+	let url = '/pages/video/video?bvid=' + first.bvid
+	if (cid > 0) {
+		url = url + '&cid=' + cid.toString()
+	}
+	uni.navigateTo({ url: url })
+}
+
+async function onVideoTap(v: SearchVideoItem) {
+	if (v.type == 'ketang') {
+		uni.showToast({ title: '课堂视频暂不支持播放', icon: 'none' })
+		return
+	}
+	const cid = await ab2c(v.aid, v.bvid)
+	let url = '/pages/video/video?bvid=' + v.bvid
+	if (cid > 0) {
+		url = url + '&cid=' + cid.toString()
+	}
+	uni.navigateTo({ url: url })
+}
+
+function onUserTap(u: SearchUserItem) {
+	uni.navigateTo({ url: '/pages/member/member?mid=' + u.mid.toString() })
+}
+
+/** 番剧/影视 → 番剧详情（season_id；源 RoutePush.bangumiPush 同口径） */
+function onBangumiTap(m: SearchMBangumiItem) {
+	if (m.seasonId <= 0) {
+		uni.showToast({ title: '该条目暂无可播放的番剧信息', icon: 'none' })
+		return
+	}
+	uni.navigateTo({ url: RT.bangumiIntro + '?season_id=' + m.seasonId.toString() })
+}
+
+/** 直播间 → 直播间页（roomid 必填；title/cover/uname 作起播前顶栏与封面兜底，源 LiveItemModel 同口径） */
+function onLiveTap(live: SearchLiveItem) {
+	if (live.roomid <= 0) {
+		uni.showToast({ title: '直播间信息缺失', icon: 'none' })
+		return
+	}
+	let url = RT.liveRoom + '?roomid=' + live.roomid.toString()
+	if (live.title.length > 0) {
+		url = url + '&title=' + encodeURIComponent(live.title)
+	}
+	if (live.cover.length > 0) {
+		url = url + '&cover=' + encodeURIComponent(live.cover)
+	}
+	if (live.uname.length > 0) {
+		url = url + '&uname=' + encodeURIComponent(live.uname)
+	}
+	uni.navigateTo({ url: url })
+}
+
+/** 专栏 → 专栏阅读页（cvid；read 页 onLoad 取 cvid） */
+function onArticleTap(a: SearchArticleItem) {
+	if (a.id <= 0) {
+		uni.showToast({ title: '专栏信息缺失', icon: 'none' })
+		return
+	}
+	uni.navigateTo({ url: RT.read + '?cvid=' + a.id.toString() })
+}
+
+function onNavTap() {
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		// 无上级（深链直入）：回搜索页补栈（关键词继续可编辑）
+		uni.navigateTo({ url: '/pages/search/search?keyword=' + encodeURIComponent(keyword.value) })
+	}
+}
+</script>
+
+<style>
+	.sr {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.sr-nav {
+		display: flex;
+		flex-direction: column;
+	}
+	.sr-nav-row {
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.sr-nav-leading {
+		width: 56px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sr-nav-back {
+		font-size: 24px;
+		line-height: 24px;
+	}
+	.sr-nav-title {
+		flex: 1;
+		font-size: 16px;
+		font-weight: 500;
+		text-align: left;
+	}
+	.sr-tabs {
+		display: flex;
+		flex-direction: column;
+		padding-top: 4px;
+		padding-bottom: 8px;
+	}
+	.sr-tabs-scroll {
+		height: 36px;
+		flex-direction: row;
+	}
+	.sr-tabs-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 8px;
+	}
+	.sr-tab {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 8px;
+		padding-right: 8px;
+		padding-top: 3px;
+		padding-bottom: 3px;
+		border-radius: 20px;
+		flex-shrink: 0;
+	}
+	.sr-tab-text {
+		font-size: 13px;
+	}
+	.sr-panels {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+	.sr-panel {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.sr-panel-list {
+		flex: 1;
+	}
+	.sr-state {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+	}
+	/* 视频行（源 VideoCardH source='search'：封面 + 标题段高亮 + 发布时间 + UP + 播放/弹幕） */
+	.sr-vrow {
+		display: flex;
+		flex-direction: row;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 5px;
+		margin-bottom: 5px;
+	}
+	.sr-vcover {
+		position: relative;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.sr-vduration {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+	}
+	.sr-vtype {
+		position: absolute;
+		left: 6px;
+		bottom: 6px;
+	}
+	.sr-vbody {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-right: 6px;
+		overflow: hidden;
+	}
+	.sr-seg-title {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+		max-height: 40px;
+		overflow: hidden;
+	}
+	.sr-seg {
+		font-size: 14px;
+		line-height: 20px;
+		font-weight: 500;
+	}
+	.sr-seg-em {
+		font-weight: bold;
+	}
+	.sr-vspacer {
+		flex: 1;
+	}
+	.sr-vtime {
+		font-size: 11px;
+	}
+	.sr-vowner {
+		font-size: 12px;
+		margin-top: 2px;
+	}
+	.sr-vstat {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+	}
+	.sr-vgap8 {
+		width: 8px;
+	}
+	.sr-astat {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 2px;
+	}
+	.sr-arow {
+		display: flex;
+		flex-direction: row;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 5px;
+		margin-bottom: 5px;
+	}
+	.sr-acover {
+		border-radius: 10px;
+		overflow: hidden;
+		flex-shrink: 0;
+	}
+	.sr-abody {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-right: 6px;
+		overflow: hidden;
+	}
+	/* 直播卡（源 LiveItem：封面 16:10 + 底部分区/围观条 + 标题段高亮 + UP 名） */
+	.sr-live-row {
+		display: flex;
+		flex-direction: row;
+		justify-content: space-between;
+		padding-left: 12px;
+		padding-right: 12px;
+		margin-top: 5px;
+		margin-bottom: 5px;
+	}
+	.sr-live-card {
+		display: flex;
+		flex-direction: column;
+		border-radius: 10px;
+		overflow: hidden;
+		background-color: #FFFFFF;
+	}
+	.sr-live-holder {
+		background-color: rgba(0, 0, 0, 0);
+	}
+	.sr-live-cover {
+		position: relative;
+	}
+	.sr-live-badge {
+		position: absolute;
+		left: 6px;
+		top: 6px;
+	}
+	.sr-live-statbar {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 23px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding-left: 8px;
+		padding-right: 8px;
+		background-color: rgba(0, 0, 0, 0.55);
+	}
+	.sr-live-cate {
+		flex: 1;
+		font-size: 11px;
+		color: #FFFFFF;
+	}
+	.sr-live-online {
+		font-size: 11px;
+		color: #FFFFFF;
+		flex-shrink: 0;
+		margin-left: 4px;
+	}
+	.sr-live-body {
+		display: flex;
+		flex-direction: column;
+		padding-left: 9px;
+		padding-right: 9px;
+		padding-top: 8px;
+		padding-bottom: 6px;
+	}
+	.sr-live-title {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+		max-height: 36px;
+		overflow: hidden;
+	}
+	.sr-live-title-seg {
+		font-size: 13px;
+		line-height: 18px;
+		font-weight: 500;
+	}
+	.sr-live-uname {
+		font-size: 12px;
+		margin-top: 6px;
+	}
+	.sr-footer {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sr-footer-text {
+		font-size: 12px;
+	}
+</style>

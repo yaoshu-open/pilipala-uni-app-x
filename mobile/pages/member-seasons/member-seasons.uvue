@@ -1,0 +1,356 @@
+<template>
+	<view class="mss" :style="pageStyle">
+		<app-navbar :title="seasonName"></app-navbar>
+
+		<view v-if="state == 'error'" class="mss-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+		<view v-else-if="state == 'empty'" class="mss-fill">
+			<list-state state="empty" empty-text="合集内暂时没有视频" @retry="reload"></list-state>
+		</view>
+		<scroll-view
+			v-else
+			class="mss-scroll"
+			:lower-threshold="200"
+			@scrolltolower="onLoadMore"
+		>
+			<view v-if="state == 'loading'" class="mss-body">
+				<view v-for="r in skRows" :key="'skr-' + r.toString()" class="mss-row">
+					<view class="mss-cell" :style="cellStyle">
+						<skeleton-block width="100%" :height="coverHeightText" radius="10px"></skeleton-block>
+						<view class="mss-sk-gap"></view>
+						<skeleton-block width="90%" height="14px" radius="4px"></skeleton-block>
+						<view class="mss-sk-gap"></view>
+						<skeleton-block width="60%" height="11px" radius="4px"></skeleton-block>
+					</view>
+					<view class="mss-gap"></view>
+					<view class="mss-cell" :style="cellStyle">
+						<skeleton-block width="100%" :height="coverHeightText" radius="10px"></skeleton-block>
+						<view class="mss-sk-gap"></view>
+						<skeleton-block width="90%" height="14px" radius="4px"></skeleton-block>
+						<view class="mss-sk-gap"></view>
+						<skeleton-block width="60%" height="11px" radius="4px"></skeleton-block>
+					</view>
+				</view>
+			</view>
+			<view v-else class="mss-body">
+				<view v-for="row in rows" :key="row.key" class="mss-row">
+					<view class="mss-cell" :style="cellStyle" @click="openDetail(row.left)">
+						<view class="mss-cover" :style="coverSizeStyle">
+							<network-img :src="row.left.cover" width="100%" height="100%" radius="10px"></network-img>
+							<view v-if="row.left.duration > 0" class="mss-dur">
+								<p-badge :text="durationText(row.left.duration)" type="gray" size="small" :font-size="9"></p-badge>
+							</view>
+						</view>
+						<text class="mss-title" :style="primaryTextStyle" :max-lines="2">{{ row.left.title }}</text>
+						<view class="mss-meta">
+							<p-stat icon="play-circle-outlined" :text="playText(row.left.view)" :icon-size="13"></p-stat>
+							<view class="mss-meta-spacer"></view>
+							<text class="mss-date" :style="secondaryTextStyle">{{ dateText(row.left) }}</text>
+						</view>
+					</view>
+					<view class="mss-gap"></view>
+					<view v-if="row.hasRight" class="mss-cell" :style="cellStyle" @click="openDetail(row.right)">
+						<view class="mss-cover" :style="coverSizeStyle">
+							<network-img :src="row.right.cover" width="100%" height="100%" radius="10px"></network-img>
+							<view v-if="row.right.duration > 0" class="mss-dur">
+								<p-badge :text="durationText(row.right.duration)" type="gray" size="small" :font-size="9"></p-badge>
+							</view>
+						</view>
+						<text class="mss-title" :style="primaryTextStyle" :max-lines="2">{{ row.right.title }}</text>
+						<view class="mss-meta">
+							<p-stat icon="play-circle-outlined" :text="playText(row.right.view)" :icon-size="13"></p-stat>
+							<view class="mss-meta-spacer"></view>
+							<text class="mss-date" :style="secondaryTextStyle">{{ dateText(row.right) }}</text>
+						</view>
+					</view>
+				</view>
+				<view v-if="isLoading" class="mss-footer">
+					<text class="mss-footer-text" :style="secondaryTextStyle">加载中...</text>
+				</view>
+				<view class="mss-bottom"></view>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PBadge from '../../components/p-badge/p-badge.uvue'
+import PStat from '../../components/p-stat/p-stat.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import ListState from '../../components/list-state/list-state.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import { fetchSeasonDetail, fetchSeriesDetail } from '../../api/member.uts'
+import { MemberArchiveItem, SeasonDetailResult } from '../../models/member.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground, textPrimary, textSecondary } from '../../utils/theme.uts'
+import { numFormat, timeFormat } from '../../utils/format.uts'
+
+/**
+ * 合集/系列详情页（源头：`lib/pages/member_seasons/view.dart` + controller.dart）。
+ *
+ * 形态照源与基线（基线_P5_member_seasons）：无头部介绍块、无播放全部；双列网格
+ * （封面 16:10 圆角 + 右下时长 + 标题 2 行 + 左播放量/右发布日期）。
+ * category 分流：0=合集（seasons_archives_list，seasonId）、1=系列（/x/series/archives，
+ * seriesId + current_mid=登录 mid，未登录 0）。分页 pn 递增 + page.total 比对终止。
+ */
+const mid = ref<number>(0)
+const category = ref<number>(0)
+const seasonId = ref<number>(0)
+const seriesId = ref<number>(0)
+const seasonName = ref<string>('')
+const items = ref<Array<MemberArchiveItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const isLoading = ref<boolean>(false)
+const page = ref<number>(1)
+const total = ref<number>(0)
+let lastLoadAt: number = 0
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const primaryTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+/** 网格单元宽：视口 − 页边距 12×2 − 列间距 12，对半 */
+const cellWidth = ((): number => {
+	try {
+		const win = uni.getWindowInfo()
+		return Math.floor((win.windowWidth - 24 - 12) / 2)
+	} catch (e) {
+		return 165
+	}
+})()
+const coverHeight = Math.round(cellWidth / 1.6)
+const coverHeightText = coverHeight.toString() + 'px'
+const coverSizeStyle = 'height:' + coverHeightText + ';'
+const cellStyle = 'width:' + cellWidth.toString() + 'px;'
+
+/** 双列行分组（App 蒸汽端 flex-wrap 不生效，按 rcmd 已验证模式：行内左 cell + gap 元素 + 右 cell） */
+class SeasonRow {
+	left: MemberArchiveItem = new MemberArchiveItem()
+	right: MemberArchiveItem = new MemberArchiveItem()
+	hasRight: boolean = false
+	key: string = ''
+}
+const skRows = [1, 2, 3]
+const rows = computed((): Array<SeasonRow> => {
+	const list: Array<SeasonRow> = []
+	const source = items.value
+	let index = 0
+	while (index < source.length) {
+		const row = new SeasonRow()
+		row.left = source[index]
+		row.key = source[index].aid.toString()
+		if (index + 1 < source.length) {
+			row.right = source[index + 1]
+			row.hasRight = true
+		}
+		list.push(row)
+		index = index + 2
+	}
+	return list
+})
+
+function playText(value: number): string {
+	return numFormat(value)
+}
+
+function durationText(seconds: number): string {
+	return timeFormat(seconds)
+}
+
+/** 发布日期：Y-M-D 不补零（基线 '2022-3-23' 形态；ctime 优先、pubdate 兜底） */
+function dateText(item: MemberArchiveItem): string {
+	const ts = item.ctime > 0 ? item.ctime : item.pubdate
+	if (ts <= 0) {
+		return ''
+	}
+	const date = new Date(ts * 1000)
+	return date.getFullYear().toString() + '-' + (date.getMonth() + 1).toString() + '-' + date.getDate().toString()
+}
+
+async function loadPage(pn: number) {
+	if (isLoading.value) {
+		return
+	}
+	isLoading.value = true
+	if (pn == 1) {
+		state.value = 'loading'
+		errorText.value = ''
+	}
+	const currentMid = userState.isLogin ? userState.info.mid : 0
+	let res = new SeasonDetailResult()
+	if (category.value == 0) {
+		res = await fetchSeasonDetail(mid.value, seasonId.value, pn)
+	} else {
+		res = await fetchSeriesDetail(mid.value, seriesId.value, pn, currentMid)
+	}
+	isLoading.value = false
+	if (!res.status) {
+		if (pn == 1) {
+			state.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	const next: Array<MemberArchiveItem> = pn == 1 ? [] : items.value.slice()
+	for (let i = 0; i < res.items.length; i++) {
+		next.push(res.items[i])
+	}
+	items.value = next
+	total.value = res.total
+	page.value = pn + 1
+	if (pn == 1) {
+		state.value = next.length > 0 ? 'ready' : 'empty'
+	}
+}
+
+function hasMorePages(): boolean {
+	if (total.value > 0 && items.value.length >= total.value) {
+		return false
+	}
+	return items.value.length > 0 && items.value.length % 30 == 0
+}
+
+function onLoadMore() {
+	if (state.value != 'ready' || isLoading.value) {
+		return
+	}
+	if (!hasMorePages()) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadAt < 500) {
+		return
+	}
+	lastLoadAt = now
+	loadPage(page.value)
+}
+
+function reload() {
+	items.value = []
+	total.value = 0
+	page.value = 1
+	loadPage(1)
+}
+
+function openDetail(item: MemberArchiveItem) {
+	if (item.bvid.length == 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + item.bvid })
+}
+
+onLoad((options) => {
+	const rawCategory = options != null ? options['category'] : null
+	const parsedCategory = rawCategory == null ? 0 : parseInt(rawCategory as string)
+	category.value = isNaN(parsedCategory) ? 0 : parsedCategory
+	const rawMid = options != null ? options['mid'] : null
+	const parsedMid = rawMid == null ? 0 : parseInt(rawMid as string)
+	mid.value = isNaN(parsedMid) ? 0 : parsedMid
+	const rawSeasonId = options != null ? options['seasonId'] : null
+	const parsedSeason = rawSeasonId == null ? 0 : parseInt(rawSeasonId as string)
+	seasonId.value = isNaN(parsedSeason) ? 0 : parsedSeason
+	const rawSeriesId = options != null ? options['seriesId'] : null
+	const parsedSeries = rawSeriesId == null ? 0 : parseInt(rawSeriesId as string)
+	seriesId.value = isNaN(parsedSeries) ? 0 : parsedSeries
+	const rawName = options != null ? options['seasonName'] : null
+	if (rawName != null) {
+		seasonName.value = decodeURIComponent(rawName as string)
+	}
+	const idReady = category.value == 0 ? seasonId.value > 0 : seriesId.value > 0
+	if (mid.value <= 0 || !idReady) {
+		state.value = 'error'
+		errorText.value = '缺少合集参数，请从用户主页进入'
+		return
+	}
+	loadPage(1)
+})
+</script>
+
+<style>
+	.mss {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mss-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mss-scroll {
+		flex: 1;
+	}
+	.mss-body {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 12px;
+	}
+	.mss-row {
+		display: flex;
+		flex-direction: row;
+	}
+	.mss-cell {
+		display: flex;
+		flex-direction: column;
+		padding-bottom: 12px;
+	}
+	.mss-gap {
+		width: 12px;
+	}
+	.mss-cover {
+		position: relative;
+		width: 100%;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.mss-dur {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+	}
+	.mss-title {
+		font-size: 13px;
+		line-height: 19px;
+		margin-top: 6px;
+	}
+	.mss-meta {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+		padding-right: 6px;
+	}
+	.mss-meta-spacer {
+		flex: 1;
+	}
+	.mss-date {
+		font-size: 11px;
+	}
+	.mss-sk-gap {
+		height: 6px;
+	}
+	.mss-footer {
+		width: 100%;
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+		padding-top: 10px;
+	}
+	.mss-footer-text {
+		font-size: 13px;
+	}
+	.mss-bottom {
+		width: 100%;
+		height: 24px;
+	}
+</style>

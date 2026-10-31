@@ -1,0 +1,294 @@
+<template>
+	<view class="hs">
+		<search-bar placeholder="搜索" @submit="onSubmit" @back="onBack"></search-bar>
+
+		<list-view v-if="loading && items.length == 0" class="hs-list">
+			<list-item v-for="n in 10" :key="'sk-' + n.toString()" :type="2">
+				<skeleton-video-card-h></skeleton-video-card-h>
+			</list-item>
+		</list-view>
+
+		<list-view v-if="!loading && items.length == 0" class="hs-list">
+			<list-item :key="'empty'" :type="3">
+				<empty-illus text="没有数据"></empty-illus>
+			</list-item>
+		</list-view>
+
+		<list-view v-if="items.length > 0" class="hs-list" @scrolltolower="onLoadMore">
+			<list-item v-for="(item, index) in items" :key="item.history.oid.toString() + '-' + item.viewAt.toString()" :type="1">
+				<history-item
+					:item="item"
+					:multiple="false"
+					:checked="false"
+					@tap="onItemTap(index)"
+					@more="onItemMore(index)"
+				></history-item>
+			</list-item>
+			<list-item :key="'footer'" :type="4">
+				<view class="hs-footer">
+					<text v-if="finished" class="hs-footer-text" :style="secondaryStyle">没有更多了</text>
+				</view>
+			</list-item>
+		</list-view>
+
+		<view v-if="rowMenuVisible" class="hs-menu-mask" @click="onCloseRowMenu">
+			<view class="hs-menu" :style="menuBg" @click.stop="noop">
+				<view v-if="rowMenuCanLater" class="hs-menu-item" @click.stop="onRowLater">
+					<text class="hs-menu-item-text" :style="menuTextStyle">稍后再看</text>
+				</view>
+				<view class="hs-menu-item" @click.stop="onRowDelete">
+					<text class="hs-menu-item-text" :style="menuTextStyle">删除记录</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onBackPress } from '@dcloudio/uni-app'
+import SearchBar from '../../components/common/search-bar.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import HistoryItem from '../../components/history/history-item.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { searchHistory, historyDelete, laterAdd, HistoryActionResult } from '../../api/history.uts'
+import { HisListItem, HistoryResult, historyKidOf } from '../../models/history.uts'
+import { cardBackground, textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 历史搜索（源头：`lib/pages/history_search/view.dart` + controller）。
+ *
+ *  - search-bar（占位「搜索」，进入即弹键盘）；提交后 pn 分页（/x/web-goblin/history/search，
+ *    page.total 比对终止，尾部「没有更多了」）；
+ *  - 条目复用 history-item（multiple 恒 false——源 HistorySearchController 无多选）；
+ *  - 行 ⋮ 菜单：稍后再看（archive 类）/ 删除记录；
+ *  - 初始与空结果同为插画 +「没有数据」。
+ */
+const items = ref<Array<HisListItem>>([])
+const keyword = ref<string>('')
+const loading = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const finished = ref<boolean>(false)
+const total = ref<number>(0)
+const page = ref<number>(1)
+const rowMenuVisible = ref<boolean>(false)
+const rowMenuIndex = ref<number>(-1)
+
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const menuTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const menuBg: string = 'background-color:' + cardBackground() + ';'
+
+const rowMenuCanLater = computed((): boolean => {
+	const target = rowMenuTarget()
+	if (target == null) {
+		return false
+	}
+	const business = target.history.business
+	const isBangumi = target.badge == '番剧' || target.tagName.indexOf('动画') >= 0
+	return !isBangumi && business != 'live' && business.indexOf('article') < 0
+})
+
+function rowMenuTarget(): HisListItem | null {
+	if (rowMenuIndex.value < 0 || rowMenuIndex.value >= items.value.length) {
+		return null
+	}
+	return items.value[rowMenuIndex.value]
+}
+
+function onBack() {
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+async function search(mode: string) {
+	loading.value = true
+	const res: HistoryResult = await searchHistory(page.value, keyword.value)
+	loading.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	total.value = res.total
+	if (mode == 'init') {
+		items.value = []
+	}
+	for (let i = 0; i < res.items.length; i++) {
+		items.value.push(res.items[i])
+	}
+	if (items.value.length >= total.value) {
+		finished.value = true
+	}
+	page.value = page.value + 1
+}
+
+function onSubmit(value: string) {
+	if (loading.value) {
+		return
+	}
+	keyword.value = value
+	page.value = 1
+	finished.value = false
+	items.value = []
+	search('init')
+}
+
+async function onLoadMore() {
+	if (finished.value || loadingMore.value || loading.value || keyword.value.length == 0) {
+		return
+	}
+	loadingMore.value = true
+	await search('onLoad')
+	loadingMore.value = false
+}
+
+function onItemTap(index: number) {
+	const item: HisListItem = items.value[index]
+	const business = item.history.business
+	const isBangumi = item.badge == '番剧' || item.tagName.indexOf('动画') >= 0
+	if (business.indexOf('article') >= 0) {
+		goPlaceholder('文章内容', item.title, '文章阅读域接入后开放')
+		return
+	}
+	if (business == 'live') {
+		if (item.liveStatus == 1) {
+			goPlaceholder('直播间', item.title, '直播域接入后开放')
+		} else {
+			uni.showToast({ title: '直播未开播', icon: 'none' })
+		}
+		return
+	}
+	if (isBangumi) {
+		goPlaceholder('番剧播放', item.title, '番剧播放器接入后开放')
+		return
+	}
+	const bvid = item.history.bvid
+	if (bvid.length > 0) {
+		uni.navigateTo({ url: '/pages/video/video?bvid=' + bvid })
+	} else {
+		uni.showToast({ title: '无法获取视频信息', icon: 'none' })
+	}
+}
+
+function goPlaceholder(title: string, note: string, tip: string) {
+	let query = 'title=' + encodeURIComponent(title) + '&batch=' + encodeURIComponent('P5')
+	query = query + '&note=' + encodeURIComponent(note + '：' + tip)
+	uni.navigateTo({ url: '/pages/placeholder/placeholder?' + query })
+}
+
+function onItemMore(index: number) {
+	rowMenuIndex.value = index
+	rowMenuVisible.value = true
+}
+
+function onCloseRowMenu() {
+	rowMenuVisible.value = false
+	rowMenuIndex.value = -1
+}
+
+/** 菜单卡片阻断冒泡（点卡片空白不关闭） */
+function noop() {
+}
+
+async function onRowLater() {
+	const target = rowMenuTarget()
+	onCloseRowMenu()
+	if (target == null) {
+		return
+	}
+	const bvid = target.history.bvid
+	if (bvid.length == 0) {
+		uni.showToast({ title: '无法加入稍后再看', icon: 'none' })
+		return
+	}
+	const res: HistoryActionResult = await laterAdd(bvid)
+	uni.showToast({ title: res.status ? res.successToast : res.message, icon: 'none' })
+}
+
+async function onRowDelete() {
+	const target = rowMenuTarget()
+	const kid = target == null ? '' : historyKidOf(target.kid, target.history.business)
+	const oid = target == null ? 0 : target.history.oid
+	onCloseRowMenu()
+	if (kid.length == 0) {
+		return
+	}
+	const res: HistoryActionResult = await historyDelete(kid)
+	if (res.status) {
+		const kept: Array<HisListItem> = []
+		for (let i = 0; i < items.value.length; i++) {
+			if (items.value[i].history.oid != oid) {
+				kept.push(items.value[i])
+			}
+		}
+		items.value = kept
+		uni.showToast({ title: res.successToast, icon: 'none' })
+	} else {
+		uni.showToast({ title: res.message, icon: 'none' })
+	}
+}
+
+onBackPress((): boolean => {
+	if (rowMenuVisible.value) {
+		rowMenuVisible.value = false
+		rowMenuIndex.value = -1
+		return true
+	}
+	return false
+})
+</script>
+
+<style>
+	.hs {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.hs-list {
+		flex: 1;
+	}
+	.hs-footer {
+		height: 60px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.hs-footer-text {
+		font-size: 13px;
+	}
+	.hs-menu-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.1);
+	}
+	.hs-menu {
+		position: absolute;
+		right: 16px;
+		top: 45%;
+		border-radius: 8px;
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		padding-top: 4px;
+		padding-bottom: 4px;
+	}
+	.hs-menu-item {
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 12px;
+		padding-bottom: 12px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.hs-menu-item-text {
+		font-size: 14px;
+	}
+</style>

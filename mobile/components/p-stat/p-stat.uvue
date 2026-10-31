@@ -1,0 +1,56 @@
+<template>
+	<view class="p-stat">
+		<text class="p-stat-icon" :style="iconStyle">{{ glyph }}</text>
+		<text class="p-stat-value" :style="valueStyle">{{ text }}</text>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 图标 + 数字（源头：`lib/common/widgets/stat/view.dart` StatView / `stat/danmu.dart` StatDanMu）。
+ * 播放量图标 13、弹幕图标 14，数字 11（medium 12），图标与数字间距 2。
+ * 复用 p-icon 的码点表，不重复维护 unicode。
+ */
+const props = defineProps({
+	icon: { type: String, default: 'play-circle-outlined' },
+	text: { type: String, default: '' },
+	iconSize: { type: Number, default: 13 },
+	size: { type: String, default: 'small' },
+	color: { type: String, default: '' }
+})
+
+const glyph = computed((): string => {
+	if (props.icon == 'play-circle-outlined') { return '\uf2b1' }
+	if (props.icon == 'subtitles-outlined') { return '\uf3fd' }
+	return ''
+})
+
+const iconStyle = computed((): string => {
+	const px = props.iconSize.toString()
+	const c = props.color.length > 0 ? props.color : textSecondary()
+	return 'font-family:MaterialIcons;font-size:' + px + 'px;line-height:' + px + 'px;color:' + c + ';'
+})
+
+const valueStyle = computed((): string => {
+	const px = props.size == 'medium' ? '12' : '11'
+	const c = props.color.length > 0 ? props.color : textSecondary()
+	return 'font-size:' + px + 'px;color:' + c + ';'
+})
+</script>
+
+<style>
+	.p-stat {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.p-stat-icon {
+		font-family: MaterialIcons;
+	}
+	.p-stat-value {
+		margin-left: 2px;
+	}
+</style>

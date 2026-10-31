@@ -1,0 +1,103 @@
+<template>
+	<view class="bc" :style="rootStyle" @click="onTap">
+		<view class="bc-cover" :style="coverStyle">
+			<network-img :src="item.cover" width="100%" height="100%" radius="0"></network-img>
+			<view v-if="item.badge.length > 0" class="bc-badge">
+				<p-badge :text="item.badge" size="small" :font-size="10"></p-badge>
+			</view>
+			<view v-if="item.order.length > 0" class="bc-order">
+				<p-badge :text="item.order" type="gray" size="small" :font-size="10"></p-badge>
+			</view>
+		</view>
+		<view class="bc-content" :style="contentStyle">
+			<text class="bc-title" :style="titleStyle" :max-lines="1">{{ item.title }}</text>
+			<text v-if="item.indexShow.length > 0" class="bc-sub" :style="subStyle" :max-lines="1">{{ item.indexShow }}</text>
+			<text v-if="item.progress.length > 0" class="bc-sub" :style="subStyle" :max-lines="1">{{ item.progress }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import PBadge from '../p-badge/p-badge.uvue'
+import { BangumiListItem } from '../../models/bangumi.uts'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+import { navigateTo } from '../../utils/routes.uts'
+
+/**
+ * 番剧竖版卡（源头：`lib/pages/bangumi/widgets/bangumu_card_v.dart#BangumiCardV`）。
+ *
+ * 结构：封面 0.75 宽高比（圆角 10）→ 角标（右上 badge）+ 追番量/更新集（左下 order，灰底）
+ *      → 文本区 42 高（标题 1 行 w500 + index_show 1 行 outline + progress 1 行 outline）。
+ * 尺寸：宽度由使用方给（列表网格 =（屏宽−24−16）/3；最近追番横滑 = 屏宽/3），高度 = 宽/0.75 + 42。
+ * 点击：进番剧详情（源 RoutePush.bangumiPush(seasonId) → 源为 /video?videoType=bangumi；本端独立详情页，
+ *      见设计_设置与杂项域 §五/§七）。
+ */
+const props = defineProps({
+	item: { type: Object, default: null },
+	width: { type: Number, default: 0 },
+	/** 文本区高（源 42 + 字号缩放的等价常量） */
+	textExtra: { type: Number, default: 42 }
+})
+
+const primaryColor = computed((): string => textPrimary())
+const subColor = computed((): string => textSecondary())
+
+const rootStyle = computed((): string => 'width:' + props.width.toString() + 'px;')
+const coverStyle = computed((): string => {
+	const h = Math.round(props.width / 0.75)
+	return 'width:' + props.width.toString() + 'px;height:' + h.toString() + 'px;'
+})
+const contentStyle = computed((): string => 'height:' + props.textExtra.toString() + 'px;')
+const titleStyle = computed((): string => 'color:' + primaryColor.value + ';')
+const subStyle = computed((): string => 'color:' + subColor.value + ';')
+
+function onTap() {
+	const bangumi = props.item as BangumiListItem | null
+	if (bangumi == null || bangumi.seasonId <= 0) {
+		return
+	}
+	navigateTo('/pages/bangumi-intro/bangumi-intro?season_id=' + bangumi.seasonId.toString())
+}
+</script>
+
+<style>
+	.bc {
+		display: flex;
+		flex-direction: column;
+	}
+	.bc-cover {
+		position: relative;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.bc-badge {
+		position: absolute;
+		top: 6px;
+		right: 6px;
+	}
+	.bc-order {
+		position: absolute;
+		bottom: 6px;
+		left: 6px;
+	}
+	.bc-content {
+		display: flex;
+		flex-direction: column;
+		padding-left: 4px;
+		padding-right: 4px;
+		padding-top: 5px;
+		padding-bottom: 3px;
+	}
+	.bc-title {
+		font-size: 13px;
+		font-weight: 500;
+		letter-spacing: 0.3px;
+		line-height: 17px;
+	}
+	.bc-sub {
+		font-size: 11px;
+		line-height: 14px;
+	}
+</style>

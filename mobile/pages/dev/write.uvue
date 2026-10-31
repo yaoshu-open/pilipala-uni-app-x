@@ -1,0 +1,349 @@
+<template>
+	<view class="page">
+		<text class="title">写接口验证（开发用）</text>
+		<text class="target">{{ targetLabel }}</text>
+		<view class="row">
+			<view class="btn" @click="init">
+				<text class="btn-text">初始化/选择目标</text>
+			</view>
+			<view class="btn btn-plain" @click="snapshot('当前')">
+				<text class="btn-text">读状态</text>
+			</view>
+		</view>
+		<view class="row">
+			<view class="btn" @click="actLike(true)">
+				<text class="btn-text">点赞</text>
+			</view>
+			<view class="btn btn-plain" @click="actLike(false)">
+				<text class="btn-text">取消点赞</text>
+			</view>
+		</view>
+		<view class="row">
+			<view class="btn" @click="actFav(true)">
+				<text class="btn-text">收藏</text>
+			</view>
+			<view class="btn btn-plain" @click="actFav(false)">
+				<text class="btn-text">取消收藏</text>
+			</view>
+		</view>
+		<view class="row">
+			<view class="btn" @click="actFollow(1)">
+				<text class="btn-text">关注</text>
+			</view>
+			<view class="btn btn-plain" @click="actFollow(2)">
+				<text class="btn-text">取关</text>
+			</view>
+		</view>
+		<view class="row">
+			<view class="btn" @click="actDanmaku">
+				<text class="btn-text">发弹幕</text>
+			</view>
+			<view class="btn" @click="actReply">
+				<text class="btn-text">发评论</text>
+			</view>
+		</view>
+		<view class="row">
+			<input class="ipt" :value="rpidInput" @input="onRpidInput" placeholder="rpid（发评论后自动填入）" />
+			<view class="btn" @click="actDeleteReply">
+				<text class="btn-text">删除评论</text>
+			</view>
+			<view class="btn btn-plain" @click="clearRpid">
+				<text class="btn-text">清空</text>
+			</view>
+		</view>
+		<view class="row">
+			<view class="btn btn-plain" @click="goSubscription">
+				<text class="btn-text">去订阅页</text>
+			</view>
+			<view class="btn btn-plain" @click="goSetting">
+				<text class="btn-text">去设置页</text>
+			</view>
+			<view class="btn btn-plain" @click="goCookieProbe">
+				<text class="btn-text">凭据探测</text>
+			</view>
+		</view>
+		<scroll-view class="log" direction="vertical">
+			<text class="log-text">{{ logText }}</text>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, onMounted } from 'vue'
+import { userState } from '../../stores/user.uts'
+import { ensureLoginState } from '../../composables/useLogin.uts'
+import { getCsrf } from '../../utils/request.uts'
+import { fetchMemberArchive } from '../../api/member.uts'
+import { fetchVideoDetail, hasLike, hasFav, hasFollow, likeVideo, favVideo, followMod, fetchDefaultFavFolder } from '../../api/play.uts'
+import { sendDanmaku } from '../../api/danmaku.uts'
+import { addReply, deleteReply } from '../../api/reply.uts'
+
+/**
+ * 写接口真机验证页（开发用，无用户入口）。
+ *
+ * 走的是页面同款接口层函数（api/play.uts、api/relation.uts、api/danmaku.uts、api/reply.uts），
+ * 因此证明的是「csrf 链路 + 写接口 + 状态回读」整条路径，而非另写一套请求。
+ * 目标视频优先取本人最新投稿（痕迹留在自己账号下），无投稿时退回固定 BV。
+ * 日志只输出接口状态码/状态位，不输出凭据。
+ */
+const FALLBACK_BVID: string = 'BV1GJ411x7h7'
+const DM_MSG: string = 'test'
+const REPLY_MSG: string = 'test'
+
+const logText = ref<string>('')
+const bvid = ref<string>('')
+const aid = ref<number>(0)
+const cid = ref<number>(0)
+const ownerMid = ref<number>(0)
+const targetLabel = ref<string>('目标：未选择')
+const rpidInput = ref<string>('')
+const busy = ref<boolean>(false)
+
+function append(line: string) {
+	logText.value = logText.value + line + '\n'
+	console.log('[WRITE] ' + line)
+}
+
+function hasTarget(): boolean {
+	if (bvid.value.length == 0 || aid.value == 0 || cid.value == 0) {
+		append('目标未就绪：先点「初始化/选择目标」')
+		return false
+	}
+	return true
+}
+
+async function init() {
+	if (busy.value) {
+		return
+	}
+	busy.value = true
+	logText.value = ''
+	const logged = await ensureLoginState()
+	append('登录=' + logged.toString() + ' mid=' + userState.info.mid.toString() + ' uname=' + userState.info.uname + ' csrfLen=' + getCsrf().length.toString())
+	const mine = await fetchMemberArchive(userState.info.mid, 1, 'pubdate', '')
+	append('本人投稿 status=' + mine.status.toString() + ' items=' + mine.items.length.toString() + (mine.message.length > 0 ? (' msg=' + mine.message) : ''))
+	let picked = ''
+	if (mine.status && mine.items.length > 0) {
+		picked = mine.items[0].bvid
+		append('取本人投稿：' + mine.items[0].title + ' play=' + mine.items[0].play.toString())
+	}
+	if (picked.length == 0) {
+		picked = FALLBACK_BVID
+		append('无本人投稿，退回固定 BV：' + picked)
+	}
+	const detail = await fetchVideoDetail(picked)
+	if (!detail.status || detail.data == null) {
+		append('视频详情失败 code=' + detail.code.toString() + ' msg=' + detail.message)
+		busy.value = false
+		return
+	}
+	const data = detail.data
+	bvid.value = data.bvid
+	aid.value = data.aid
+	cid.value = data.pages.length > 0 ? data.pages[0].cid : data.cid
+	ownerMid.value = data.owner.mid
+	targetLabel.value = '目标：' + data.bvid + ' / aid=' + data.aid.toString() + ' / cid=' + data.cid.toString() + ' / up=' + data.owner.mid.toString()
+	append('目标就绪：' + targetLabel.value)
+	await snapshot('初始状态')
+	busy.value = false
+}
+
+async function snapshot(tag: string) {
+	if (bvid.value.length == 0) {
+		return
+	}
+	const like = await hasLike(bvid.value)
+	const fav = await hasFav(aid.value)
+	const fol = await hasFollow(ownerMid.value)
+	append(tag + '：like=' + like.value.toString() + ' fav=' + fav.value.toString() + ' followAttr=' + fol.attribute.toString())
+}
+
+async function actLike(on: boolean) {
+	if (!hasTarget()) {
+		return
+	}
+	await snapshot('点赞前')
+	const r = await likeVideo(bvid.value, on)
+	append('likeVideo(' + on.toString() + ') status=' + r.status.toString() + ' code=' + r.code.toString() + ' msg=' + r.message)
+	await snapshot('点赞后')
+}
+
+async function actFav(on: boolean) {
+	if (!hasTarget()) {
+		return
+	}
+	await snapshot('收藏前')
+	const folder = await fetchDefaultFavFolder(userState.info.mid, aid.value)
+	append('默认收藏夹 id=' + folder.folderId.toString() + ' favState=' + folder.favState.toString())
+	if (folder.folderId <= 0) {
+		append('无可用收藏夹，跳过')
+		return
+	}
+	const r = on ? await favVideo(aid.value, folder.folderId.toString(), '') : await favVideo(aid.value, '', folder.folderId.toString())
+	append('favVideo(' + on.toString() + ') status=' + r.status.toString() + ' code=' + r.code.toString() + ' msg=' + r.message)
+	await snapshot('收藏后')
+}
+
+async function actFollow(act: number) {
+	if (!hasTarget()) {
+		return
+	}
+	await snapshot('关注前')
+	const r = await followMod(ownerMid.value, act)
+	append('followMod(act=' + act.toString() + ') status=' + r.status.toString() + ' code=' + r.code.toString() + ' msg=' + r.message)
+	await snapshot('关注后')
+}
+
+async function actDanmaku() {
+	if (!hasTarget()) {
+		return
+	}
+	const r = await sendDanmaku(cid.value, bvid.value, DM_MSG, 1000, 1, 16777215, 25, 0)
+	append('sendDanmaku status=' + r.status.toString() + ' msg=' + r.message)
+}
+
+async function actReply() {
+	if (!hasTarget()) {
+		return
+	}
+	const r = await addReply(aid.value, '0', '0', REPLY_MSG)
+	append('addReply status=' + r.status.toString() + ' code=' + r.code.toString() + ' msg=' + r.message)
+	if (r.item != null) {
+		const item = r.item
+		rpidInput.value = item.rpid
+		append('新评论 rpid=' + item.rpid)
+	}
+}
+
+/** 删除评论（源 replyDel：POST /x/v2/reply/del，参数走 query） */
+async function actDeleteReply() {
+	if (!hasTarget()) {
+		return
+	}
+	const rpid = rpidInput.value.trim()
+	if (rpid.length == 0) {
+		append('请先填 rpid')
+		return
+	}
+	const r = await deleteReply(aid.value, rpid)
+	append('deleteReply(' + rpid + ') status=' + r.status.toString() + ' code=' + r.code.toString() + ' msg=' + r.message)
+}
+
+function onRpidInput(event: UniInputEvent) {
+	rpidInput.value = event.detail.value
+}
+
+function clearRpid() {
+	rpidInput.value = ''
+	append('rpid 已清空')
+}
+
+function goSubscription() {
+	uni.navigateTo({
+		url: '/pages/subscription/subscription',
+		fail: (_e) => {
+			append('跳转订阅页失败')
+		}
+	})
+}
+
+function goSetting() {
+	uni.navigateTo({
+		url: '/pages/setting/setting',
+		fail: (_e) => {
+			append('跳转设置页失败')
+		}
+	})
+}
+
+function goCookieProbe() {
+	uni.navigateTo({
+		url: '/pages/dev/cookie',
+		fail: (_e) => {
+			append('跳转凭据探测页失败')
+		}
+	})
+}
+
+onMounted(() => {
+	init()
+})
+</script>
+
+<style>
+.page {
+	flex: 1;
+	flex-direction: column;
+	padding-left: 12px;
+	padding-right: 12px;
+	padding-top: 12px;
+	padding-bottom: 12px;
+	background-color: #ffffff;
+}
+
+.title {
+	font-size: 16px;
+	font-weight: bold;
+	color: #18191c;
+	margin-bottom: 6px;
+}
+
+.target {
+	font-size: 12px;
+	color: #61666d;
+	margin-bottom: 10px;
+}
+
+.row {
+	flex-direction: row;
+	margin-bottom: 8px;
+}
+
+.btn {
+	height: 34px;
+	padding-left: 12px;
+	padding-right: 12px;
+	border-radius: 8px;
+	background-color: #00aeec;
+	align-items: center;
+	justify-content: center;
+	margin-right: 8px;
+}
+
+.btn-plain {
+	background-color: #e3e5e7;
+}
+
+.btn-text {
+	font-size: 13px;
+	color: #ffffff;
+}
+
+.ipt {
+	width: 200px;
+	height: 34px;
+	padding-left: 10px;
+	padding-right: 10px;
+	border-radius: 8px;
+	background-color: #f1f2f3;
+	font-size: 13px;
+	color: #18191c;
+	margin-right: 8px;
+}
+
+.log {
+	flex: 1;
+	background-color: #f6f7f8;
+	border-radius: 8px;
+	padding-left: 10px;
+	padding-right: 10px;
+	padding-top: 10px;
+	padding-bottom: 10px;
+}
+
+.log-text {
+	font-size: 12px;
+	color: #333333;
+	line-height: 18px;
+}
+</style>

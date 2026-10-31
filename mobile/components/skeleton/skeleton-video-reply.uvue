@@ -1,0 +1,83 @@
+<template>
+	<view class="sk-reply">
+		<skeleton>
+			<view class="sk-reply-head">
+				<skeleton-block width="34px" height="34px" radius="17px"></skeleton-block>
+				<view class="sk-reply-gap"></view>
+				<skeleton-block width="80px" height="13px"></skeleton-block>
+			</view>
+			<view class="sk-reply-body">
+				<skeleton-block width="300px" height="14px"></skeleton-block>
+				<view class="sk-reply-gap4"></view>
+				<skeleton-block width="180px" height="14px"></skeleton-block>
+				<view class="sk-reply-gap10"></view>
+				<view class="sk-reply-foot">
+					<skeleton-block width="40px" height="14px"></skeleton-block>
+					<view class="sk-reply-spacer"></view>
+					<skeleton-block width="30px" height="14px"></skeleton-block>
+					<view class="sk-reply-gap8"></view>
+					<skeleton-block width="30px" height="14px"></skeleton-block>
+					<view class="sk-reply-gap8"></view>
+				</view>
+			</view>
+		</skeleton>
+	</view>
+</template>
+
+<script setup lang="uts">
+import Skeleton from './skeleton.uvue'
+import SkeletonBlock from './skeleton-block.uvue'
+
+/**
+ * 评论骨架屏。视觉出处：`lib/common/skeleton/video_reply.dart`
+ *  - 头像 34×34 圆形（ClipOval → border-radius 17px）、右侧 12px 间隔、昵称条 80×13；
+ *  - 正文区 fromLTRB(4, 57, 6, 6) = 上 4 / 左 57（34 头像 + 12 间隔 + 11）/ 右 6 / 下 6；
+ *  - 行高 14，宽度 300 / 180（下间隔 4 / 10）；
+ *  - 底部三块 40 + 30 + 30（间隔 8，右侧留白由 Spacer 撑开，故尾部多留 8 占位）。
+ */
+</script>
+
+<style>
+	.sk-reply {
+		background-color: #FFFFFF;
+	}
+	.sk-reply-head {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 8px;
+		padding-top: 8px;
+		padding-bottom: 2px;
+	}
+	.sk-reply-gap {
+		width: 12px;
+		height: 1px;
+	}
+	.sk-reply-body {
+		display: flex;
+		flex-direction: column;
+		margin-left: 57px;
+		margin-right: 6px;
+		margin-top: 4px;
+		margin-bottom: 6px;
+	}
+	.sk-reply-gap4 {
+		height: 4px;
+	}
+	.sk-reply-gap10 {
+		height: 10px;
+	}
+	.sk-reply-gap8 {
+		width: 8px;
+		height: 1px;
+	}
+	.sk-reply-foot {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.sk-reply-spacer {
+		flex: 1;
+	}
+</style>

@@ -1,0 +1,119 @@
+<template>
+	<!-- UP 行：头像 + 昵称 + 粉丝数 + 关注（源头 `lib/pages/video/detail/introduction/view.dart` 的 staff == null 分支） -->
+	<view class="up">
+		<view class="up-main" @click="onOpenUser">
+			<network-img :src="face" width="34px" height="34px" radius="17px"></network-img>
+			<text class="up-name" :style="nameStyle" :max-lines="1">{{ name }}</text>
+			<text class="up-fans" :style="fansStyle">{{ fansText }}</text>
+		</view>
+		<view class="up-follow" :style="followStyle" @click="onFollow">
+			<text class="up-follow-text" :style="followTextStyle">{{ followed ? '已关注' : '关注' }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { numFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha, onPrimaryText } from '../../utils/theme.uts'
+
+/**
+ * UP 主行（详情页唯一一处 UP 信息）。
+ *
+ * 源取值（`introduction/view.dart` staff == null 分支）：
+ *  - 容器 padding 上下 12 / 左右 4（页面另有左右 12 的 SliverPadding，故头像实际距屏幕左缘 16）；
+ *  - 头像 34 圆形、与昵称间距 10、昵称 13、与粉丝数间距 6、粉丝数 11（labelSmall）且**不带「粉丝」后缀**；
+ *  - 关注按钮高 32、TextButton 左右 padding 8（最小宽 64），已关注态用反色底 + 次要色字。
+ * 视觉为「无卡片壳」的一行（源无 Container 背景），与 1:1 基线一致。
+ *
+ * 交互归属：本组件只发事件（follow / open-user）——关注态真值在页面（视频详情与简介区共用一处），
+ * 用户主页跳转由页面统一占位（P5）。
+ */
+const props = defineProps({
+	name: { type: String, default: '' },
+	face: { type: String, default: '' },
+	fansCount: { type: Number, default: 0 },
+	followed: { type: Boolean, default: false }
+})
+
+const emit = defineEmits(['follow', 'open-user'])
+
+const primary = themeColor(currentThemeIndex())
+
+const windowWidth = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowWidth
+	} catch (e) {
+		return 390
+	}
+})()
+
+/** 昵称宽度上限：屏宽扣掉页边距/头像/间距/粉丝数/关注按钮后剩下的宽度（超长按 1 行省略） */
+const NAME_MAX_WIDTH = Math.max(80, windowWidth - 200)
+
+const nameStyle = computed((): string => 'color:' + textPrimary() + ';max-width:' + NAME_MAX_WIDTH.toString() + 'px;')
+const fansStyle = computed((): string => 'color:' + textSecondary() + ';')
+const fansText = computed((): string => numFormat(props.fansCount))
+
+const followStyle = computed((): string => {
+	if (props.followed) {
+		return 'background-color:' + withAlpha(textSecondary(), 0.16) + ';'
+	}
+	return 'background-color:' + primary + ';'
+})
+
+const followTextStyle = computed((): string => 'color:' + (props.followed ? textSecondary() : onPrimaryText()) + ';')
+
+function onFollow() {
+	emit('follow')
+}
+
+function onOpenUser() {
+	emit('open-user')
+}
+</script>
+
+<style>
+	.up {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 4px;
+		padding-right: 4px;
+		padding-top: 12px;
+		padding-bottom: 12px;
+		/* 与信息区的 12 页边距对齐（源：SliverPadding 12 + 容器内 4） */
+		margin-left: 12px;
+		margin-right: 12px;
+	}
+	.up-main {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.up-name {
+		font-size: 13px;
+		margin-left: 10px;
+		/* 昵称过长时先压缩昵称（宽度上限由 nameStyle 按屏宽给出），粉丝数保持在关注按钮左侧 */
+		flex-shrink: 1;
+	}
+	.up-fans {
+		font-size: 11px;
+		margin-left: 6px;
+	}
+	.up-follow {
+		width: 64px;
+		height: 32px;
+		border-radius: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.up-follow-text {
+		font-size: 12px;
+	}
+</style>

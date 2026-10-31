@@ -1,0 +1,502 @@
+<template>
+	<view class="page">
+		<app-navbar title="登录" :show-back="true">
+			<template #right>
+				<text class="nav-action" @click="openOfficialLogin">浏览器打开</text>
+			</template>
+		</app-navbar>
+		<view class="body">
+			<view class="brand">
+				<view class="brand-mark" :style="'background-color:' + brandColor">
+					<text class="brand-mark-text">P</text>
+				</view>
+				<text class="brand-name">PiliPala</text>
+				<text class="brand-slogan">哔哩哔哩第三方客户端</text>
+			</view>
+
+			<view class="guide">
+				<text class="guide-title">手机号 / 账号密码登录</text>
+				<text class="guide-desc">在哔哩哔哩官方页面完成登录，支持手机号验证码与账号密码两种方式</text>
+			</view>
+
+			<view class="primary" :style="'background-color:' + brandColor" @click="openOfficialLogin">
+				<text class="primary-text">{{ confirming ? '正在确认登录…' : '打开登录页' }}</text>
+			</view>
+
+			<view class="state-row">
+				<text class="state-text" :style="'color:' + stateColor">{{ stateText }}</text>
+			</view>
+
+			<view class="divider"></view>
+
+			<view class="closed-item" @click="toggleQr">
+				<text class="qr-entry-title">扫码登录</text>
+				<text class="closed-badge">{{ qrActive ? '收起' : '展开' }}</text>
+			</view>
+
+			<view v-if="qrActive" class="qr-panel">
+				<view class="qr-card">
+					<qr-canvas :matrix="qrMatrix" :size="200"></qr-canvas>
+					<view v-if="qrShowMask" class="qr-mask" @click="refreshQr">
+						<view class="qr-mask-btn" :style="'background-color:' + brandColor">
+							<text class="qr-mask-btn-text">刷新二维码</text>
+						</view>
+					</view>
+				</view>
+				<text class="qr-status" :style="'color:' + qrStatusColor">{{ qrStatusText }}</text>
+				<text class="qr-hint">打开哔哩哔哩 App，首页左上角扫一扫</text>
+			</view>
+
+			<text class="closed-note">二维码在本机生成（不经任何第三方服务），扫码确认后登录凭据直达本机，关注/收藏/点赞等操作随之解锁</text>
+
+			<view class="spacer"></view>
+			<text class="footer">登录页面由哔哩哔哩官方提供</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow, onUnload } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import QrCanvas from '../../components/common/qr-canvas.uvue'
+import { currentThemeIndex, themeColor, isDarkMode } from '../../utils/theme.uts'
+import { userState } from '../../stores/user.uts'
+import { refreshLoginState, loadCachedUser, consumeJustConfirmed } from '../../composables/useLogin.uts'
+import { encodeQrText } from '../../utils/qrcode.uts'
+import { generateQrCode, pollQrCode, QR_STATUS_SUCCESS, QR_STATUS_WAITING, QR_STATUS_SCANNED, QR_STATUS_EXPIRED } from '../../api/qr-login.uts'
+
+/**
+ * 登录入口页。视觉出处：`lib/pages/login/view.dart`
+ *  - 结构保留源页面骨架：导航栏（左返回 / 标题 / 右侧动作）+ 品牌区 + 引导文案 + 主操作；
+ *  - 源主路径为「手机号 → 密码/验证码」表单（依赖极验 gt3 原生插件）：目标端改由内置浏览器打开
+ *    passport 官方移动页承载，官方页自身完成人机验证，登录态经共享 cookie jar 回到请求层；
+ *  - 扫码登录：本地二维码编码器（utils/qrcode.uts）+ web 扫码协议轮询（api/qr-login.uts）——
+ *    poll 确认后的 Set-Cookie 落 cookie 镜像，bili_jct（csrf）随之可读，写接口解锁；
+ *  - 未开放方式如实标注，不渲染假输入框（真实落点纪律）。
+ */
+const OFFICIAL_LOGIN_URL: string = 'https://passport.bilibili.com/h5-app/passport/login'
+
+const confirming = ref<boolean>(false)
+const errorText = ref<string>('')
+
+// ————— 扫码登录状态机 —————
+// phase：idle 未展开 / loading 生成中 / waiting 待扫 / scanned 已扫待确认 /
+//        expired 已过期 / error 获取失败 / success 登录成功
+const qrActive = ref<boolean>(false)
+const qrPhase = ref<string>('idle')
+const qrMatrix = ref<boolean[][] | null>(null)
+
+/** 轮询定时器句柄与代数：epoch 每次 generate/收起自增，使旧轮询回调全部失效（防刷新后串扰） */
+let pollTimer: number = 0
+let qrEpoch: number = 0
+let qrKey: string = ''
+let pollFailCount: number = 0
+/** 轮询间隔（ms）：官方推荐 3s */
+const POLL_INTERVAL_MS: number = 3000
+/** 连续网络失败容忍次数：超过转 error（单次失败静默续轮询） */
+const POLL_FAIL_MAX: number = 3
+
+const brandColor = computed((): string => themeColor(currentThemeIndex()))
+
+const stateText = computed((): string => {
+	if (userState.isLogin) {
+		return '已登录：' + userState.info.uname
+	}
+	if (errorText.value.length > 0) {
+		return errorText.value
+	}
+	return '当前未登录'
+})
+
+const stateColor = computed((): string => {
+	if (userState.isLogin) {
+		return isDarkMode() ? '#7FD2A0' : '#2E9E63'
+	}
+	if (errorText.value.length > 0) {
+		return '#E45C5C'
+	}
+	return isDarkMode() ? '#9BA1AC' : '#8A94A6'
+})
+
+function openOfficialLogin() {
+	if (confirming.value) {
+		return
+	}
+	errorText.value = ''
+	uni.navigateTo({
+		url: '/pages/webview/webview?type=login&pageTitle=' + encodeURIComponent('登录bilibili') +
+			'&url=' + encodeURIComponent(OFFICIAL_LOGIN_URL)
+	})
+}
+
+function toggleQr() {
+	if (qrActive.value) {
+		stopQr()
+		return
+	}
+	startQr()
+}
+
+/** 进入扫码态：生成新二维码并起轮询 */
+async function startQr() {
+	qrActive.value = true
+	await requestQr()
+}
+
+/** 取新二维码会话并本地编码；epoch 自增使旧轮询链全部失效 */
+async function requestQr() {
+	qrEpoch++
+	const epoch = qrEpoch
+	qrPhase.value = 'loading'
+	qrMatrix.value = null
+	pollFailCount = 0
+	const res = await generateQrCode()
+	if (epoch != qrEpoch || !qrActive.value) {
+		return
+	}
+	if (!res.ok) {
+		qrPhase.value = 'error'
+		return
+	}
+	qrKey = res.qrcodeKey
+	const encoded = encodeQrText(res.url)
+	if (encoded == null) {
+		qrPhase.value = 'error'
+		return
+	}
+	qrMatrix.value = encoded.modules
+	qrPhase.value = 'waiting'
+	schedulePoll(epoch)
+}
+
+function schedulePoll(epoch: number) {
+	clearPollTimer()
+	pollTimer = setTimeout(() => {
+		pollOnce(epoch)
+	}, POLL_INTERVAL_MS)
+}
+
+/**
+ * 单轮轮询（链式：完成后才排下一轮，天然串行无重入）。
+ * 后台不主动停轮询：用户切去 B 站 App 扫码回来即见结果（poll 幂等）。
+ */
+async function pollOnce(epoch: number) {
+	if (!qrActive.value || epoch != qrEpoch || qrKey.length == 0) {
+		return
+	}
+	const res = await pollQrCode(qrKey)
+	if (epoch != qrEpoch || !qrActive.value) {
+		return
+	}
+	if (res.status == QR_STATUS_SUCCESS) {
+		qrPhase.value = 'success'
+		onQrLoginSuccess()
+		return
+	}
+	if (res.status == QR_STATUS_SCANNED) {
+		qrPhase.value = 'scanned'
+		schedulePoll(epoch)
+		return
+	}
+	if (res.status == QR_STATUS_EXPIRED) {
+		// 过期停轮询，等用户点刷新（重新 generate）
+		qrPhase.value = 'expired'
+		return
+	}
+	if (res.status == QR_STATUS_WAITING) {
+		qrPhase.value = 'waiting'
+		schedulePoll(epoch)
+		return
+	}
+	// 网络/解析失败：单次静默续轮询，连续超过容忍次数转 error
+	pollFailCount++
+	if (pollFailCount >= POLL_FAIL_MAX) {
+		qrPhase.value = 'error'
+		return
+	}
+	schedulePoll(epoch)
+}
+
+/** 过期/失败遮罩上的刷新：重新 generate（新 qrcode_key） */
+function refreshQr() {
+	requestQr()
+}
+
+function stopQr() {
+	qrEpoch++
+	clearPollTimer()
+	qrActive.value = false
+	qrPhase.value = 'idle'
+	qrMatrix.value = null
+	qrKey = ''
+}
+
+function clearPollTimer() {
+	if (pollTimer != 0) {
+		clearTimeout(pollTimer)
+		pollTimer = 0
+	}
+}
+
+/** 扫码成功：凭据已入镜像（pollQrCode 内已刷新用户信息），提示并退回来源页 */
+function onQrLoginSuccess() {
+	uni.showToast({ title: '登录成功', icon: 'none' })
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		setTimeout(() => {
+			uni.navigateBack({ delta: 1 })
+		}, 600)
+	}
+}
+
+const qrShowMask = computed((): boolean => {
+	return qrPhase.value == 'expired' || qrPhase.value == 'error'
+})
+
+const qrStatusText = computed((): string => {
+	if (qrPhase.value == 'loading') {
+		return '正在生成二维码…'
+	}
+	if (qrPhase.value == 'scanned') {
+		return '已扫描，请在手机上确认'
+	}
+	if (qrPhase.value == 'expired') {
+		return '二维码已过期，请刷新'
+	}
+	if (qrPhase.value == 'error') {
+		return '二维码获取失败，请刷新'
+	}
+	if (qrPhase.value == 'success') {
+		return '登录成功'
+	}
+	return '等待扫描'
+})
+
+const qrStatusColor = computed((): string => {
+	if (qrPhase.value == 'scanned' || qrPhase.value == 'success') {
+		return isDarkMode() ? '#7FD2A0' : '#2E9E63'
+	}
+	if (qrPhase.value == 'expired' || qrPhase.value == 'error') {
+		return '#E45C5C'
+	}
+	return isDarkMode() ? '#9BA1AC' : '#8A94A6'
+})
+
+/** 登录页每次可见时校正登录态：若已登录则提示并退回来源页 */
+async function syncState() {
+	if (confirming.value) {
+		return
+	}
+	// 刚由内置浏览器确认过就不再打一次 nav（避免返回时重复请求）；其余情况（含冷启动有缓存）一律静默校正
+	const ok = consumeJustConfirmed() ? true : await refreshLoginState()
+	if (ok) {
+		uni.showToast({ title: '登录成功', icon: 'none' })
+		const pages = getCurrentPages()
+		if (pages.length > 1) {
+			setTimeout(() => {
+				uni.navigateBack({ delta: 1 })
+			}, 600)
+		}
+	}
+}
+
+onLoad(() => {
+	loadCachedUser()
+})
+
+onShow(() => {
+	syncState()
+})
+
+onUnload(() => {
+	// 页面销毁：使轮询代数失效并清定时器（setTimeout 句柄不随页面自动回收）
+	qrEpoch++
+	clearPollTimer()
+})
+</script>
+
+<style>
+	.page {
+		flex: 1;
+		background-color: #FFFFFF;
+	}
+	.nav-action {
+		font-size: 15px;
+		color: #18191C;
+		padding-left: 8px;
+		padding-right: 8px;
+	}
+	.body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 18px;
+	}
+	.brand {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+	.brand-mark {
+		width: 88px;
+		height: 88px;
+		border-radius: 24px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.brand-mark-text {
+		font-size: 44px;
+		font-weight: bold;
+		color: #FFFFFF;
+	}
+	.brand-name {
+		font-size: 22px;
+		font-weight: bold;
+		color: #18191C;
+		margin-top: 14px;
+	}
+	.brand-slogan {
+		font-size: 13px;
+		color: #8A94A6;
+		margin-top: 6px;
+	}
+	.guide {
+		display: flex;
+		flex-direction: column;
+		margin-top: 36px;
+	}
+	.guide-title {
+		font-size: 18px;
+		font-weight: bold;
+		color: #18191C;
+	}
+	.guide-desc {
+		font-size: 13px;
+		line-height: 20px;
+		color: #8A94A6;
+		margin-top: 8px;
+	}
+	.primary {
+		height: 48px;
+		border-radius: 24px;
+		margin-top: 20px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.primary-text {
+		font-size: 16px;
+		font-weight: bold;
+		color: #FFFFFF;
+	}
+	.state-row {
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+		margin-top: 12px;
+	}
+	.state-text {
+		font-size: 12px;
+	}
+	.divider {
+		height: 1px;
+		background-color: #EEF0F3;
+		margin-top: 28px;
+	}
+	.closed-item {
+		height: 52px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.closed-badge {
+		font-size: 12px;
+		color: #C2C6CE;
+		border-width: 1px;
+		border-style: solid;
+		border-color: #E3E6EA;
+		border-radius: 10px;
+		padding-left: 8px;
+		padding-right: 8px;
+		padding-top: 2px;
+		padding-bottom: 2px;
+	}
+	.closed-note {
+		font-size: 12px;
+		line-height: 18px;
+		color: #A7ADB8;
+		margin-top: 4px;
+	}
+	.qr-entry-title {
+		font-size: 15px;
+		color: #18191C;
+	}
+	.qr-panel {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		margin-top: 16px;
+	}
+	.qr-card {
+		position: relative;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 12px;
+		padding-bottom: 12px;
+		background-color: #FFFFFF;
+		border-width: 1px;
+		border-style: solid;
+		border-color: #E3E6EA;
+		border-radius: 12px;
+	}
+	.qr-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(255, 255, 255, 0.94);
+		border-radius: 12px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.qr-mask-btn {
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 7px;
+		padding-bottom: 7px;
+		border-radius: 16px;
+	}
+	.qr-mask-btn-text {
+		font-size: 13px;
+		font-weight: bold;
+		color: #FFFFFF;
+	}
+	.qr-status {
+		font-size: 13px;
+		margin-top: 12px;
+	}
+	.qr-hint {
+		font-size: 12px;
+		color: #A7ADB8;
+		margin-top: 6px;
+	}
+	.spacer {
+		flex: 1;
+	}
+	.footer {
+		font-size: 12px;
+		color: #A7ADB8;
+		text-align: center;
+		margin-bottom: 18px;
+	}
+</style>

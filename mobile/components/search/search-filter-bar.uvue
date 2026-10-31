@@ -1,0 +1,257 @@
+<template>
+	<view class="sfb">
+		<view class="sfb-row">
+			<scroll-view class="sfb-scroll" direction="horizontal" :show-scrollbar="false">
+				<view class="sfb-chips">
+					<view
+						v-for="opt in orderOptions"
+						:key="opt.value"
+						class="sfb-chip"
+						@click="onOrderTap(opt.value)"
+					>
+						<text class="sfb-chip-text" :style="chipTextStyle(opt.value)">{{ opt.label }}</text>
+					</view>
+				</view>
+			</scroll-view>
+			<view v-if="mode == 'video'" class="sfb-divider"></view>
+			<view v-if="mode == 'video'" class="sfb-funnel" @click="onFunnelTap">
+				<text class="sfb-funnel-glyph" :style="funnelStyle">{{ FUNNEL_GLYPH }}</text>
+			</view>
+		</view>
+
+		<view v-if="sheetVisible" class="sfb-mask" @click="onMaskTap">
+			<view class="sfb-sheet" :style="sheetStyle" @click.stop="noop">
+				<text class="sfb-sheet-title" :style="sheetTitleStyle">内容时长</text>
+				<view class="sfb-sheet-wrap">
+					<view
+						v-for="opt in timeFilters"
+						:key="'t' + opt.value.toString()"
+						class="sfb-tag"
+						:style="tagStyle(localDuration == opt.value)"
+						@click="onTimeTap(opt)"
+					>
+						<text class="sfb-tag-text" :style="tagTextStyle(localDuration == opt.value)">{{ opt.label }}</text>
+					</view>
+				</view>
+				<text class="sfb-sheet-title" :style="sheetTitleStyle">内容分区</text>
+				<scroll-view class="sfb-part-scroll" direction="vertical">
+					<view class="sfb-sheet-wrap">
+						<view
+							v-for="opt in partFilters"
+							:key="'p' + opt.value.toString()"
+							class="sfb-tag"
+							:style="tagStyle(localTids == opt.value)"
+							@click="onPartTap(opt)"
+						>
+							<text class="sfb-tag-text" :style="tagTextStyle(localTids == opt.value)">{{ opt.label }}</text>
+						</view>
+					</view>
+					<view class="sfb-sheet-bottom"></view>
+				</scroll-view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import {
+	VIDEO_ORDERS,
+	ARTICLE_ORDERS,
+	VIDEO_TIME_FILTERS,
+	VIDEO_PART_FILTERS,
+	OrderOption,
+	FilterOption
+} from '../../models/search.uts'
+import { themeColor, currentThemeIndex, textSecondary, textPrimary, cardBackground, withAlpha, isDarkMode } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 搜索结果排序/筛选栏（源头：search_panel/widgets/{video,article}_panel.dart 顶部
+ * Stack 容器——排序 chips 横滑 + 竖分隔线 + 漏斗钮；漏斗开 showModalBottomSheet
+ * 半屏弹层选时长（5 档）/分区（22 项）。
+ *
+ *  - mode='video'：6 档排序 + 漏斗；mode='article'：5 档排序、无漏斗（源同构）；
+ *  - 排序 chip：透明底、圆角 12、高 34、文字 13；选中主色、未选中 outline 色；
+ *  - 弹层 chip：圆角 6、内边距 5/11；未选中灰底、选中主色 14% 底 + 主色字（源 SearchText isSelect）；
+ *  - 弹层无过渡动画（App 端 transition 多值静默失效坑，v-if 直切）；
+ *  - 返回键接管：弹层可见态由页面持有（sheetVisible prop + funnelTap/sheetClose 事件）——
+ *    组件级 onBackPress 无效（钩子必须写在页面 .uvue），页面 onBackPress 关闭弹层并消费返回。
+ */
+const props = defineProps({
+	mode: { type: String, default: 'video' },
+	/** 当前排序（'' = 默认排序，不传参） */
+	order: { type: String, default: '' },
+	duration: { type: Number, default: 0 },
+	tids: { type: Number, default: -1 },
+	/** 半屏弹层可见态（页面持有：onBackPress 需在页面层消费返回键关闭弹层） */
+	sheetVisible: { type: Boolean, default: false }
+})
+
+const emit = defineEmits(['orderTap', 'filterTap', 'funnelTap', 'sheetClose'])
+
+/** filter_list 码点（工程字体=Flutter SDK 3.3.10 icons.dart 旧码点体系：filter_list=e280；p-icon 未含，本地 glyph） */
+const FUNNEL_GLYPH: string = '\ue280'
+
+const primary: string = themeColor(currentThemeIndex())
+
+const localDuration = ref<number>(0)
+const localTids = ref<number>(-1)
+
+const orderOptions = computed((): OrderOption[] => props.mode == 'article' ? ARTICLE_ORDERS : VIDEO_ORDERS)
+const timeFilters: FilterOption[] = VIDEO_TIME_FILTERS
+const partFilters: FilterOption[] = VIDEO_PART_FILTERS
+
+const funnelStyle = 'font-family:MaterialIcons;font-size:18px;line-height:18px;color:' + primary + ';'
+const sheetTitleStyle = 'color:' + textPrimary() + ';font-weight:bold;'
+const sheetStyle = 'background-color:' + cardBackground() + ';padding-bottom:' + (20 + safeAreaBottom()).toString() + 'px;'
+
+function chipTextStyle(value: string): string {
+	const selected = props.order == value
+	return 'font-size:13px;color:' + (selected ? primary : textSecondary()) + ';' + (selected ? 'font-weight:bold;' : '')
+}
+
+function tagStyle(selected: boolean): string {
+	const bg = selected ? withAlpha(primary, 0.14) : (isDarkMode() ? '#26272B' : '#F1F2F3')
+	return 'background-color:' + bg + ';'
+}
+
+function tagTextStyle(selected: boolean): string {
+	return 'font-size:13px;color:' + (selected ? primary : textPrimary()) + ';'
+}
+
+function noop() {}
+
+function onOrderTap(value: string) {
+	emit('orderTap', value)
+}
+
+function onFunnelTap() {
+	localDuration.value = props.duration
+	localTids.value = props.tids
+	emit('funnelTap')
+}
+
+function onMaskTap() {
+	emit('sheetClose')
+}
+
+function onTimeTap(opt: FilterOption) {
+	localDuration.value = opt.value
+	applyFilter(opt.label)
+}
+
+function onPartTap(opt: FilterOption) {
+	localTids.value = opt.value
+	applyFilter(opt.label)
+}
+
+function applyFilter(label: string) {
+	uni.showToast({ title: '「' + label + '」的筛选结果', icon: 'none' })
+	emit('sheetClose')
+	emit('filterTap', localDuration.value, localTids.value)
+}
+</script>
+
+<style>
+	.sfb {
+		width: 100%;
+	}
+	.sfb-row {
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 8px;
+		padding-right: 12px;
+	}
+	.sfb-scroll {
+		flex: 1;
+		height: 36px;
+		flex-direction: row;
+	}
+	.sfb-chips {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.sfb-chip {
+		height: 34px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 11px;
+		padding-right: 11px;
+		border-radius: 12px;
+		flex-shrink: 0;
+	}
+	.sfb-chip-text {
+		font-size: 13px;
+	}
+	.sfb-divider {
+		width: 1px;
+		height: 20px;
+		margin-left: 7px;
+		margin-right: 7px;
+		background-color: #E3E5E9;
+	}
+	.sfb-funnel {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sfb-funnel-glyph {
+		font-family: MaterialIcons;
+	}
+	.sfb-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+	}
+	.sfb-sheet {
+		border-top-left-radius: 12px;
+		border-top-right-radius: 12px;
+		padding-left: 14px;
+		padding-right: 14px;
+		padding-top: 12px;
+		display: flex;
+		flex-direction: column;
+	}
+	.sfb-sheet-title {
+		font-size: 16px;
+		margin-bottom: 10px;
+	}
+	.sfb-sheet-wrap {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		margin-bottom: 14px;
+	}
+	.sfb-tag {
+		padding-left: 11px;
+		padding-right: 11px;
+		padding-top: 5px;
+		padding-bottom: 5px;
+		border-radius: 6px;
+		margin-right: 10px;
+		margin-top: 10px;
+	}
+	.sfb-tag-text {
+		font-size: 13px;
+	}
+	.sfb-part-scroll {
+		max-height: 320px;
+	}
+	.sfb-sheet-bottom {
+		height: 6px;
+	}
+</style>

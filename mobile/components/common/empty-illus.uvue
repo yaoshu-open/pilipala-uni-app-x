@@ -1,0 +1,219 @@
+<template>
+	<view class="ei" @click="onClickSurface">
+		<!-- 空态插画：两树 + 三人（扁平 view 绘制，形态对齐源 NoData/HttpError 的插画占位） -->
+		<view class="ei-illus">
+			<view class="ei-ground"></view>
+			<!-- 左树 -->
+			<view class="ei-tree1-crown"></view>
+			<view class="ei-tree1-trunk"></view>
+			<!-- 右树 -->
+			<view class="ei-tree2-crown"></view>
+			<view class="ei-tree2-trunk"></view>
+			<!-- 三人：坐（绿）/ 立（灰）/ 行（绿） -->
+			<view class="ei-p-a-head"></view>
+			<view class="ei-p-a-body"></view>
+			<view class="ei-p-b-head"></view>
+			<view class="ei-p-b-body"></view>
+			<view class="ei-p-c-head"></view>
+			<view class="ei-p-c-body"></view>
+		</view>
+		<text v-if="text.length > 0" class="ei-text" :class="pill ? 'ei-text-pill' : 'ei-text-plain'" :style="textStyle">{{ text }}</text>
+		<view v-if="retry" class="ei-retry" :style="retryStyle" @click="onRetry">
+			<text class="ei-retry-text" :style="retryTextStyle">{{ retryText }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { themeColor, currentThemeIndex, textPrimary, withAlpha } from '../../utils/theme.uts'
+
+/**
+ * 空态插画组件（源头：lib/common/widgets/no_data.dart 的插画 + 文案形态；
+ * 基线 P5 fan/subscription/blacklist/follow_search 空态统一为「树+三人插画 + 文案」）。
+ *
+ * 形态三档：
+ *  - pill=false + retry=false：插画 + 纯文案（fan 空态「没有数据」）
+ *  - pill=true：文案装进浅米色胶囊（subscription 空态，源 HttpError(btnText) 形态）
+ *  - retry=true：附「点击重试」胶囊按钮（blacklist / follow_search 空态，源同款）
+ *
+ * 插画颜色取基线实测值（扁平矢量固定色，明暗两态同色——与源一致，不做暗色反转）。
+ */
+const props = defineProps({
+	text: { type: String, default: '' },
+	pill: { type: Boolean, default: false },
+	retry: { type: Boolean, default: false },
+	retryText: { type: String, default: '点击重试' }
+})
+
+const emit = defineEmits(['retry'])
+
+const primary = themeColor(currentThemeIndex())
+const textStyle = computed((): string => 'color:' + textPrimary() + ';')
+/** 重试胶囊：浅底（主色 8% 透明）+ 主色字，形态对齐 p-http-error 的 tonal 按钮 */
+const retryStyle = computed((): string => 'background-color:' + withAlpha(primary, 0.08) + ';')
+const retryTextStyle = computed((): string => 'color:' + primary + ';')
+
+/** 插画整体点击与重试按钮等效（源 HttpError 的 fn 也允许整块触发） */
+function onClickSurface() {
+	if (props.retry) {
+		emit('retry')
+	}
+}
+
+function onRetry() {
+	emit('retry')
+}
+</script>
+
+<style>
+	.ei {
+		/* 源 HttpError = SizedBox(height:400) 顶盒 + 内容盒内居中（基线实测空态块位于 y26-47%）；
+		 * 禁用 flex:1 整页居中（会把空态块推到屏中部，偏离基线） */
+		height: 400px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.ei-illus {
+		width: 300px;
+		height: 170px;
+		position: relative;
+	}
+	/* 地面平台 */
+	.ei-ground {
+		position: absolute;
+		left: 20px;
+		bottom: 0px;
+		width: 260px;
+		height: 12px;
+		border-radius: 6px;
+		background-color: #E3E8E3;
+	}
+	/* 左树：树冠 + 树干 */
+	.ei-tree1-crown {
+		position: absolute;
+		left: 8px;
+		top: 34px;
+		width: 56px;
+		height: 56px;
+		border-radius: 28px;
+		background-color: #DCE2DC;
+	}
+	.ei-tree1-trunk {
+		position: absolute;
+		left: 32px;
+		top: 88px;
+		width: 8px;
+		height: 26px;
+		border-radius: 3px;
+		background-color: #C7CFC7;
+	}
+	/* 右树（小一号） */
+	.ei-tree2-crown {
+		position: absolute;
+		left: 238px;
+		top: 46px;
+		width: 44px;
+		height: 44px;
+		border-radius: 22px;
+		background-color: #DCE2DC;
+	}
+	.ei-tree2-trunk {
+		position: absolute;
+		left: 256px;
+		top: 88px;
+		width: 7px;
+		height: 22px;
+		border-radius: 3px;
+		background-color: #C7CFC7;
+	}
+	/* 人物 A：坐姿看手机（绿衣） */
+	.ei-p-a-head {
+		position: absolute;
+		left: 84px;
+		top: 110px;
+		width: 18px;
+		height: 18px;
+		border-radius: 9px;
+		background-color: #23262E;
+	}
+	.ei-p-a-body {
+		position: absolute;
+		left: 78px;
+		top: 130px;
+		width: 30px;
+		height: 30px;
+		border-radius: 10px;
+		background-color: #27B978;
+	}
+	/* 人物 B：站立（深灰衣） */
+	.ei-p-b-head {
+		position: absolute;
+		left: 142px;
+		top: 96px;
+		width: 18px;
+		height: 18px;
+		border-radius: 9px;
+		background-color: #23262E;
+	}
+	.ei-p-b-body {
+		position: absolute;
+		left: 138px;
+		top: 116px;
+		width: 26px;
+		height: 44px;
+		border-radius: 10px;
+		background-color: #3A4150;
+	}
+	/* 人物 C：行走（绿衣） */
+	.ei-p-c-head {
+		position: absolute;
+		left: 200px;
+		top: 102px;
+		width: 18px;
+		height: 18px;
+		border-radius: 9px;
+		background-color: #23262E;
+	}
+	.ei-p-c-body {
+		position: absolute;
+		left: 195px;
+		top: 122px;
+		width: 28px;
+		height: 38px;
+		border-radius: 10px;
+		background-color: #27B978;
+	}
+	.ei-text {
+		margin-top: 20px;
+	}
+	.ei-text-plain {
+		font-size: 15px;
+	}
+	.ei-text-pill {
+		font-size: 15px;
+		padding-left: 24px;
+		padding-right: 24px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+		border-radius: 22px;
+		background-color: #EAE6DB;
+		color: #6E6E3C;
+	}
+	.ei-retry {
+		margin-top: 24px;
+		height: 40px;
+		padding-left: 28px;
+		padding-right: 28px;
+		border-radius: 20px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.ei-retry-text {
+		font-size: 15px;
+	}
+</style>

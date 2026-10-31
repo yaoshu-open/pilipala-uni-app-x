@@ -1,0 +1,453 @@
+<template>
+	<view class="rl">
+		<!-- 排序头：左侧「最新/最热评论」，右侧切换（1s 节流，源 reply/view.dart 的 pinned header） -->
+		<view class="rl-head" :style="headStyle">
+			<text class="rl-head-title" :style="titleStyle">{{ sortTitle }}</text>
+			<view class="rl-sort" @click="onToggleSort">
+				<text class="rl-sort-text" :style="primaryTextStyle">{{ sortLabel }}</text>
+				<text class="rl-sort-icon" :style="sortIconStyle">{{ sortGlyph }}</text>
+			</view>
+		</view>
+
+		<view class="rl-body">
+			<view v-if="state == 'loading'" class="rl-skeleton">
+				<view v-for="n in 5" :key="'rl-sk-' + n.toString()" class="rl-sk-row">
+					<skeleton-block width="30px" height="30px" radius="15px"></skeleton-block>
+					<view class="rl-sk-body">
+						<skeleton-block width="40%" height="11px" radius="3px"></skeleton-block>
+						<view class="rl-sk-gap"></view>
+						<skeleton-block width="100%" height="13px" radius="3px"></skeleton-block>
+						<view class="rl-sk-gap"></view>
+						<skeleton-block width="72%" height="13px" radius="3px"></skeleton-block>
+					</view>
+				</view>
+			</view>
+
+			<view v-else-if="state == 'error'" class="rl-state">
+				<p-http-error :message="errorText" @retry="onRetry"></p-http-error>
+			</view>
+
+			<view v-else-if="state == 'empty'" class="rl-state">
+				<text class="rl-empty-title" :style="titleStyle">{{ emptyTitle }}</text>
+				<text class="rl-empty-note" :style="secondaryTextStyle">{{ emptyNote }}</text>
+				<view class="rl-empty-retry" @click="onRetry">
+					<text class="rl-empty-retry-text" :style="primaryTextStyle">刷新看看</text>
+				</view>
+			</view>
+
+			<!-- 长列表：list-item 的 v-for 必须带 :key（否则静默退化为普通 view） -->
+			<list-view
+				v-else
+				class="rl-list"
+				:refresher-enabled="true"
+				:refresher-triggered="refreshing"
+				:lower-threshold="300"
+				@refresherrefresh="onRefresh"
+				@scrolltolower="onScrollToLower"
+			>
+				<list-item v-for="item in list" :key="item.rpid" :type="1">
+					<reply-item-view
+						:item="item"
+						level="1"
+						:show-reply-row="true"
+						@open-reply="onOpenReply"
+						@reply="onReply"
+						@need-login="onNeedLogin"
+						@seek="onSeek"
+						@open-user="onOpenUser"
+						@open-link="onOpenLink"
+					></reply-item-view>
+				</list-item>
+				<list-item :type="2">
+					<view class="rl-footer" :style="footerStyle">
+						<text class="rl-footer-text" :style="secondaryTextStyle">{{ footerText }}</text>
+					</view>
+				</list-item>
+			</list-view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+// uvue 的组件标签按导入名解析（ReplyItemView → <reply-item-view>）；模型类 ReplyItem 同名会冲突，故用 View 后缀
+import ReplyItemView from './reply-item.uvue'
+import PHttpError from '../p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../skeleton/skeleton-block.uvue'
+import { ReplyItem } from '../../models/reply.uts'
+import { fetchReplyList, REPLY_CLOSED_CODE } from '../../api/reply.uts'
+import { getNumber, setNumber, SK } from '../../utils/storage.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+import { textPrimary, textSecondary, cardBackground, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 一级评论列表（源头：`lib/pages/video/detail/reply/{view,controller}.dart`）。
+ *
+ * 分页与边界照搬源逻辑（设计_视频详情域 §四.2）：
+ *  - ps=20，**首屏不足 18 条即判「没有更多」**（源用 18 这个阈值而不是 20）；
+ *  - 置顶评论 = `upper.top` + `top_replies`，去重后插到列表头部；
+ *  - 排序切换 1s 节流后清空列表重拉；距底 300px 内触发加载更多、200ms 节流、加载中不重复请求；
+ *  - `replyReqCode == 12061` 表示评论区已关闭：列表照常展示历史评论，但空态文案与发评论入口要区分。
+ *
+ * 四个状态：loading（骨架）/ error（可重试）/ empty（区分「还没有评论」与「评论区已关闭」）/ ready。
+ * 发评论成功由页面塞入 insertItem 并自增 insertSeq，这里 watch 到即前插。
+ */
+const props = defineProps({
+	/** 视频 aid，接口的 oid */
+	oid: { type: Number, default: 0 },
+	/** UP 主 mid，用于给条目打 UP 标 */
+	upMid: { type: String, default: '' },
+	/** 页面发评论成功后自增，触发前插 */
+	insertSeq: { type: Number, default: 0 },
+	insertItem: { type: Object, default: null },
+	/** 页面底部输入条高度（px），给列表尾部留出安全距离 */
+	bottomInset: { type: Number, default: 0 }
+})
+
+const emit = defineEmits(['open-reply', 'reply', 'need-login', 'seek', 'open-user', 'open-link', 'req-code'])
+
+const primary = themeColor(currentThemeIndex())
+const sortGlyph = glyphOf('expand-more')
+
+const list = ref<Array<ReplyItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const page = ref<number>(0)
+const noMore = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const refreshing = ref<boolean>(false)
+const reqCode = ref<number>(0)
+const sort = ref<number>(0)
+
+let lastLoadMoreAt: number = 0
+let lastSortAt: number = 0
+
+/** 排序偏好（源 SettingBoxKey.replySortType；源里 2 是已删除项，读到 2 回落 0） */
+function readSortSetting(): number {
+	const value = getNumber(SK.replySortType, 0)
+	if (value == 1) {
+		return 1
+	}
+	return 0
+}
+
+sort.value = readSortSetting()
+
+const sortLabel = computed((): string => sort.value == 1 ? '最热' : '最新')
+const sortTitle = computed((): string => sortLabel.value + '评论')
+
+const emptyTitle = computed((): string => reqCode.value == REPLY_CLOSED_CODE ? '评论区已关闭' : '还没有评论')
+const emptyNote = computed((): string => {
+	if (reqCode.value == REPLY_CLOSED_CODE) {
+		return '该视频的评论区已被关闭，暂时无法查看或发表评论'
+	}
+	return '快来发表第一条评论'
+})
+
+const footerText = computed((): string => {
+	if (list.value.length == 0) {
+		return ''
+	}
+	if (noMore.value) {
+		return '没有更多了'
+	}
+	return loadingMore.value ? '加载中…' : '上拉加载更多'
+})
+
+const headStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const sortIconStyle = computed((): string => iconStyle('expand-more', 16, primary))
+const footerStyle = computed((): string => 'padding-bottom:' + (props.bottomInset + 12).toString() + 'px;')
+
+function hasRpid(items: Array<ReplyItem>, rpid: string): boolean {
+	for (let i = 0; i < items.length; i++) {
+		if (items[i].rpid == rpid) {
+			return true
+		}
+	}
+	return false
+}
+
+/**
+ * 拉取一页。
+ * reset=true 是首屏/刷新（置顶去重插头），false 是追加；silent 用于下拉刷新（保留旧列表，失败只提示）。
+ */
+async function loadPage(pn: number, reset: boolean, silent: boolean) {
+	if (loadingMore.value) {
+		return
+	}
+	loadingMore.value = true
+	if (reset && !silent) {
+		state.value = 'loading'
+		errorText.value = ''
+	}
+	const res = await fetchReplyList(props.oid, pn, sort.value)
+	loadingMore.value = false
+	reqCode.value = res.code
+	emit('req-code', res.code)
+
+	if (!res.status || res.data == null) {
+		if (reset && !silent) {
+			list.value = []
+			state.value = 'error'
+			errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		} else {
+			uni.showToast({ title: res.message.length > 0 ? res.message : '请求异常', icon: 'none' })
+		}
+		return
+	}
+
+	const data = res.data
+	const incoming: Array<ReplyItem> = []
+	if (reset) {
+		// 置顶评论：upper.top 先入，再并入 top_replies（同一 rpid 只留一份）
+		const top = data.upperTop
+		if (top != null && top.rpid.length > 0) {
+			incoming.push(top)
+		}
+		for (let i = 0; i < data.topReplies.length; i++) {
+			const item = data.topReplies[i]
+			if (!hasRpid(incoming, item.rpid)) {
+				incoming.push(item)
+			}
+		}
+	}
+	for (let i = 0; i < data.replies.length; i++) {
+		const item = data.replies[i]
+		if (!hasRpid(incoming, item.rpid) && !hasRpid(list.value, item.rpid)) {
+			incoming.push(item)
+		}
+	}
+
+	if (reset) {
+		page.value = 1
+		list.value = incoming
+		// 首屏不足 18 条 → 没有更多（源阈值；接口翻页偶发返回满 20 条但已到末页的情况再用 acount 兜底）
+		noMore.value = data.replies.length < 18 ||
+			(data.page.acount > 0 && data.replies.length + data.topReplies.length >= data.page.acount)
+		state.value = list.value.length > 0 ? 'ready' : 'empty'
+		return
+	}
+
+	if (incoming.length == 0) {
+		noMore.value = true
+		return
+	}
+	const merged = list.value.slice()
+	for (let i = 0; i < incoming.length; i++) {
+		merged.push(incoming[i])
+	}
+	list.value = merged
+	page.value = pn
+	noMore.value = data.replies.length < 18 || (data.page.acount > 0 && merged.length >= data.page.acount)
+	if (state.value != 'ready') {
+		state.value = 'ready'
+	}
+}
+
+function reload() {
+	list.value = []
+	page.value = 0
+	noMore.value = false
+	loadPage(1, true, false)
+}
+
+function onRetry() {
+	reload()
+}
+
+function onRefresh() {
+	refreshing.value = true
+	loadPage(1, true, true)
+	refreshing.value = false
+}
+
+function onScrollToLower() {
+	if (state.value != 'ready' || noMore.value || loadingMore.value) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadMoreAt < 200) {
+		return
+	}
+	lastLoadMoreAt = now
+	loadPage(page.value + 1, false, false)
+}
+
+function onToggleSort() {
+	const now = Date.now()
+	if (now - lastSortAt < 1000) {
+		return
+	}
+	lastSortAt = now
+	sort.value = sort.value == 0 ? 1 : 0
+	setNumber(SK.replySortType, sort.value)
+	reload()
+}
+
+function onOpenReply(item: ReplyItem) {
+	emit('open-reply', item)
+}
+
+function onReply(item: ReplyItem) {
+	emit('reply', item)
+}
+
+function onNeedLogin() {
+	emit('need-login')
+}
+
+function onSeek(text: string, seconds: number) {
+	emit('seek', text, seconds)
+}
+
+function onOpenUser(mid: string) {
+	emit('open-user', mid)
+}
+
+function onOpenLink(text: string) {
+	emit('open-link', text)
+}
+
+/** 页面发评论成功后前插（新评论由接口回传，字段齐全） */
+watch(() => props.insertSeq, () => {
+	const raw = props.insertItem
+	if (raw == null) {
+		return
+	}
+	const item = raw as ReplyItem
+	// 新评论的 UP 标：接口不带 upper mid，按页面传入的 upMid 补判
+	if (!item.isUp && props.upMid.length > 0 && item.member.mid == props.upMid) {
+		item.isUp = true
+	}
+	const next: Array<ReplyItem> = [item]
+	for (let i = 0; i < list.value.length; i++) {
+		if (list.value[i].rpid != item.rpid) {
+			next.push(list.value[i])
+		}
+	}
+	list.value = next
+	if (state.value != 'ready') {
+		state.value = 'ready'
+	}
+})
+
+/** 切分P / 切合集分集换的是 aid，评论主体变了要整表重拉 */
+watch(() => props.oid, (nextOid, prevOid) => {
+	if (nextOid != prevOid) {
+		reload()
+	}
+})
+
+reload()
+</script>
+
+<style>
+	.rl {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.rl-head {
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 6px;
+	}
+	.rl-head-title {
+		flex: 1;
+		font-size: 13px;
+	}
+	.rl-sort {
+		height: 32px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 8px;
+		padding-right: 6px;
+	}
+	.rl-sort-text {
+		font-size: 13px;
+	}
+	.rl-sort-icon {
+		font-family: MaterialIcons;
+		margin-left: 2px;
+	}
+	.rl-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+	.rl-list {
+		flex: 1;
+	}
+	.rl-skeleton {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 10px;
+	}
+	.rl-sk-row {
+		display: flex;
+		flex-direction: row;
+		margin-bottom: 16px;
+	}
+	.rl-sk-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+	}
+	.rl-sk-gap {
+		height: 6px;
+	}
+	.rl-state {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding-top: 40px;
+		padding-bottom: 40px;
+	}
+	.rl-empty-title {
+		font-size: 14px;
+	}
+	.rl-empty-note {
+		font-size: 12px;
+		margin-top: 8px;
+		text-align: center;
+		padding-left: 24px;
+		padding-right: 24px;
+	}
+	.rl-empty-retry {
+		margin-top: 14px;
+		height: 32px;
+		padding-left: 16px;
+		padding-right: 16px;
+		border-radius: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.rl-empty-retry-text {
+		font-size: 12px;
+	}
+	.rl-footer {
+		height: 48px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.rl-footer-text {
+		font-size: 12px;
+	}
+</style>

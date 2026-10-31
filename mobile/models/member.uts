@@ -1,0 +1,1009 @@
+import { strOf, numOf, objOf, arrOf, boolOf } from '../utils/json.uts'
+import { toSecureUrl } from '../utils/url.uts'
+
+/**
+ * 用户主页域模型。源头：`lib/models/member/{info,archive,article,seasons,coin,like,tags}.dart`，
+ * 以及 `lib/models/dynamics/result.dart`（本文件只提取最小动态卡所需字段子集，完整动态卡归 P6）。
+ *
+ * 字段名与源 JSON 键一致（snake_case 键在 from() 内映射），解析统一走 utils/json.uts 防御式取值。
+ */
+
+/** 大会员信息（源 Vip；nickname_color 为 "#RRGGBB" 字符串） */
+export class MemberVip {
+	type: number = 0
+	status: number = 0
+	label: string = ''
+	labelStatic: string = ''
+	nicknameColor: string = ''
+
+	static from(obj: UTSJSONObject | null): MemberVip {
+		const vip = new MemberVip()
+		if (obj == null) {
+			return vip
+		}
+		vip.type = numOf(obj, 'type')
+		vip.status = numOf(obj, 'status')
+		const label = objOf(obj, 'label')
+		if (label != null) {
+			vip.label = strOf(label, 'img_label_uri_hans')
+			vip.labelStatic = strOf(label, 'img_label_uri_hans_static')
+		}
+		vip.nicknameColor = strOf(obj, 'nickname_color')
+		return vip
+	}
+}
+
+/** 直播间摘要（源 LiveRoom；liveStatus=1 时资料区显示「直播中」角标） */
+export class MemberLiveRoom {
+	roomStatus: number = 0
+	liveStatus: number = 0
+	roomId: number = 0
+	title: string = ''
+	cover: string = ''
+	url: string = ''
+
+	static from(obj: UTSJSONObject | null): MemberLiveRoom {
+		const room = new MemberLiveRoom()
+		if (obj == null) {
+			return room
+		}
+		room.roomStatus = numOf(obj, 'roomStatus')
+		room.liveStatus = numOf(obj, 'liveStatus')
+		room.roomId = numOf(obj, 'roomid')
+		room.title = strOf(obj, 'title')
+		room.cover = strOf(obj, 'cover')
+		room.url = strOf(obj, 'url')
+		return room
+	}
+}
+
+/** 用户资料（源 MemberInfoModel，/x/space/wbi/acc/info） */
+export class MemberInfo {
+	mid: number = 0
+	name: string = ''
+	sex: string = ''
+	face: string = ''
+	/** 源：sign 为空串时替换为「该用户还没有签名」，并去掉换行 */
+	sign: string = ''
+	level: number = 0
+	isFollowed: boolean = false
+	topPhoto: string = ''
+	/** 认证角色：1 个人认证 / 2 企业认证（源按 role==1 判个人，否则企业） */
+	officialRole: number = -1
+	officialTitle: string = ''
+	vip: MemberVip = new MemberVip()
+	liveRoom: MemberLiveRoom | null = null
+
+	static from(obj: UTSJSONObject | null): MemberInfo {
+		const info = new MemberInfo()
+		if (obj == null) {
+			return info
+		}
+		info.mid = numOf(obj, 'mid')
+		info.name = strOf(obj, 'name')
+		info.sex = strOf(obj, 'sex')
+		info.face = strOf(obj, 'face')
+		const rawSign = strOf(obj, 'sign')
+		info.sign = rawSign.length == 0 ? '该用户还没有签名' : rawSign.replace('\n', '')
+		info.level = numOf(obj, 'level')
+		info.isFollowed = boolOf(obj, 'is_followed')
+		info.topPhoto = strOf(obj, 'top_photo')
+		const official = objOf(obj, 'official')
+		if (official != null) {
+			info.officialRole = numOf(official, 'role')
+			info.officialTitle = strOf(official, 'title')
+		}
+		info.vip = MemberVip.from(objOf(obj, 'vip'))
+		const room = objOf(obj, 'live_room')
+		info.liveRoom = room == null ? null : MemberLiveRoom.from(room)
+		return info
+	}
+}
+
+/** 投稿卡（源 VListItemModel，/x/space/wbi/arc/search 的 list.vlist[]） */
+export class VListItem {
+	comment: number = 0
+	typeid: number = 0
+	play: number = 0
+	pic: string = ''
+	title: string = ''
+	author: string = ''
+	mid: number = 0
+	created: number = 0
+	/** 源：length 为 "mm:ss" 字符串，duration 为其秒数换算结果 */
+	length: string = ''
+	duration: number = 0
+	videoReview: number = 0
+	aid: number = 0
+	bvid: string = ''
+	isChargingSrc: boolean = false
+
+	static from(obj: UTSJSONObject): VListItem {
+		const item = new VListItem()
+		item.comment = numOf(obj, 'comment')
+		item.typeid = numOf(obj, 'typeid')
+		item.play = numOf(obj, 'play')
+		item.pic = strOf(obj, 'pic')
+		item.title = strOf(obj, 'title')
+		item.author = strOf(obj, 'author')
+		item.mid = numOf(obj, 'mid')
+		item.created = numOf(obj, 'created')
+		item.length = strOf(obj, 'length')
+		item.videoReview = numOf(obj, 'video_review')
+		item.aid = numOf(obj, 'aid')
+		item.bvid = strOf(obj, 'bvid')
+		item.isChargingSrc = boolOf(obj, 'is_charging_arc')
+		return item
+	}
+}
+
+/** 合集/系列元信息（源 MamberMeta，拼写照源） */
+export class MemberSeasonMeta {
+	cover: string = ''
+	description: string = ''
+	mid: number = 0
+	name: string = ''
+	seasonId: number = 0
+	seriesId: number = 0
+	total: number = 0
+	/** 0 合集 / 1、2 系列（2 为直播回放，源同样走系列分支） */
+	category: number = 0
+
+	static from(obj: UTSJSONObject | null): MemberSeasonMeta {
+		const meta = new MemberSeasonMeta()
+		if (obj == null) {
+			return meta
+		}
+		meta.cover = strOf(obj, 'cover')
+		meta.description = strOf(obj, 'description')
+		meta.mid = numOf(obj, 'mid')
+		meta.name = strOf(obj, 'name')
+		meta.seasonId = numOf(obj, 'season_id')
+		meta.seriesId = numOf(obj, 'series_id')
+		meta.total = numOf(obj, 'total')
+		meta.category = numOf(obj, 'category')
+		return meta
+	}
+}
+
+/** 合集/系列详情条目（源 MemberArchiveItem；seasons_archives_list 与 series archives 同构） */
+export class MemberArchiveItem {
+	aid: number = 0
+	bvid: string = ''
+	title: string = ''
+	cover: string = ''
+	ctime: number = 0
+	pubdate: number = 0
+	duration: number = 0
+	view: number = 0
+
+	static from(obj: UTSJSONObject): MemberArchiveItem {
+		const item = new MemberArchiveItem()
+		item.aid = numOf(obj, 'aid')
+		item.bvid = strOf(obj, 'bvid')
+		item.title = strOf(obj, 'title')
+		item.cover = strOf(obj, 'pic')
+		item.ctime = numOf(obj, 'ctime')
+		item.pubdate = numOf(obj, 'pubdate')
+		item.duration = numOf(obj, 'duration')
+		const stat = objOf(obj, 'stat')
+		item.view = stat == null ? 0 : numOf(stat, 'view')
+		return item
+	}
+}
+
+/** 主页合集面板条目（源 MemberSeasonsList：meta + 前 4 条视频，截断由调用方做） */
+export class MemberSeasonsItem {
+	meta: MemberSeasonMeta = new MemberSeasonMeta()
+	archives: Array<MemberArchiveItem> = []
+
+	static from(obj: UTSJSONObject): MemberSeasonsItem {
+		const item = new MemberSeasonsItem()
+		item.meta = MemberSeasonMeta.from(objOf(obj, 'meta'))
+		const list = arrOf(obj, 'archives')
+		for (let i = 0; i < list.length; i++) {
+			item.archives.push(MemberArchiveItem.from(list[i]))
+		}
+		return item
+	}
+}
+
+/** 最近投币视频（源 MemberCoinsDataModel，/x/space/coin/video 数组项） */
+export class MemberCoinsItem {
+	aid: number = 0
+	bvid: string = ''
+	title: string = ''
+	pic: string = ''
+	coins: number = 0
+	ctime: number = 0
+	duration: number = 0
+	view: number = 0
+	danmaku: number = 0
+
+	static from(obj: UTSJSONObject): MemberCoinsItem {
+		const item = new MemberCoinsItem()
+		item.aid = numOf(obj, 'aid')
+		item.bvid = strOf(obj, 'bvid')
+		item.title = strOf(obj, 'title')
+		item.pic = strOf(obj, 'pic')
+		item.coins = numOf(obj, 'coins')
+		item.ctime = numOf(obj, 'ctime')
+		item.duration = numOf(obj, 'duration')
+		const stat = objOf(obj, 'stat')
+		if (stat != null) {
+			item.view = numOf(stat, 'view')
+			item.danmaku = numOf(stat, 'danmaku')
+		}
+		return item
+	}
+}
+
+/** 最近点赞视频（源 MemberLikeDataModel，/x/space/like/video 的 list[] 项） */
+export class MemberLikeItem {
+	aid: number = 0
+	bvid: string = ''
+	title: string = ''
+	pic: string = ''
+	pubdate: number = 0
+	duration: number = 0
+	view: number = 0
+	danmaku: number = 0
+
+	static from(obj: UTSJSONObject): MemberLikeItem {
+		const item = new MemberLikeItem()
+		item.aid = numOf(obj, 'aid')
+		item.bvid = strOf(obj, 'bvid')
+		item.title = strOf(obj, 'title')
+		item.pic = strOf(obj, 'pic')
+		item.pubdate = numOf(obj, 'pubdate')
+		item.duration = numOf(obj, 'duration')
+		const stat = objOf(obj, 'stat')
+		if (stat != null) {
+			item.view = numOf(stat, 'view')
+			item.danmaku = numOf(stat, 'danmaku')
+		}
+		return item
+	}
+}
+
+/** 图文专栏条目（源 MemberArticleItemModel，opus feed；content 即标题文本） */
+export class MemberArticleItem {
+	opusId: string = ''
+	content: string = ''
+	coverUrl: string = ''
+	jumpUrl: string = ''
+	like: number = 0
+
+	static from(obj: UTSJSONObject): MemberArticleItem {
+		const item = new MemberArticleItem()
+		const opusId = obj.getString('opus_id')
+		item.opusId = opusId == null ? '' : opusId
+		item.content = strOf(obj, 'content')
+		const cover = objOf(obj, 'cover')
+		if (cover != null) {
+			item.coverUrl = strOf(cover, 'url')
+		}
+		item.jumpUrl = strOf(obj, 'jump_url')
+		const stat = objOf(obj, 'stat')
+		if (stat != null) {
+			item.like = numOf(stat, 'like')
+		}
+		return item
+	}
+}
+
+/** 关注分组标签（源 MemberTagItemModel；follow 页分组 Tab 用，簇C 消费） */
+export class MemberTag {
+	tagid: number = 0
+	name: string = ''
+	count: number = 0
+	tip: string = ''
+
+	static from(obj: UTSJSONObject): MemberTag {
+		const tag = new MemberTag()
+		tag.tagid = numOf(obj, 'tagid')
+		tag.name = strOf(obj, 'name')
+		tag.count = numOf(obj, 'count')
+		tag.tip = strOf(obj, 'tip')
+		return tag
+	}
+}
+
+/** 动态图卡统计值：接口可能给字符串（"114.2万"）或数字，统一转展示文本 */
+function statText(obj: UTSJSONObject, key: string): string {
+	const text = obj.getString(key)
+	if (text != null && text.length > 0) {
+		return text
+	}
+	const value = obj.getNumber(key)
+	return value == null ? '' : value.toString()
+}
+
+/** 动态图片（源 DynamicDrawItemModel / OpusPicsModel 共用子集） */
+export class DynamicPicture {
+	src: string = ''
+	width: number = 0
+	height: number = 0
+}
+
+/** 最小动态卡条目（P5 过渡形态；P6 起页面改用 DynamicItem，本类型保留给历史缓存兼容） */
+export class DynamicLiteItem {
+	idStr: string = ''
+	/** 动态类型（源 type，如 DYNAMIC_TYPE_FORWARD 转发） */
+	type: string = ''
+	authorFace: string = ''
+	authorName: string = ''
+	authorMid: number = 0
+	pubTime: string = ''
+	descText: string = ''
+	/** 视频卡（major.archive）；播放/弹幕接口给的是字符串（如 "114.2万"），原样承载 */
+	archiveTitle: string = ''
+	archiveCover: string = ''
+	archiveDurationText: string = ''
+	archiveBvid: string = ''
+	archivePlayText: string = ''
+	archiveDanmakuText: string = ''
+	pictures: Array<DynamicPicture> = []
+
+	static from(obj: UTSJSONObject): DynamicLiteItem {
+		const item = new DynamicLiteItem()
+		const idStr = obj.getString('id_str')
+		item.idStr = idStr == null ? '' : idStr
+		item.type = strOf(obj, 'type')
+		const modules = objOf(obj, 'modules')
+		if (modules == null) {
+			return item
+		}
+		const author = objOf(modules, 'module_author')
+		if (author != null) {
+			item.authorFace = strOf(author, 'face')
+			item.authorName = strOf(author, 'name')
+			item.authorMid = numOf(author, 'mid')
+			item.pubTime = strOf(author, 'pub_time')
+		}
+		const dynamic = objOf(modules, 'module_dynamic')
+		if (dynamic == null) {
+			return item
+		}
+		const desc = objOf(dynamic, 'desc')
+		if (desc != null) {
+			item.descText = strOf(desc, 'text')
+		}
+		const major = objOf(dynamic, 'major')
+		if (major != null) {
+			const archive = objOf(major, 'archive')
+			if (archive != null) {
+				item.archiveTitle = strOf(archive, 'title')
+				item.archiveCover = strOf(archive, 'cover')
+				item.archiveDurationText = strOf(archive, 'duration_text')
+				item.archiveBvid = strOf(archive, 'bvid')
+				const stat = objOf(archive, 'stat')
+				if (stat != null) {
+					item.archivePlayText = statText(stat, 'play')
+					item.archiveDanmakuText = statText(stat, 'danmaku')
+				}
+			}
+			// 图片动态（draw）与图文动态（opus.pics）共用图片网格
+			const draw = objOf(major, 'draw')
+			if (draw != null) {
+				const pics = arrOf(draw, 'items')
+				for (let i = 0; i < pics.length && i < 9; i++) {
+					const pic = new DynamicPicture()
+					pic.src = strOf(pics[i], 'src')
+					pic.width = numOf(pics[i], 'width')
+					pic.height = numOf(pics[i], 'height')
+					if (pic.src.length > 0) {
+						item.pictures.push(pic)
+					}
+				}
+			}
+			const opus = objOf(major, 'opus')
+			if (opus != null && item.pictures.length == 0) {
+				const pics = arrOf(opus, 'pics')
+				for (let i = 0; i < pics.length && i < 9; i++) {
+					const pic = new DynamicPicture()
+					pic.src = strOf(pics[i], 'src')
+					pic.width = numOf(pics[i], 'width')
+					pic.height = numOf(pics[i], 'height')
+					if (pic.src.length > 0) {
+						item.pictures.push(pic)
+					}
+				}
+			}
+		}
+		return item
+	}
+}
+
+// ================================================================ 动态条目完整族（P6 动态域）
+// 源头：lib/models/dynamics/result.dart。本族是完整动态卡（dynamic-panel）与动态域页面的单源类型；
+// DynamicLiteItem 为 P5 过渡形态，已无消费方，保留仅为历史兼容。
+
+/** 富文本段（源 RichTextNodeItem；emoji 内联图片，其余为可点文本段） */
+export class RichSeg {
+	type: string = ''
+	text: string = ''
+	origText: string = ''
+	rid: string = ''
+	/** 表情图 url 与尺寸（源 emoji.size * 20 渲染） */
+	emoteUrl: string = ''
+	emoteSize: number = 0
+
+	static from(obj: UTSJSONObject): RichSeg {
+		const seg = new RichSeg()
+		seg.type = strOf(obj, 'type')
+		seg.text = strOf(obj, 'text')
+		seg.origText = strOf(obj, 'orig_text')
+		const rid = obj.getString('rid')
+		seg.rid = rid == null ? '' : rid
+		const emoji = objOf(obj, 'emoji')
+		if (emoji != null) {
+			// 动态正文表情图 URL 常为 http 明文，release 包原生 image 会拒载（详见 utils/url.uts）
+			seg.emoteUrl = toSecureUrl(strOf(emoji, 'icon_url'))
+			seg.emoteSize = numOf(emoji, 'size')
+		}
+		return seg
+	}
+}
+
+/** 正文描述（源 DynamicDescModel；segments 为 rich_text_nodes 拆段结果） */
+export class DynamicDesc {
+	text: string = ''
+	segments: Array<RichSeg> = []
+
+	static from(obj: UTSJSONObject | null): DynamicDesc {
+		const desc = new DynamicDesc()
+		if (obj == null) {
+			return desc
+		}
+		desc.text = strOf(obj, 'text')
+		const nodes = arrOf(obj, 'rich_text_nodes')
+		for (let i = 0; i < nodes.length; i++) {
+			desc.segments.push(RichSeg.from(nodes[i]))
+		}
+		return desc
+	}
+}
+
+/** 话题（源 DynamicTopicModel） */
+export class DynamicTopic {
+	id: number = 0
+	name: string = ''
+
+	static from(obj: UTSJSONObject | null): DynamicTopic | null {
+		if (obj == null) {
+			return null
+		}
+		const topic = new DynamicTopic()
+		topic.id = numOf(obj, 'id')
+		topic.name = strOf(obj, 'name')
+		return topic
+	}
+}
+
+/** 视频/合集/番剧卡统计（源 Stat；接口给的是字符串如 "114.2万"，原样承载） */
+export class DynamicArchiveStat {
+	play: string = ''
+	danmaku: string = ''
+
+	static from(obj: UTSJSONObject | null): DynamicArchiveStat {
+		const stat = new DynamicArchiveStat()
+		if (obj == null) {
+			return stat
+		}
+		const play = obj.getString('play')
+		stat.play = play == null ? numOf(obj, 'play').toString() : play
+		const danmaku = obj.getString('danmaku')
+		stat.danmaku = danmaku == null ? numOf(obj, 'danmaku').toString() : danmaku
+		return stat
+	}
+}
+
+/** 投稿视频/合集/番剧卡（源 DynamicArchiveModel，archive/ugcSeason/pgc 三分支共用） */
+export class DynamicArchive {
+	aid: number = 0
+	bvid: string = ''
+	cover: string = ''
+	title: string = ''
+	durationText: string = ''
+	jumpUrl: string = ''
+	desc: string = ''
+	badgeText: string = ''
+	epid: number = 0
+	seasonId: number = 0
+	stat: DynamicArchiveStat = new DynamicArchiveStat()
+
+	static from(obj: UTSJSONObject | null): DynamicArchive | null {
+		if (obj == null) {
+			return null
+		}
+		const arc = new DynamicArchive()
+		arc.aid = numOf(obj, 'aid')
+		// 源：bvid 缺省时回落 epid（pgc 分支）；接口偶发把 aid 给成字符串
+		const bvid = obj.getString('bvid')
+		if (bvid != null && bvid.length > 0) {
+			arc.bvid = bvid
+		} else {
+			arc.bvid = numOf(obj, 'epid').toString()
+		}
+		arc.cover = strOf(obj, 'cover')
+		arc.title = strOf(obj, 'title')
+		arc.durationText = strOf(obj, 'duration_text')
+		arc.jumpUrl = strOf(obj, 'jump_url')
+		arc.desc = strOf(obj, 'desc')
+		const badge = objOf(obj, 'badge')
+		if (badge != null) {
+			arc.badgeText = strOf(badge, 'text')
+		}
+		arc.epid = numOf(obj, 'epid')
+		arc.seasonId = numOf(obj, 'season_id')
+		arc.stat = DynamicArchiveStat.from(objOf(obj, 'stat'))
+		return arc
+	}
+}
+
+/** 图集（源 DynamicDrawModel / DynamicOpusModel.pics 共用；draw 用 src、opus 用 url，统一取） */
+function pictureListOf(obj: UTSJSONObject, key: string): Array<DynamicPicture> {
+	const pics: Array<DynamicPicture> = []
+	const list = arrOf(obj, key)
+	for (let i = 0; i < list.length; i++) {
+		const pic = new DynamicPicture()
+		let src = strOf(list[i], 'src')
+		if (src.length == 0) {
+			src = strOf(list[i], 'url')
+		}
+		pic.src = src
+		pic.width = numOf(list[i], 'width')
+		pic.height = numOf(list[i], 'height')
+		if (pic.src.length > 0) {
+			pics.push(pic)
+		}
+	}
+	return pics
+}
+
+/** 带图动态（源 DynamicDrawModel；id 为评论 oid——floor=2 场景） */
+export class DynamicDraw {
+	id: number = 0
+	items: Array<DynamicPicture> = []
+
+	static from(obj: UTSJSONObject | null): DynamicDraw | null {
+		if (obj == null) {
+			return null
+		}
+		const draw = new DynamicDraw()
+		draw.id = numOf(obj, 'id')
+		draw.items = pictureListOf(obj, 'items')
+		return draw
+	}
+}
+
+/** 图文/专栏（源 DynamicOpusModel；summary 拆段，title 富文本渲染前缀） */
+export class DynamicOpus {
+	title: string = ''
+	jumpUrl: string = ''
+	pics: Array<DynamicPicture> = []
+	summary: DynamicDesc = new DynamicDesc()
+
+	static from(obj: UTSJSONObject | null): DynamicOpus | null {
+		if (obj == null) {
+			return null
+		}
+		const opus = new DynamicOpus()
+		opus.title = strOf(obj, 'title')
+		opus.jumpUrl = strOf(obj, 'jump_url')
+		opus.pics = pictureListOf(obj, 'pics')
+		opus.summary = DynamicDesc.from(objOf(obj, 'summary'))
+		return opus
+	}
+}
+
+/** 直播推荐（源 DynamicLiveModel；content 为内嵌 JSON 字符串，这里解析出 live_play_info 字段，解析失败整体为 null → 渲染落 none 分支） */
+export class DynamicLiveRcmd {
+	roomId: number = 0
+	title: string = ''
+	cover: string = ''
+	areaName: string = ''
+	/** 1 直播中 / 0 结束 */
+	liveStatus: number = 0
+	watchedShowText: string = ''
+
+	static from(obj: UTSJSONObject | null): DynamicLiveRcmd | null {
+		if (obj == null) {
+			return null
+		}
+		const content = strOf(obj, 'content')
+		if (content.length == 0) {
+			return null
+		}
+		try {
+			const parsed = JSON.parse<UTSJSONObject>(content)
+			if (parsed == null) {
+				return null
+			}
+			const info = objOf(parsed, 'live_play_info')
+			if (info == null) {
+				return null
+			}
+			const rcmd = new DynamicLiveRcmd()
+			rcmd.roomId = numOf(info, 'room_id')
+			rcmd.title = strOf(info, 'title')
+			rcmd.cover = strOf(info, 'cover')
+			rcmd.areaName = strOf(info, 'area_name')
+			rcmd.liveStatus = numOf(info, 'live_status')
+			const watched = objOf(info, 'watched_show')
+			if (watched != null) {
+				rcmd.watchedShowText = strOf(watched, 'text_large')
+			}
+			return rcmd
+		} catch (e) {
+			console.log('[model] live_rcmd parse error')
+			return null
+		}
+	}
+}
+
+/** 直播状态卡（源 DynamicLive2Model） */
+export class DynamicLive2 {
+	title: string = ''
+	cover: string = ''
+	descFirst: string = ''
+
+	static from(obj: UTSJSONObject | null): DynamicLive2 | null {
+		if (obj == null) {
+			return null
+		}
+		const live = new DynamicLive2()
+		live.title = strOf(obj, 'title')
+		live.cover = strOf(obj, 'cover')
+		live.descFirst = strOf(obj, 'desc_first')
+		return live
+	}
+}
+
+/** 失效动态（源 DynamicNoneModel） */
+export class DynamicNone {
+	tips: string = ''
+
+	static from(obj: UTSJSONObject | null): DynamicNone | null {
+		if (obj == null) {
+			return null
+		}
+		const none = new DynamicNone()
+		none.tips = strOf(obj, 'tips')
+		return none
+	}
+}
+
+/** 附加卡-UGC 投稿引用（源 Ugc） */
+export class DynamicAddUgc {
+	cover: string = ''
+	title: string = ''
+	descSecond: string = ''
+	jumpUrl: string = ''
+
+	static from(obj: UTSJSONObject | null): DynamicAddUgc | null {
+		if (obj == null) {
+			return null
+		}
+		const ugc = new DynamicAddUgc()
+		ugc.cover = strOf(obj, 'cover')
+		ugc.title = strOf(obj, 'title')
+		ugc.descSecond = strOf(obj, 'desc_second')
+		ugc.jumpUrl = strOf(obj, 'jump_url')
+		return ugc
+	}
+}
+
+/** 附加卡-直播预约（源 Reserve；desc1/desc2 为 {text} 结构） */
+export class DynamicAddReserve {
+	title: string = ''
+	desc1: string = ''
+	desc2: string = ''
+	/** -1 未预约 */
+	state: number = 0
+
+	static from(obj: UTSJSONObject | null): DynamicAddReserve | null {
+		if (obj == null) {
+			return null
+		}
+		const reserve = new DynamicAddReserve()
+		reserve.title = strOf(obj, 'title')
+		const d1 = objOf(obj, 'desc1')
+		if (d1 != null) {
+			reserve.desc1 = strOf(d1, 'text')
+		}
+		const d2 = objOf(obj, 'desc2')
+		if (d2 != null) {
+			reserve.desc2 = strOf(d2, 'text')
+		}
+		reserve.state = numOf(obj, 'state')
+		return reserve
+	}
+}
+
+/** 附加卡（源 DynamicAddModel；goods/match/common 源渲染层返回空占位，这里不落字段） */
+export class DynamicAdditional {
+	type: string = ''
+	ugc: DynamicAddUgc | null = null
+	reserve: DynamicAddReserve | null = null
+
+	static from(obj: UTSJSONObject | null): DynamicAdditional | null {
+		if (obj == null) {
+			return null
+		}
+		const add = new DynamicAdditional()
+		add.type = strOf(obj, 'type')
+		add.ugc = DynamicAddUgc.from(objOf(obj, 'ugc'))
+		add.reserve = DynamicAddReserve.from(objOf(obj, 'reserve'))
+		return add
+	}
+}
+
+/** 动态主体（源 DynamicMajorModel；type 为 MAJOR_TYPE_* 枚举串） */
+export class DynamicMajor {
+	type: string = ''
+	archive: DynamicArchive | null = null
+	ugcSeason: DynamicArchive | null = null
+	pgc: DynamicArchive | null = null
+	draw: DynamicDraw | null = null
+	opus: DynamicOpus | null = null
+	liveRcmd: DynamicLiveRcmd | null = null
+	live: DynamicLive2 | null = null
+	none: DynamicNone | null = null
+
+	static from(obj: UTSJSONObject | null): DynamicMajor | null {
+		if (obj == null) {
+			return null
+		}
+		const major = new DynamicMajor()
+		major.type = strOf(obj, 'type')
+		major.archive = DynamicArchive.from(objOf(obj, 'archive'))
+		major.ugcSeason = DynamicArchive.from(objOf(obj, 'ugc_season'))
+		major.pgc = DynamicArchive.from(objOf(obj, 'pgc'))
+		major.draw = DynamicDraw.from(objOf(obj, 'draw'))
+		major.opus = DynamicOpus.from(objOf(obj, 'opus'))
+		major.liveRcmd = DynamicLiveRcmd.from(objOf(obj, 'live_rcmd'))
+		major.live = DynamicLive2.from(objOf(obj, 'live'))
+		major.none = DynamicNone.from(objOf(obj, 'none'))
+		return major
+	}
+}
+
+/** 作者模块（源 ModuleAuthorModel；vip 仅取 status>0 判粉色昵称） */
+export class DynamicAuthor {
+	face: string = ''
+	mid: number = 0
+	name: string = ''
+	pubTime: string = ''
+	pubAction: string = ''
+	pubTs: number = 0
+	/** AUTHOR_TYPE_PGC 时不进主页 */
+	type: string = ''
+	vipStatus: number = 0
+
+	static from(obj: UTSJSONObject | null): DynamicAuthor {
+		const author = new DynamicAuthor()
+		if (obj == null) {
+			return author
+		}
+		author.face = strOf(obj, 'face')
+		author.mid = numOf(obj, 'mid')
+		author.name = strOf(obj, 'name')
+		author.pubTime = strOf(obj, 'pub_time')
+		author.pubAction = strOf(obj, 'pub_action')
+		author.pubTs = numOf(obj, 'pub_ts')
+		author.type = strOf(obj, 'type')
+		const vip = objOf(obj, 'vip')
+		if (vip != null) {
+			author.vipStatus = numOf(vip, 'status')
+		}
+		return author
+	}
+}
+
+/** 动态模块（源 ModuleDynamicModel） */
+export class DynamicModule {
+	desc: DynamicDesc | null = null
+	major: DynamicMajor | null = null
+	topic: DynamicTopic | null = null
+	additional: DynamicAdditional | null = null
+
+	static from(obj: UTSJSONObject | null): DynamicModule {
+		const mod = new DynamicModule()
+		if (obj == null) {
+			return mod
+		}
+		const desc = objOf(obj, 'desc')
+		mod.desc = desc == null ? null : DynamicDesc.from(desc)
+		mod.major = DynamicMajor.from(objOf(obj, 'major'))
+		mod.topic = DynamicTopic.from(objOf(obj, 'topic'))
+		mod.additional = DynamicAdditional.from(objOf(obj, 'additional'))
+		return mod
+	}
+}
+
+/** 操作栏计数（源 Comment/ForWard/Like 的 count：0 时界面回落默认文案，这里保数字） */
+export class DynamicStatItem {
+	count: number = 0
+	forbidden: boolean = false
+	/** 仅 like 有：当前是否已赞 */
+	status: boolean = false
+
+	static from(obj: UTSJSONObject | null, key: string): DynamicStatItem {
+		const item = new DynamicStatItem()
+		if (obj == null) {
+			return item
+		}
+		const node = objOf(obj, key)
+		if (node == null) {
+			return item
+		}
+		item.count = numOf(node, 'count')
+		item.forbidden = boolOf(node, 'forbidden')
+		item.status = boolOf(node, 'status')
+		return item
+	}
+}
+
+/** 统计模块（源 ModuleStatModel） */
+export class DynamicStat {
+	forward: DynamicStatItem = new DynamicStatItem()
+	comment: DynamicStatItem = new DynamicStatItem()
+	like: DynamicStatItem = new DynamicStatItem()
+
+	static from(obj: UTSJSONObject | null): DynamicStat | null {
+		if (obj == null) {
+			return null
+		}
+		const stat = new DynamicStat()
+		stat.forward = DynamicStatItem.from(obj, 'forward')
+		stat.comment = DynamicStatItem.from(obj, 'comment')
+		stat.like = DynamicStatItem.from(obj, 'like')
+		return stat
+	}
+}
+
+/** 条目模块组（源 ItemModulesModel） */
+export class DynamicItemModules {
+	author: DynamicAuthor = new DynamicAuthor()
+	dynamic: DynamicModule = new DynamicModule()
+	stat: DynamicStat | null = null
+
+	static from(obj: UTSJSONObject | null): DynamicItemModules {
+		const modules = new DynamicItemModules()
+		if (obj == null) {
+			return modules
+		}
+		modules.author = DynamicAuthor.from(objOf(obj, 'module_author'))
+		modules.dynamic = DynamicModule.from(objOf(obj, 'module_dynamic'))
+		modules.stat = DynamicStat.from(objOf(obj, 'module_stat'))
+		return modules
+	}
+}
+
+/** 动态条目基要（源 basic；comment_id_str 为评论 oid，comment_type 0 视为 11） */
+export class DynamicBasic {
+	commentIdStr: string = ''
+	commentType: number = 0
+
+	static from(obj: UTSJSONObject | null): DynamicBasic {
+		const basic = new DynamicBasic()
+		if (obj == null) {
+			return basic
+		}
+		basic.commentIdStr = strOf(obj, 'comment_id_str')
+		basic.commentType = numOf(obj, 'comment_type')
+		return basic
+	}
+}
+
+/** 完整动态条目（源 DynamicItemModel；orig 为转发源动态，结构与自身一致） */
+export class DynamicItem {
+	idStr: string = ''
+	type: string = ''
+	visible: boolean = true
+	basic: DynamicBasic = new DynamicBasic()
+	modules: DynamicItemModules = new DynamicItemModules()
+	orig: DynamicItem | null = null
+
+	static from(obj: UTSJSONObject): DynamicItem {
+		const item = new DynamicItem()
+		const idStr = obj.getString('id_str')
+		item.idStr = idStr == null ? '' : idStr
+		item.type = strOf(obj, 'type')
+		item.visible = boolOf(obj, 'visible')
+		item.basic = DynamicBasic.from(objOf(obj, 'basic'))
+		item.modules = DynamicItemModules.from(objOf(obj, 'modules'))
+		const orig = objOf(obj, 'orig')
+		item.orig = orig == null ? null : DynamicItem.from(orig)
+		return item
+	}
+}
+
+/** 列表结果（对齐工程内 {status, message, items} 约定） */
+export class MemberListResult<T> {
+	status: boolean = false
+	message: string = ''
+	items: Array<T> = []
+}
+
+/** 用户资料结果 */
+export class MemberInfoResult {
+	status: boolean = false
+	message: string = ''
+	info: MemberInfo | null = null
+}
+
+/** 关注/粉丝数结果（/x/relation/stat） */
+export class RelationStatResult {
+	status: boolean = false
+	message: string = ''
+	following: number = -1
+	follower: number = -1
+}
+
+/** 获赞/播放数结果（/x/space/upstat；未登录请求会失败，失败时页面显示 '-'） */
+export class MemberUpstatResult {
+	status: boolean = false
+	message: string = ''
+	likes: number = -1
+}
+
+/** 与某用户的关系（/x/relation?fid=；attribute：0 未关注/1 悄悄关注/2 已关注/6 互关/128 拉黑，special=1 加 SP 后缀） */
+export class RelationResult {
+	status: boolean = false
+	message: string = ''
+	attribute: number = -1
+	special: number = 0
+}
+
+/** 投稿列表结果（/x/space/wbi/arc/search；count 供分页终止判断） */
+export class MemberArchiveResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	items: Array<VListItem> = []
+	count: number = 0
+}
+
+/** 空间动态流结果（offset 空串/-1 表示没有更多；P6 起承载完整动态卡条目 DynamicItem） */
+export class DynamicFeedResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	items: Array<DynamicItem> = []
+	offset: string = ''
+	hasMore: boolean = false
+}
+
+/** 主页合集面板结果（seasons_list + series_list 拼接，源同款） */
+export class MemberSeasonsResult {
+	status: boolean = false
+	message: string = ''
+	items: Array<MemberSeasonsItem> = []
+}
+
+/** 合集/系列详情分页结果 */
+export class SeasonDetailResult {
+	status: boolean = false
+	message: string = ''
+	items: Array<MemberArchiveItem> = []
+	total: number = 0
+}
+
+/** 图文专栏前置：空间页 HTML 里的 __RENDER_DATA__.access_id */
+export class WWebidResult {
+	status: boolean = false
+	message: string = ''
+	webid: string = ''
+}
+
+/** 图文专栏列表结果（offset 分页） */
+export class MemberArticleResult {
+	status: boolean = false
+	message: string = ''
+	items: Array<MemberArticleItem> = []
+	offset: string = ''
+	hasMore: boolean = false
+}

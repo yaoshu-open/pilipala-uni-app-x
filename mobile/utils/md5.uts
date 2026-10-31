@@ -1,0 +1,140 @@
+/**
+ * MD5（UTF-8），用于 WBI 签名与 APP 接口签名。
+ * 纯 uts 实现，避免引入原生插件；输出 32 位小写十六进制。
+ */
+
+const SHIFT: number[] = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21]
+
+let cachedK: number[] | null = null
+
+function tableK(): number[] {
+	if (cachedK == null) {
+		const arr: number[] = []
+		for (let i = 0; i < 64; i++) {
+			arr.push(Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296))
+		}
+		cachedK = arr
+	}
+	return cachedK as number[]
+}
+
+function utf8Bytes(input: string): number[] {
+	const out: number[] = []
+	let i = 0
+	while (i < input.length) {
+		const code = input.charCodeAt(i)
+		if (code < 0x80) {
+			out.push(code)
+			i = i + 1
+		} else if (code < 0x800) {
+			out.push(0xC0 | (code >> 6))
+			out.push(0x80 | (code & 0x3F))
+			i = i + 1
+		} else if (code >= 0xD800 && code <= 0xDBFF && i + 1 < input.length) {
+			const next = input.charCodeAt(i + 1)
+			const cp = 0x10000 + ((code - 0xD800) << 10) + (next - 0xDC00)
+			out.push(0xF0 | (cp >> 18))
+			out.push(0x80 | ((cp >> 12) & 0x3F))
+			out.push(0x80 | ((cp >> 6) & 0x3F))
+			out.push(0x80 | (cp & 0x3F))
+			i = i + 2
+		} else {
+			out.push(0xE0 | (code >> 12))
+			out.push(0x80 | ((code >> 6) & 0x3F))
+			out.push(0x80 | (code & 0x3F))
+			i = i + 1
+		}
+	}
+	return out
+}
+
+function byteHex(value: number): string {
+	const head = Math.floor(value / 16)
+	const tail = value % 16
+	return digitHex(head) + digitHex(tail)
+}
+
+function digitHex(value: number): string {
+	if (value < 10) {
+		return value.toString()
+	}
+	const letters = 'abcdef'
+	return letters.substring(value - 10, value - 9)
+}
+
+function wordHex(word: number): string {
+	return byteHex((word >> 0) & 0xFF) +
+		byteHex((word >> 8) & 0xFF) +
+		byteHex((word >> 16) & 0xFF) +
+		byteHex((word >> 24) & 0xFF)
+}
+
+export function md5(input: string): string {
+	const bytes = utf8Bytes(input)
+	const bitLen = bytes.length * 8
+	const padded: number[] = []
+	for (let i = 0; i < bytes.length; i++) {
+		padded.push(bytes[i])
+	}
+	padded.push(0x80)
+	while (padded.length % 64 != 56) {
+		padded.push(0)
+	}
+	padded.push(bitLen & 0xFF)
+	padded.push((bitLen >> 8) & 0xFF)
+	padded.push((bitLen >> 16) & 0xFF)
+	padded.push((bitLen >> 24) & 0xFF)
+	padded.push(0)
+	padded.push(0)
+	padded.push(0)
+	padded.push(0)
+
+	const k = tableK()
+	let a = 0x67452301
+	let b = 0xEFCDAB89 | 0
+	let c = 0x98BADCFE | 0
+	let d = 0x10325476
+
+	let offset = 0
+	while (offset < padded.length) {
+		const m: number[] = []
+		for (let j = 0; j < 16; j++) {
+			const idx = offset + j * 4
+			m.push(padded[idx] | (padded[idx + 1] << 8) | (padded[idx + 2] << 16) | (padded[idx + 3] << 24))
+		}
+		let aa = a
+		let bb = b
+		let cc = c
+		let dd = d
+		for (let i = 0; i < 64; i++) {
+			let f = 0
+			let g = 0
+			if (i < 16) {
+				f = (bb & cc) | ((~bb) & dd)
+				g = i
+			} else if (i < 32) {
+				f = (dd & bb) | ((~dd) & cc)
+				g = (5 * i + 1) % 16
+			} else if (i < 48) {
+				f = bb ^ cc ^ dd
+				g = (3 * i + 5) % 16
+			} else {
+				f = cc ^ (bb | (~dd))
+				g = (7 * i) % 16
+			}
+			const sum = (f + aa + k[i] + m[g]) | 0
+			aa = dd
+			dd = cc
+			cc = bb
+			const shift = SHIFT[(i >> 4) * 4 + (i % 4)]
+			bb = (bb + ((sum << shift) | (sum >>> (32 - shift)))) | 0
+		}
+		a = (a + aa) | 0
+		b = (b + bb) | 0
+		c = (c + cc) | 0
+		d = (d + dd) | 0
+		offset = offset + 64
+	}
+
+	return wordHex(a) + wordHex(b) + wordHex(c) + wordHex(d)
+}

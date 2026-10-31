@@ -1,0 +1,285 @@
+import { strOf, numOf, objOf } from '../utils/json.uts'
+
+/**
+ * 收藏域模型。源头：`lib/models/user/fav_folder.dart`、`lib/models/user/fav_detail.dart`。
+ * 字段名与源保持一致（源 snake_case JSON 键在 from() 内映射），供
+ * fav / fav-detail / fav-edit / fav-search / media（簇C 消费）/ subscription 族（簇C 消费）复用。
+ */
+
+/** 收藏夹卡片的 UP 信息（源 Upper：mid/name/face） */
+export class FavUpper {
+	mid: number = 0
+	name: string = ''
+	face: string = ''
+
+	static from(obj: UTSJSONObject | null): FavUpper {
+		const upper = new FavUpper()
+		if (obj == null) {
+			return upper
+		}
+		upper.mid = numOf(obj, 'mid')
+		upper.name = strOf(obj, 'name')
+		upper.face = strOf(obj, 'face')
+		return upper
+	}
+}
+
+/** 收藏夹卡（源 FavFolderItemData） */
+export class FavFolderItem {
+	id: number = 0
+	fid: number = 0
+	mid: number = 0
+	/** 属性位：[23, 1] 为私密（源同款判定） */
+	attr: number = 0
+	title: string = ''
+	cover: string = ''
+	upper: FavUpper = new FavUpper()
+	coverType: number = 0
+	intro: string = ''
+	ctime: number = 0
+	mtime: number = 0
+	state: number = 0
+	favState: number = 0
+	mediaCount: number = 0
+	viewCount: number = 0
+	vt: number = 0
+	playSwitch: number = 0
+	/** 订阅卡扩展（源同文件字段，subscription 族消费） */
+	type: number = 0
+	link: string = ''
+	bvid: string = ''
+
+	static from(obj: UTSJSONObject | null): FavFolderItem {
+		const item = new FavFolderItem()
+		if (obj == null) {
+			return item
+		}
+		item.id = numOf(obj, 'id')
+		item.fid = numOf(obj, 'fid')
+		item.mid = numOf(obj, 'mid')
+		item.attr = numOf(obj, 'attr')
+		item.title = strOf(obj, 'title')
+		item.cover = strOf(obj, 'cover')
+		item.upper = FavUpper.from(objOf(obj, 'upper'))
+		item.coverType = numOf(obj, 'cover_type')
+		item.intro = strOf(obj, 'intro')
+		item.ctime = numOf(obj, 'ctime')
+		item.mtime = numOf(obj, 'mtime')
+		item.state = numOf(obj, 'state')
+		item.favState = numOf(obj, 'fav_state')
+		item.mediaCount = numOf(obj, 'media_count')
+		item.viewCount = numOf(obj, 'view_count')
+		item.vt = numOf(obj, 'vt')
+		item.playSwitch = numOf(obj, 'play_switch')
+		item.type = numOf(obj, 'type')
+		item.link = strOf(obj, 'link')
+		item.bvid = strOf(obj, 'bvid')
+		return item
+	}
+}
+
+/** 收藏夹列表页（源 FavFolderData：count/has_more） */
+export class FavFolderPage {
+	count: number = 0
+	hasMore: boolean = false
+}
+
+/** 收藏夹内容条目（源 FavDetailItemData；封面 json 键为 cover，模型字段名沿用源的 pic） */
+export class FavDetailItem {
+	id: number = 0
+	type: number = 0
+	title: string = ''
+	pic: string = ''
+	intro: string = ''
+	page: number = 0
+	duration: number = 0
+	upper: FavUpper = new FavUpper()
+	attr: number = 0
+	/** 播放/弹幕数（json：cnt_info{play, danmaku}） */
+	play: number = 0
+	danmaku: number = 0
+	link: string = ''
+	ctime: number = 0
+	pubdate: number = 0
+	favTime: number = 0
+	bvId: string = ''
+	bvid: string = ''
+	cid: number = 0
+	/** 番剧/课程条目的 epId（源 resolveEpId(link)，Bangumi 链接尾段数字） */
+	epId: number = 0
+	/** ogv 番剧信息（type_name 等展示在角标） */
+	ogvTypeName: string = ''
+
+	static from(obj: UTSJSONObject | null): FavDetailItem {
+		const item = new FavDetailItem()
+		if (obj == null) {
+			return item
+		}
+		item.id = numOf(obj, 'id')
+		item.type = numOf(obj, 'type')
+		item.title = strOf(obj, 'title')
+		item.pic = strOf(obj, 'cover')
+		item.intro = strOf(obj, 'intro')
+		item.page = numOf(obj, 'page')
+		item.duration = numOf(obj, 'duration')
+		item.upper = FavUpper.from(objOf(obj, 'upper'))
+		item.attr = numOf(obj, 'attr')
+		const cntInfo = objOf(obj, 'cnt_info')
+		if (cntInfo != null) {
+			item.play = numOf(cntInfo, 'play')
+			item.danmaku = numOf(cntInfo, 'danmaku')
+		}
+		item.link = strOf(obj, 'link')
+		item.ctime = numOf(obj, 'ctime')
+		item.pubdate = numOf(obj, 'pubtime')
+		item.favTime = numOf(obj, 'fav_time')
+		item.bvId = strOf(obj, 'bv_id')
+		item.bvid = strOf(obj, 'bvid')
+		const ugc = objOf(obj, 'ugc')
+		item.cid = ugc == null ? 0 : numOf(ugc, 'first_cid')
+		item.epId = resolveEpId(item.link)
+		const ogv = objOf(obj, 'ogv')
+		if (ogv != null) {
+			item.ogvTypeName = strOf(ogv, 'type_name')
+		}
+		return item
+	}
+}
+
+/** 源 resolveEpId：link 含 /bangumi 时取尾段数字作为 epId，否则 0 */
+function resolveEpId(link: string): number {
+	if (link.length == 0 || link.indexOf('/bangumi') < 0) {
+		return 0
+	}
+	const parts = link.split('/')
+	for (let i = parts.length - 1; i >= 0; i--) {
+		const part = parts[i]
+		if (part.length == 0) {
+			continue
+		}
+		const value = parseInt(part)
+		if (!isNaN(value) && value > 0) {
+			return value
+		}
+	}
+	return 0
+}
+
+/** 收藏夹详情头部信息（源 FavDetailData.info） */
+export class FavDetailInfo {
+	id: number = 0
+	title: string = ''
+	cover: string = ''
+	intro: string = ''
+	mediaCount: number = 0
+	/** 属性位：[23, 1] 为私密（编辑收藏夹回填锁态用） */
+	attr: number = 0
+	upper: FavUpper = new FavUpper()
+
+	static from(obj: UTSJSONObject | null): FavDetailInfo {
+		const info = new FavDetailInfo()
+		if (obj == null) {
+			return info
+		}
+		info.id = numOf(obj, 'id')
+		info.title = strOf(obj, 'title')
+		info.cover = strOf(obj, 'cover')
+		info.intro = strOf(obj, 'intro')
+		info.mediaCount = numOf(obj, 'media_count')
+		info.attr = numOf(obj, 'attr')
+		info.upper = FavUpper.from(objOf(obj, 'upper'))
+		return info
+	}
+}
+
+/** 订阅收藏夹卡（源 SubFolderItemData：收藏夹卡 + type/link/bvid，subscription 族消费） */
+export class SubFolderItem extends FavFolderItem {
+	static fromSub(obj: UTSJSONObject | null): SubFolderItem {
+		const item = new SubFolderItem()
+		if (obj == null) {
+			return item
+		}
+		const base = FavFolderItem.from(obj)
+		item.id = base.id
+		item.fid = base.fid
+		item.mid = base.mid
+		item.attr = base.attr
+		item.title = base.title
+		item.cover = base.cover
+		item.upper = base.upper
+		item.coverType = base.coverType
+		item.intro = base.intro
+		item.ctime = base.ctime
+		item.mtime = base.mtime
+		item.state = base.state
+		item.favState = base.favState
+		item.mediaCount = base.mediaCount
+		item.viewCount = base.viewCount
+		item.vt = base.vt
+		item.playSwitch = base.playSwitch
+		item.type = base.type
+		item.link = base.link
+		item.bvid = base.bvid
+		return item
+	}
+}
+
+/** 订阅详情内容条目（形态同 FavDetailItem，season 接口返回） */
+export class SubDetailMedia extends FavDetailItem {
+	static fromSub(obj: UTSJSONObject | null): SubDetailMedia {
+		const media = new SubDetailMedia()
+		if (obj == null) {
+			return media
+		}
+		const base = FavDetailItem.from(obj)
+		media.id = base.id
+		media.type = base.type
+		media.title = base.title
+		media.pic = base.pic
+		media.intro = base.intro
+		media.page = base.page
+		media.duration = base.duration
+		media.upper = base.upper
+		media.attr = base.attr
+		media.play = base.play
+		media.danmaku = base.danmaku
+		media.link = base.link
+		media.ctime = base.ctime
+		media.pubdate = base.pubdate
+		media.favTime = base.favTime
+		media.bvId = base.bvId
+		media.bvid = base.bvid
+		media.cid = base.cid
+		media.epId = base.epId
+		media.ogvTypeName = base.ogvTypeName
+		return media
+	}
+}
+
+/** 收藏夹列表请求结果（对齐工程 {status, message, items} 约定 + 分页元数据） */
+export class FavFolderResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	items: Array<FavFolderItem> = []
+	page: FavFolderPage = new FavFolderPage()
+}
+
+/** 收藏夹内容列表请求结果（info 仅首页返回时填充） */
+export class FavDetailResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	items: Array<FavDetailItem> = []
+	info: FavDetailInfo | null = null
+	hasMore: boolean = false
+}
+
+/** 写操作结果（新建/编辑/删除收藏夹、取消收藏） */
+export class FavActionResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	/** 成功 toast 文案（调用方按源文案传入或读接口 message） */
+	successToast: string = ''
+}

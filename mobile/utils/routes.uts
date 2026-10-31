@@ -1,0 +1,94 @@
+/**
+ * 路由表（源：lib/router/app_pages.dart）与跳转封装。
+ *
+ * 口径：常量只收录「已落盘且已在 pages.json 注册」的路由页，路径与实际文件一一对应（kebab-case 目录）。
+ * 源有 / 本端无独立路由页的能力不在此留常量（死常量=断链伏笔）：
+ * - home / hot / dynamics / rank / rcmd / live：宿主页内保活组件（pages/main 与 pages/home 组合），无独立路由；
+ * - 未迁移路由：/message/at（源空壳页，入口 toast 拦截）、/setting/pages/logs、display_mode、
+ *   action_menu_set、/video/detail/reply_reply（按批次落地时再补常量）。
+ */
+
+export class RT {
+	static main: string = '/pages/main/main'
+	static video: string = '/pages/video/video'
+	static webview: string = '/pages/webview/webview'
+	static setting: string = '/pages/setting/setting'
+	static mine: string = '/pages/mine/mine'
+	static fav: string = '/pages/fav/fav'
+	static favDetail: string = '/pages/fav-detail/fav-detail'
+	static favEdit: string = '/pages/fav-edit/fav-edit'
+	static favSearch: string = '/pages/fav-search/fav-search'
+	static later: string = '/pages/later/later'
+	static history: string = '/pages/history/history'
+	static historySearch: string = '/pages/history-search/history-search'
+	static search: string = '/pages/search/search'
+	static searchResult: string = '/pages/search-result/search-result'
+	// 动态详情（P6）：按 id 重取的独立路由页（源 /dynamicDetail 对象传参改串化，见 设计_动态域 §三）
+	static dynamicDetail: string = '/pages/dynamics-detail/dynamics-detail'
+	static follow: string = '/pages/follow/follow'
+	static fan: string = '/pages/fan/fan'
+	static followSearch: string = '/pages/follow-search/follow-search'
+	static liveRoom: string = '/pages/live-room/live-room'
+	static member: string = '/pages/member/member'
+	static memberSearch: string = '/pages/member-search/member-search'
+	static recommendSetting: string = '/pages/setting/recommend-setting'
+	static playSetting: string = '/pages/setting/play-setting'
+	static styleSetting: string = '/pages/setting/style-setting'
+	static privacySetting: string = '/pages/setting/privacy-setting'
+	static extraSetting: string = '/pages/setting/extra-setting'
+	static blackList: string = '/pages/blacklist/blacklist'
+	static colorSetting: string = '/pages/setting/color-select'
+	static tabbarSetting: string = '/pages/setting/home-tabbar-set'
+	static fontSizeSetting: string = '/pages/setting/font-size-select'
+	static about: string = '/pages/about/about'
+	static htmlRender: string = '/pages/html/html'
+	static playSpeedSetting: string = '/pages/setting/play-speed-set'
+	static whisper: string = '/pages/message/message'
+	static whisperDetail: string = '/pages/whisper-detail/whisper-detail'
+	static login: string = '/pages/login/login'
+	static memberDynamics: string = '/pages/member-dynamics/member-dynamics'
+	static memberArchive: string = '/pages/member-archive/member-archive'
+	static memberSeasons: string = '/pages/member-seasons/member-seasons'
+	static memberArticle: string = '/pages/member-article/member-article'
+	static subscription: string = '/pages/subscription/subscription'
+	static subscriptionDetail: string = '/pages/subscription-detail/subscription-detail'
+	static playerGestureSetting: string = '/pages/setting/play-gesture-set'
+	static navbarSetting: string = '/pages/setting/navigation-bar-set'
+	static messageReply: string = '/pages/message-reply/message-reply'
+	static messageLike: string = '/pages/message-like/message-like'
+	static messageSystem: string = '/pages/message-system/message-system'
+	static opus: string = '/pages/opus/opus'
+	static read: string = '/pages/read/read'
+	static bangumi: string = '/pages/bangumi/bangumi'
+	static bangumiIntro: string = '/pages/bangumi-intro/bangumi-intro'
+	// 不迁移项（设计_个人域 §十）：media=main 第四 tab 组件（无独立路由）；
+	// member_coin/member_like=源空壳页（主页面板直接消费接口）。
+}
+
+function withQuery(path: string, query: string): string {
+	if (query.length == 0) {
+		return path
+	}
+	return path + '?' + query
+}
+
+export function navigateTo(path: string, query: string = '') {
+	uni.navigateTo({
+		url: withQuery(path, query),
+		fail: (err) => {
+			console.log('[route] navigateTo fail path=' + path + ' err=' + JSON.stringify(err))
+		}
+	})
+}
+
+export function redirectTo(path: string, query: string = '') {
+	uni.redirectTo({ url: withQuery(path, query) })
+}
+
+export function reLaunch(path: string, query: string = '') {
+	uni.reLaunch({ url: withQuery(path, query) })
+}
+
+export function navigateBack(delta: number = 1) {
+	uni.navigateBack({ delta: delta })
+}

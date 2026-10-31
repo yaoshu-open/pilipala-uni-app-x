@@ -1,0 +1,673 @@
+import { liveDanmakuInfo } from '../api/live.uts'
+import { LiveDanmakuInfo, LiveDanmakuHost, LiveMessage, LiveChatSeg } from '../models/live.uts'
+import { cookieDebug } from '../utils/cookie.uts'
+import { userState } from '../stores/user.uts'
+import { objOf, strOf, numOf } from '../utils/json.uts'
+import { zlibInflate } from '../utils/zlib.uts'
+
+/**
+ * 直播弹幕长连接（B 站直播间 websocket 协议 + zlib 解压 + 消息解析）。
+ *
+ * 源头：
+ *  - 连接/心跳：`lib/plugin/pl_socket/index.dart`（16 字节包头，op=2 心跳 30s、op=7 认证）
+ *  - 解包/解析：`lib/utils/live.dart`（operation 3/5、protover 2=zlib、cmd 白名单）
+ *
+ * 与源的差异（均已登记 设计_直播域 §五）：
+ *  1. protover 取 2（zlib）：uts 无 brotli 解压实现（R4），源为 3；服务端同时接受 v2。
+ *  2. 连接信息 getDanmuInfo 失败时由 api 层回退 `room/v1/Danmu/getConf`（同用途官方接口）。
+ *  3. 单条消息解析异常只丢该条，不断链路；连续解压失败达阈值才判链路不可用（D-1 降级）。
+ *
+ * 使用（页面持有一个实例）：
+ *   const client = new LiveSocketClient()
+ *   client.onMessage = (msg: LiveMessage) => { ... }
+ *   client.onState = (state: string) => { ... }   // connecting / open / failed
+ *   client.start(roomId)                          // 进房
+ *   client.stop()                                 // 退房（onUnload 必调）
+ */
+
+/** 心跳间隔（秒） */
+const HEARTBEAT_SEC: number = 30
+/** 断线重连次数上限（设计 §六：重连一次） */
+const MAX_RECONNECT: number = 1
+/** 重连延迟（毫秒） */
+const RECONNECT_DELAY: number = 3000
+/** 连续解压失败达该次数即判链路不可用 */
+const INFLATE_FAIL_LIMIT: number = 30
+/** host_list 为空时的兜底弹幕服务器（源 lib/utils/live.dart 同款） */
+const FALLBACK_HOST: string = 'broadcastlv.chat.bilibili.com'
+const FALLBACK_PORT: number = 443
+
+
+// ================================================================ 报文构造
+
+/** 包头写出（16 字节，全部小端）：包长 / 头长 16 / 协议版本 / 操作类型 / 序列 1 */
+function writeHeader(bytes: Uint8Array, bodyLen: number, protover: number, operation: number) {
+	const total = 16 + bodyLen
+	bytes[0] = total % 256
+	bytes[1] = Math.floor(total / 256) % 256
+	bytes[2] = Math.floor(total / 65536) % 256
+	bytes[3] = Math.floor(total / 16777216) % 256
+	bytes[4] = 16
+	bytes[5] = 0
+	bytes[6] = protover % 256
+	bytes[7] = Math.floor(protover / 256) % 256
+	bytes[8] = operation % 256
+	bytes[9] = Math.floor(operation / 256) % 256
+	bytes[10] = Math.floor(operation / 65536) % 256
+	bytes[11] = Math.floor(operation / 16777216) % 256
+	bytes[12] = 1
+	bytes[13] = 0
+	bytes[14] = 0
+	bytes[15] = 0
+}
+
+/**
+ * UTF-8 编码（string → 字节数组）：encodeURIComponent 把非 ASCII 展开成逐字节 %XX，
+ * ASCII 可打印字符原样保留——逐字符还原即 UTF-8 字节序列，纯字符串 API、无平台依赖。
+ */
+function utf8Encode(text: string): number[] {
+	const out: number[] = []
+	const encoded = encodeURIComponent(text)
+	let i = 0
+	while (i < encoded.length) {
+		const ch = encoded.charAt(i)
+		if (ch == '%') {
+			out.push(parseInt(encoded.substring(i + 1, i + 3), 16))
+			i += 3
+		} else {
+			out.push(ch.charCodeAt(0))
+			i += 1
+		}
+	}
+	return out
+}
+
+/** 构造一帧（ArrayBuffer）：16 字节头 + 明文 JSON 体 */
+function buildPacket(operation: number, protover: number, body: string): ArrayBuffer {
+	const bodyBytes = body.length == 0 ? ([] as number[]) : utf8Encode(body)
+	const bytes = new Uint8Array(16 + bodyBytes.length)
+	writeHeader(bytes, bodyBytes.length, protover, operation)
+	for (let i = 0; i < bodyBytes.length; i++) {
+		bytes[16 + i] = bodyBytes[i]
+	}
+	return bytes.buffer
+}
+
+// ================================================================ 客户端
+
+export class LiveSocketClient {
+	/** 收到一条已解析消息（chat / join / follow / online / superChat） */
+	onMessage: ((msg: LiveMessage) => void) | null = null
+	/** 连接状态变化：connecting / open / failed */
+	onState: ((state: string) => void) | null = null
+
+	private roomId: number = 0
+	private task: SocketTask | null = null
+	private heartbeatTimer: number = -1
+	private reconnectTimer: number = -1
+	private reconnectCount: number = 0
+	/** 主动关闭中（不触发重连） */
+	private closing: boolean = false
+	private state: string = 'idle'
+	private token: string = ''
+	private inflateFailCount: number = 0
+	private decoder: TextDecoder | null = null
+	private closedByUser: boolean = false
+
+	/** 当前连接状态 */
+	currentState(): string {
+		return this.state
+	}
+
+	/** 进房：拉连接信息 → 建链 → 认证 */
+	async start(roomId: number): Promise<void> {
+		if (roomId <= 0) {
+			return
+		}
+		this.stop()
+		this.roomId = roomId
+		this.closedByUser = false
+		this.reconnectCount = 0
+		this.inflateFailCount = 0
+		await this.openChannel()
+	}
+
+	/**
+	 * 取连接信息并建链（start 与重连共用）。
+	 * 注意：重连**不能**走 start——start 会清零 reconnectCount，导致断线重连无限循环
+	 * （真机实测：每 4s 重连一次，永不进 failed 态）。
+	 */
+	private async openChannel(): Promise<void> {
+		if (this.roomId <= 0 || this.closedByUser) {
+			return
+		}
+		this.setState('connecting')
+		const res = await liveDanmakuInfo(this.roomId)
+		if (this.closedByUser) {
+			return
+		}
+		if (res.status && res.data != null) {
+			this.openSocket(res.data)
+			return
+		}
+		// 连接信息两路都失败：仍按 D-1 明确失败态呈现（不假装连接中）
+		console.log('[live-socket] danmuInfo unavailable: ' + res.message)
+		this.markFailed('info')
+	}
+
+	/** 退房：断开并停心跳（页面 onUnload 必调） */
+	stop(): void {
+		this.closedByUser = true
+		this.closing = true
+		this.teardown()
+		this.closing = false
+		this.state = 'idle'
+		this.roomId = 0
+	}
+
+	private setState(value: string) {
+		this.state = value
+		const cb = this.onState
+		if (cb != null) {
+			cb(value)
+		}
+	}
+
+	private buvidOfCookie(): string {
+		const jar = cookieDebug('bilibili.com')
+		if (jar.length == 0) {
+			return ''
+		}
+		const parts = jar.split(';')
+		for (let i = 0; i < parts.length; i++) {
+			const part = parts[i].trim()
+			const eq = part.indexOf('=')
+			if (eq <= 0) {
+				continue
+			}
+			if (part.substring(0, eq).trim() == 'buvid3') {
+				return part.substring(eq + 1).trim()
+			}
+		}
+		return ''
+	}
+
+	private openSocket(info: LiveDanmakuInfo) {
+		this.token = info.token
+		let host = FALLBACK_HOST
+		let port = FALLBACK_PORT
+		if (info.hostList.length > 0) {
+			const first = info.hostList[0]
+			if (first.host.length > 0) {
+				host = first.host
+			}
+			if (first.wssPort > 0) {
+				port = first.wssPort
+			}
+		}
+		const url = 'wss://' + host + ':' + port.toString() + '/sub'
+		console.log('[live-socket] connect ' + url)
+		const task = uni.connectSocket({
+			url: url,
+			fail: (err) => {
+				console.log('[live-socket] connect fail: ' + err.errMsg)
+				this.onLinkBroken('connect')
+			}
+		})
+		if (task == null) {
+			this.onLinkBroken('connect-null')
+			return
+		}
+		this.task = task
+		task.onOpen((result) => {
+			this.sendAuth()
+		})
+		task.onError((err) => {
+			console.log('[live-socket] error: ' + err.errMsg)
+			this.onLinkBroken('error')
+		})
+		task.onClose((result) => {
+			if (!this.closing) {
+				this.onLinkBroken('close')
+			}
+		})
+		task.onMessage((result) => {
+			this.handleSocketData(result.data)
+		})
+	}
+
+	private sendAuth() {
+		const task = this.task
+		if (task == null) {
+			return
+		}
+		const body: UTSJSONObject = {}
+		body.set('uid', userState.isLogin ? userState.info.mid : 0)
+		body.set('roomid', this.roomId)
+		// protover 2 = zlib（源为 3=brotli，uts 无 brotli 实现，R4 已登记）
+		body.set('protover', 2)
+		body.set('buvid', this.buvidOfCookie())
+		body.set('platform', 'web')
+		body.set('type', 2)
+		body.set('key', this.token)
+		task.send({
+			data: buildPacket(7, 1, JSON.stringify(body)),
+			fail: (err) => {
+				console.log('[live-socket] auth send fail: ' + err.errMsg)
+				this.markFailed('auth-send')
+			}
+		})
+	}
+
+	private startHeartbeat() {
+		this.clearHeartbeat()
+		this.heartbeatTimer = setInterval(() => {
+			const task = this.task
+			if (task == null) {
+				return
+			}
+			task.send({
+				data: buildPacket(2, 1, ''),
+				fail: (err) => {
+					console.log('[live-socket] heartbeat fail: ' + err.errMsg)
+				}
+			})
+		}, HEARTBEAT_SEC * 1000)
+	}
+
+	private clearHeartbeat() {
+		if (this.heartbeatTimer >= 0) {
+			clearInterval(this.heartbeatTimer)
+			this.heartbeatTimer = -1
+		}
+	}
+
+	private clearReconnectTimer() {
+		if (this.reconnectTimer >= 0) {
+			clearTimeout(this.reconnectTimer)
+			this.reconnectTimer = -1
+		}
+	}
+
+	private teardown() {
+		this.clearHeartbeat()
+		this.clearReconnectTimer()
+		const task = this.task
+		this.task = null
+		if (task != null) {
+			try {
+				task.close({ code: 1000 })
+			} catch (e) {
+				console.log('[live-socket] close exception')
+			}
+		}
+	}
+
+	private markFailed(reason: string) {
+		this.teardown()
+		console.log('[live-socket] link failed: ' + reason)
+		this.setState('failed')
+	}
+
+	/** 断线处理：重连一次，再断按 D-1 降级 */
+	private onLinkBroken(reason: string) {
+		const task = this.task
+		this.task = null
+		this.clearHeartbeat()
+		if (task != null) {
+			try {
+				task.close({ code: 1000 })
+			} catch (e) {
+				console.log('[live-socket] re-close exception')
+			}
+		}
+		if (this.closing || this.closedByUser) {
+			return
+		}
+		if (this.reconnectCount < MAX_RECONNECT) {
+			this.reconnectCount = this.reconnectCount + 1
+			console.log('[live-socket] broken(' + reason + '), reconnect ' + this.reconnectCount.toString())
+			this.clearReconnectTimer()
+			this.reconnectTimer = setTimeout(() => {
+				this.reconnectTimer = -1
+				this.openChannel()
+			}, RECONNECT_DELAY)
+			return
+		}
+		this.markFailed(reason)
+	}
+
+	/** 收包入口：二进制帧切包 → 按 operation 分发；非二进制帧丢弃（服务端不发文本帧） */
+	private handleSocketData(raw: any | null) {
+		if (raw == null) {
+			return
+		}
+		if (!(raw instanceof ArrayBuffer)) {
+			console.log('[live-socket] non-binary frame dropped')
+			return
+		}
+		const bytes = new Uint8Array(raw as ArrayBuffer)
+		let offset = 0
+		while (offset + 16 <= bytes.length) {
+			const packetLen = bytes[offset] + bytes[offset + 1] * 256 + bytes[offset + 2] * 65536 + bytes[offset + 3] * 16777216
+			if (packetLen < 16 || offset + packetLen > bytes.length) {
+				console.log('[live-socket] bad packet len=' + packetLen.toString())
+				break
+			}
+			const headerLen = bytes[offset + 4] + bytes[offset + 5] * 256
+			const protover = bytes[offset + 6] + bytes[offset + 7] * 256
+			const operation = bytes[offset + 8] + bytes[offset + 9] * 256 + bytes[offset + 10] * 65536 + bytes[offset + 11] * 16777216
+			const bodyStart = offset + headerLen
+			const bodyEnd = offset + packetLen
+			if (operation == 8) {
+				// 认证回执：链路正式可用
+				if (this.state != 'open') {
+					this.setState('open')
+					console.log('[live-socket] auth ok room=' + this.roomId.toString())
+				}
+				this.startHeartbeat()
+			} else if (operation == 3) {
+				if (bodyEnd - bodyStart >= 4) {
+					const online = bytes[bodyStart] * 16777216 + bytes[bodyStart + 1] * 65536 + bytes[bodyStart + 2] * 256 + bytes[bodyStart + 3]
+					const msg = new LiveMessage()
+					msg.type = 'online'
+					msg.message = online.toString()
+					this.emit(msg)
+				}
+			} else if (operation == 5) {
+				this.handleNotice(bytes, bodyStart, bodyEnd, protover)
+			}
+			offset = offset + packetLen
+		}
+	}
+
+	/** op=5 通知：按 protover 解压/解码 → 控制字符切段 → 逐段按 cmd 白名单分发 */
+	private handleNotice(bytes: Uint8Array, start: number, end: number, protover: number) {
+		let text = ''
+		if (protover == 2) {
+			const inflated = zlibInflate(bytes, start, end)
+			if (inflated == null) {
+				this.inflateFailCount = this.inflateFailCount + 1
+				console.log('[live-socket] zlib inflate fail #' + this.inflateFailCount.toString())
+				if (this.inflateFailCount >= INFLATE_FAIL_LIMIT) {
+					this.markFailed('inflate')
+				}
+				return
+			}
+			this.inflateFailCount = 0
+			text = this.decodeUtf8(inflated)
+		} else if (protover == 3) {
+			// brotli：uts 无解压实现（R4）；protover 已协商为 2，理论不出现，出现即按失败累计
+			this.inflateFailCount = this.inflateFailCount + 1
+			if (this.inflateFailCount >= INFLATE_FAIL_LIMIT) {
+				this.markFailed('brotli')
+			}
+			return
+		} else if (protover == 0 || protover == 1) {
+			text = this.decodeUtf8Slice(bytes, start, end)
+		} else {
+			return
+		}
+		if (text.length == 0) {
+			return
+		}
+		const parts = text.split('\u0000')
+		for (let i = 0; i < parts.length; i++) {
+			const part = parts[i]
+			if (part.length < 3) {
+				continue
+			}
+			try {
+				const obj = JSON.parse<UTSJSONObject>(part)
+				if (obj == null) {
+					continue
+				}
+				this.dispatchByCmd(obj)
+			} catch (e) {
+				// 非法段跳过：不因单段脏数据断链路
+			}
+		}
+	}
+
+	private decodeUtf8(bytes: Uint8Array): string {
+		if (this.decoder == null) {
+			this.decoder = new TextDecoder()
+		}
+		try {
+			return this.decoder.decode(bytes)
+		} catch (e) {
+			console.log('[live-socket] utf8 decode fail')
+			return ''
+		}
+	}
+
+	private decodeUtf8Slice(bytes: Uint8Array, start: number, end: number): string {
+		const view = new Uint8Array(end - start)
+		for (let i = 0; i < view.length; i++) {
+			view[i] = bytes[start + i]
+		}
+		return this.decodeUtf8(view)
+	}
+
+	private emit(msg: LiveMessage) {
+		const cb = this.onMessage
+		if (cb != null) {
+			cb(msg)
+		}
+	}
+
+	/** cmd 白名单（设计_直播域 §五）：DANMU_MSG / INTERACT_WORD / SUPER_CHAT_MESSAGE，其余丢弃 */
+	private dispatchByCmd(obj: UTSJSONObject) {
+		const cmd = obj.getString('cmd')
+		if (cmd == null) {
+			return
+		}
+		if (cmd == 'DANMU_MSG' || cmd.startsWith('DANMU_MSG:')) {
+			const msg = this.parseDanmu(obj)
+			if (msg != null) {
+				this.emit(msg)
+			}
+			return
+		}
+		if (cmd == 'INTERACT_WORD') {
+			const msg = this.parseInteract(obj)
+			if (msg != null) {
+				this.emit(msg)
+			}
+			return
+		}
+		if (cmd == 'SUPER_CHAT_MESSAGE') {
+			const msg = this.parseSuperChat(obj)
+			if (msg != null) {
+				this.emit(msg)
+			}
+		}
+	}
+
+	/** DANMU_MSG：info[1] 文本 / info[0][3] 颜色 / info[2][0] uid / info[0][15] 昵称+头像+emots */
+	private parseDanmu(obj: UTSJSONObject): LiveMessage | null {
+		const info = obj.getArray('info')
+		if (info == null || info.length < 3) {
+			return null
+		}
+		const textAny = info[1]
+		if (textAny == null || typeof textAny != 'string') {
+			return null
+		}
+		const text = textAny as string
+		if (text.length == 0) {
+			return null
+		}
+		const msg = new LiveMessage()
+		msg.type = 'chat'
+		msg.message = text
+		const metaAny = info[0]
+		if (metaAny != null && typeof metaAny == 'object') {
+			const meta = metaAny as Array<any>
+			if (meta.length > 3) {
+				const colorAny = meta[3]
+				if (colorAny != null && typeof colorAny == 'number') {
+					const decimal = colorAny as number
+					if (decimal > 0) {
+						msg.colorDecimal = decimal
+						msg.colorR = Math.floor(decimal / 65536) % 256
+						msg.colorG = Math.floor(decimal / 256) % 256
+						msg.colorB = decimal % 256
+					}
+				}
+			}
+			if (meta.length > 15) {
+				const meta15Any = meta[15]
+				if (meta15Any != null && typeof meta15Any == 'object') {
+					const meta15 = meta15Any as UTSJSONObject
+					const user = objOf(meta15, 'user')
+					if (user != null) {
+						const base = objOf(user, 'base')
+						if (base != null) {
+							msg.userName = strOf(base, 'name')
+							msg.face = strOf(base, 'face')
+						}
+					}
+					msg.segments = this.segmentsOf(text, meta15)
+				}
+			}
+		}
+		const uidAny = info[2]
+		if (uidAny != null && typeof uidAny == 'object') {
+			const uidList = uidAny as Array<any>
+			if (uidList.length > 0) {
+				const uid = uidList[0]
+				if (uid != null && typeof uid == 'number') {
+					msg.uid = uid as number
+				}
+			}
+		}
+		if (msg.segments.length == 0) {
+			const seg = new LiveChatSeg()
+			seg.kind = 'text'
+			seg.text = text
+			msg.segments.push(seg)
+		}
+		return msg
+	}
+
+	/** INTERACT_WORD：data.uname + data.msg_type（1=进入直播间，其余=关注了主播） */
+	private parseInteract(obj: UTSJSONObject): LiveMessage | null {
+		const data = objOf(obj, 'data')
+		if (data == null) {
+			return null
+		}
+		const msg = new LiveMessage()
+		const msgType = numOf(data, 'msg_type')
+		msg.type = msgType == 1 ? 'join' : 'follow'
+		msg.userName = strOf(data, 'uname')
+		msg.message = msgType == 1 ? '进入直播间' : '关注了主播'
+		return msg
+	}
+
+	/** SUPER_CHAT_MESSAGE：源只解析不消费 UI（无展示落点），这里同样只产消息、页面忽略 */
+	private parseSuperChat(obj: UTSJSONObject): LiveMessage | null {
+		const data = objOf(obj, 'data')
+		if (data == null) {
+			return null
+		}
+		const msg = new LiveMessage()
+		msg.type = 'superChat'
+		msg.message = strOf(data, 'message')
+		const userInfo = objOf(data, 'user_info')
+		if (userInfo != null) {
+			msg.userName = strOf(userInfo, 'uname')
+			msg.face = strOf(userInfo, 'face')
+		}
+		return msg
+	}
+
+	/**
+	 * 文本按 emots 表切段（源 buildMessageTextSpan 同款）：
+	 * emots 在 info[0][15].extra（JSON 字符串）里，key 是文本中的占位符（如 [dog]），value 带 url/width/height。
+	 * UTSJSONObject 不能当 Map 遍历（规范 §一），这里 JSON 往返成 Map 再取 key；
+	 * 解析失败即按纯文本渲染（不丢消息）。
+	 */
+	private segmentsOf(text: string, meta15: UTSJSONObject): Array<LiveChatSeg> {
+		const segs: Array<LiveChatSeg> = []
+		const extraText = strOf(meta15, 'extra')
+		if (extraText.length == 0) {
+			return segs
+		}
+		let emoteMap: Map<string, UTSJSONObject> | null = null
+		try {
+			const extra = JSON.parse<UTSJSONObject>(extraText)
+			if (extra == null) {
+				return segs
+			}
+			const emots = objOf(extra, 'emots')
+			if (emots == null) {
+				return segs
+			}
+			emoteMap = JSON.parse<Map<string, UTSJSONObject>>(JSON.stringify(emots))
+		} catch (e) {
+			console.log('[live-socket] emots parse fail')
+			return segs
+		}
+		if (emoteMap == null) {
+			return segs
+		}
+		const keys: Array<string> = []
+		const values: Array<UTSJSONObject> = []
+		emoteMap.forEach((value: UTSJSONObject, key: string) => {
+			if (key.length > 0) {
+				keys.push(key)
+				values.push(value)
+			}
+		})
+		if (keys.length == 0) {
+			return segs
+		}
+		let cursor = 0
+		while (cursor < text.length) {
+			let hitIndex = -1
+			let hitKeyIndex = -1
+			for (let k = 0; k < keys.length; k++) {
+				const idx = text.indexOf(keys[k], cursor)
+				if (idx < 0) {
+					continue
+				}
+				if (hitIndex < 0 || idx < hitIndex) {
+					hitIndex = idx
+					hitKeyIndex = k
+				}
+			}
+			if (hitIndex < 0 || hitKeyIndex < 0) {
+				break
+			}
+			if (hitIndex > cursor) {
+				const textSeg = new LiveChatSeg()
+				textSeg.kind = 'text'
+				textSeg.text = text.substring(cursor, hitIndex)
+				segs.push(textSeg)
+			}
+			const emoteObj = values[hitKeyIndex]
+			const emote = new LiveChatSeg()
+			emote.kind = 'emote'
+			emote.url = strOf(emoteObj, 'url')
+			emote.width = numOf(emoteObj, 'width')
+			emote.height = numOf(emoteObj, 'height')
+			if (emote.url.length > 0) {
+				segs.push(emote)
+			} else {
+				const fallback = new LiveChatSeg()
+				fallback.kind = 'text'
+				fallback.text = keys[hitKeyIndex]
+				segs.push(fallback)
+			}
+			cursor = hitIndex + keys[hitKeyIndex].length
+		}
+		if (cursor < text.length) {
+			const tail = new LiveChatSeg()
+			tail.kind = 'text'
+			tail.text = text.substring(cursor)
+			segs.push(tail)
+		}
+		return segs
+	}
+}

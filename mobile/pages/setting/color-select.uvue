@@ -1,0 +1,111 @@
+<template>
+	<view class="cs" :style="pageStyle">
+		<app-navbar title="选择应用主题"></app-navbar>
+
+		<scroll-view class="cs-scroll" direction="vertical">
+			<!-- G3 动态取色不迁移：源 RadioListTile「动态取色/指定颜色」两档不渲染，
+			     直接呈现 19 色色板（theme.uts THEME_NAMES/COLORS 同源同序） -->
+			<view class="cs-grid">
+				<view
+					v-for="(name, index) in THEME_NAMES"
+					:key="index.toString()"
+					class="cs-cell"
+					@click="onPick(index)"
+				>
+					<view class="cs-dot" :style="dotStyle(index)">
+						<text v-if="currentIndex == index" class="cs-check">✓</text>
+					</view>
+					<text class="cs-name" :style="nameStyle(index)">{{ name }}</text>
+				</view>
+			</view>
+			<view class="cs-foot" :style="footStyle"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import { THEME_NAMES, THEME_COLORS, pageBackground, textPrimary, textSecondary, currentThemeIndex, setThemeIndex, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 应用主题选择（源头：lib/pages/setting/pages/color_select.dart）。
+ *
+ *  - 「动态取色」单选项不渲染（G3 拍板降级：品牌色 + 19 色手动选色）；
+ *  - 19 色 = theme.uts THEME_COLORS（源 colorThemeTypes 同序同色）；
+ *  - 选中写 SK.customColor（setThemeIndex，theme.uts 唯一写入口）；
+ *  - 即时生效范围：本页与重进的页面（token 读值口径，与 mine 页月亮按钮一致）。
+ */
+const currentIndex = ref<number>(currentThemeIndex())
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+
+const THEME_COLOR_LIST: string[] = THEME_COLORS
+
+function dotStyle(index: number): string {
+	// 选中描边 2px（源为黑色描边，新端取文字色描边——暗色态下黑色描边不可见）
+	return 'background-color:' + THEME_COLOR_LIST[index] + ';border-color:' + (currentIndex.value == index ? textPrimary() : 'transparent') + ';'
+}
+
+function nameStyle(index: number): string {
+	return 'color:' + (currentIndex.value == index ? textPrimary() : textSecondary()) + ';'
+}
+
+function onPick(index: number) {
+	currentIndex.value = index
+	setThemeIndex(index)
+	uni.showToast({ title: '主题已切换', icon: 'none' })
+}
+</script>
+
+<style>
+	.cs {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.cs-scroll {
+		flex: 1;
+	}
+	/* 色板网格：flex-wrap 四列流（源 Wrap 居中，新端等宽四列） */
+	.cs-grid {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 16px;
+	}
+	.cs-cell {
+		width: 25%;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		margin-bottom: 20px;
+	}
+	.cs-dot {
+		width: 46px;
+		height: 46px;
+		border-radius: 23px;
+		border-width: 2px;
+		border-style: solid;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.cs-check {
+		color: #FFFFFF;
+		font-size: 20px;
+		font-weight: bold;
+	}
+	.cs-name {
+		font-size: 12px;
+		margin-top: 6px;
+	}
+	.cs-foot {
+		height: 1px;
+	}
+</style>

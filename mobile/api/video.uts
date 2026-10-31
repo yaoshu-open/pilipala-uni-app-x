@@ -1,0 +1,324 @@
+import { apiGet, rawGet } from '../utils/request.uts'
+import { APP_BASE, APP_KEY } from '../utils/constants.uts'
+import { getAccessKeyValue } from '../utils/storage.uts'
+import { av2bv, parseCountText } from '../utils/id.uts'
+import { wbiGet } from '../utils/wbi.uts'
+import { Params } from '../utils/params.uts'
+import { getBool, getNumber, getNumberArray, SK } from '../utils/storage.uts'
+import { RecVideoItem, HotVideoItem, ListResult, Owner, RecStat } from '../models/video.uts'
+import { arrOf, objOf, strOf, numOf } from '../utils/json.uts'
+
+/**
+ * 首页域接口层（源头：lib/http/video.dart）。
+ * 返回结构与源一致：{status, items, message}，由页面按 status 决定渲染分支。
+ */
+
+/** 拉黑 UP 判定（源头 setting.blackMidsList，默认 [-1]）；详情域相关推荐复用同一条链 */
+export function isBlockedMid(mid: number): boolean {
+	const mids = getNumberArray(SK.blackMidsList, [-1] as number[])
+	for (let i = 0; i < mids.length; i++) {
+		if (mids[i] == mid) {
+			return true
+		}
+	}
+	return false
+}
+
+/**
+ * 推荐/相关推荐过滤（源头：lib/utils/recommend_filter.dart）。
+ *  - relatedVideos=true：按 applyFilterToRelatedVideos 开关决定是否过滤（源同款口径）；
+ *  - 相关推荐条目没有 isFollowed 字段，调用方按非关注视频传 0；
+ * 设置项默认值（时长 0 / 点赞比 0 / 已关注豁免 true / 相关推荐过滤开）下等价于全放行。
+ */
+export function shouldFilterVideo(duration: number, view: number, like: number, isFollowed: number,
+	relatedVideos: boolean): boolean {
+	if (relatedVideos && !getBool(SK.applyFilterToRelatedVideos, true)) {
+		return false
+	}
+	if (!relatedVideos && isFollowed == 1 && getBool(SK.exemptFilterForFollowed, true)) {
+		return false
+	}
+	const minDuration = getNumber(SK.minDurationForRcmd, 0)
+	const minLikeRatio = getNumber(SK.minLikeRatioForRecommend, 0)
+	if (duration > 0 && duration < minDuration) {
+		return true
+	}
+	if (view > -1 && like > -1 && like * 100 < minLikeRatio * view) {
+		return true
+	}
+	return false
+}
+
+/** 推荐流（Web 版接口，源 rcmdVideoList） */
+async function fetchRcmdRaw(freshIdx: number, ps: number): Promise<ListResult<RecVideoItem>> {
+	const result = new ListResult<RecVideoItem>()
+	const params = new Params()
+	params.setNum('version', 1)
+	params.set('feed_version', 'V3')
+	params.setNum('homepage_ver', 1)
+	params.setNum('ps', ps)
+	params.setNum('fresh_idx', freshIdx)
+	params.setNum('brush', freshIdx)
+	params.setNum('fresh_type', 4)
+	const res = await apiGet('/x/web-interface/index/top/feed/rcmd', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		const message = res.getString('message')
+		result.message = message == null ? '请求异常' : message
+		return result
+	}
+	const data = objOf(res, 'data')
+	const list = data == null ? [] : arrOf(data, 'item')
+	for (let i = 0; i < list.length; i++) {
+		const raw = list[i]
+		const goto = strOf(raw, 'goto')
+		if (goto != 'av') {
+			continue
+		}
+		const ownerObj = objOf(raw, 'owner')
+		if (ownerObj == null) {
+			continue
+		}
+		if (isBlockedMid(numOf(ownerObj, 'mid'))) {
+			continue
+		}
+		const item = RecVideoItem.from(raw)
+		if (!shouldFilterVideo(item.duration, item.stat.view, item.stat.like, item.isFollowed, false)) {
+			result.items.push(item)
+		}
+	}
+	result.status = true
+	return result
+}
+
+/** 推荐流外部入口：解析异常一律落「失败结果」，避免页面停在加载态（失败不伪装成空列表） */
+export async function fetchRcmd(freshIdx: number, ps: number): Promise<ListResult<RecVideoItem>> {
+	try {
+		return await fetchRcmdRaw(freshIdx, ps)
+	} catch (e) {
+		console.log('[video] fetchRcmd error')
+		console.log(e)
+		const failed = new ListResult<RecVideoItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/**
+ * 推荐流（App 版接口，源 `VideoHttp.rcmdVideoListApp`，端点 app.bilibili.com/x/v2/feed/index）。
+ *
+ * 触发条件：SK.defaultRcmdType 为 'app'（带 access_key）或 'notLogin'（空 access_key）。
+ * 与 web 版的字段差异（源 `RecVideoItemAppModel` 同款口径）：
+ *  - 稿件身份只在 player_args 里（aid/cid/duration 秒），bvid 需 av2bv 换；
+ *  - 统计是「已格式化文案」（cover_left_text_1/2，"12.3万"），解析回数值；
+ *  - 无 pubdate 字段（卡片按「时间缺失不渲染」处理）；
+ *  - 关注态由推荐原因文案（已关注/新关注）反推，命中即隐藏推荐原因。
+ * 过滤口径与源一致：去广告卡（card_goto=ad_av）、关「推荐动态」时去图文卡（picture）、去拉黑 UP。
+ */
+async function fetchRcmdAppRaw(freshIdx: number, loginStatus: boolean): Promise<ListResult<RecVideoItem>> {
+	const result = new ListResult<RecVideoItem>()
+	const params = new Params()
+	params.setNum('idx', freshIdx)
+	params.set('flush', '5')
+	params.setNum('column', 4)
+	params.set('device', 'pad')
+	params.setNum('device_type', 0)
+	params.set('device_name', 'vivo')
+	params.set('pull', freshIdx == 0 ? 'true' : 'false')
+	params.set('appkey', APP_KEY)
+	params.set('access_key', loginStatus ? getAccessKeyValue() : '')
+	const res = await rawGet(APP_BASE + '/x/v2/feed/index?' + params.toQuery())
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		const message = res.getString('message')
+		result.message = message == null || message.length == 0 ? '请求异常' : message
+		return result
+	}
+	const data = objOf(res, 'data')
+	const list = data == null ? [] : arrOf(data, 'items')
+	const enableDynamic = getBool(SK.enableRcmdDynamic, true)
+	for (let i = 0; i < list.length; i++) {
+		const raw = list[i]
+		const cardGoto = strOf(raw, 'card_goto')
+		if (cardGoto == 'ad_av') {
+			continue
+		}
+		if (!enableDynamic && cardGoto == 'picture') {
+			continue
+		}
+		const argsObj = objOf(raw, 'args')
+		const upMid = argsObj == null ? -1 : numOf(argsObj, 'up_mid')
+		if (isBlockedMid(upMid)) {
+			continue
+		}
+		const playerArgs = objOf(raw, 'player_args')
+		if (playerArgs == null) {
+			// 无 player_args 的卡片打不开详情（非稿件卡），源也只在稿件卡上建模型
+			continue
+		}
+		const aid = numOf(playerArgs, 'aid')
+		const bvid = av2bv(aid)
+		if (bvid.length == 0) {
+			continue
+		}
+		const item = new RecVideoItem()
+		item.id = aid
+		item.bvid = bvid
+		item.cid = numOf(playerArgs, 'cid')
+		item.goto = 'av'
+		item.pic = strOf(raw, 'cover')
+		item.title = strOf(raw, 'title')
+		item.duration = numOf(playerArgs, 'duration')
+		item.pubdate = 0
+		item.owner = new Owner()
+		item.owner.mid = upMid
+		item.owner.name = argsObj == null ? '' : strOf(argsObj, 'up_name')
+		item.stat = new RecStat()
+		item.stat.view = parseCountText(strOf(raw, 'cover_left_text_1'))
+		item.stat.danmu = parseCountText(strOf(raw, 'cover_left_text_2'))
+		item.stat.like = -1
+		let reason = strOf(raw, 'bottom_rcmd_reason')
+		if (reason.length == 0) {
+			reason = strOf(raw, 'top_rcmd_reason')
+		}
+		if (reason.indexOf('已关注') >= 0 || reason.indexOf('新关注') >= 0) {
+			item.isFollowed = 1
+			item.rcmdReason = ''
+		} else {
+			item.isFollowed = 0
+			item.rcmdReason = reason
+		}
+		if (shouldFilterVideo(item.duration, item.stat.view, item.stat.like, item.isFollowed, false)) {
+			continue
+		}
+		result.items.push(item)
+	}
+	result.status = true
+	return result
+}
+
+/** App 版推荐流外部入口：失败出口同 web 版（不伪装成空列表） */
+export async function fetchRcmdApp(freshIdx: number, loginStatus: boolean): Promise<ListResult<RecVideoItem>> {
+	try {
+		return await fetchRcmdAppRaw(freshIdx, loginStatus)
+	} catch (e) {
+		console.log('[video] fetchRcmdApp error')
+		console.log(e)
+		const failed = new ListResult<RecVideoItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 热门（源 hotVideoList） */
+async function fetchHotRaw(pn: number, ps: number): Promise<ListResult<HotVideoItem>> {
+	const result = new ListResult<HotVideoItem>()
+	const params = new Params()
+	params.setNum('pn', pn)
+	params.setNum('ps', ps)
+	const res = await apiGet('/x/web-interface/popular', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		const message = res.getString('message')
+		result.message = message == null ? '请求异常' : message
+		return result
+	}
+	const data = objOf(res, 'data')
+	const list = data == null ? [] : arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		const raw = list[i]
+		const ownerObj = objOf(raw, 'owner')
+		if (ownerObj != null && isBlockedMid(numOf(ownerObj, 'mid'))) {
+			continue
+		}
+		result.items.push(HotVideoItem.from(raw))
+	}
+	result.status = true
+	return result
+}
+
+/** 热门外部入口：失败出口同推荐流 */
+export async function fetchHot(pn: number, ps: number): Promise<ListResult<HotVideoItem>> {
+	try {
+		return await fetchHotRaw(pn, ps)
+	} catch (e) {
+		console.log('[video] fetchHot error')
+		console.log(e)
+		const failed = new ListResult<HotVideoItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 排行榜（源 getRankVideoList；单次返回整榜，不做追加） */
+async function fetchRankRaw(rid: number): Promise<ListResult<HotVideoItem>> {
+	const result = new ListResult<HotVideoItem>()
+	const params = new Params()
+	params.setNum('rid', rid)
+	params.set('type', 'all')
+	const res = await apiGet('/x/web-interface/ranking/v2', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		const message = res.getString('message')
+		result.message = message == null ? '请求异常' : message
+		return result
+	}
+	const data = objOf(res, 'data')
+	const list = data == null ? [] : arrOf(data, 'list')
+	for (let i = 0; i < list.length; i++) {
+		const raw = list[i]
+		const ownerObj = objOf(raw, 'owner')
+		if (ownerObj != null && isBlockedMid(numOf(ownerObj, 'mid'))) {
+			continue
+		}
+		result.items.push(HotVideoItem.from(raw))
+	}
+	result.status = true
+	return result
+}
+
+/** 排行榜外部入口：失败出口同上 */
+export async function fetchRank(rid: number): Promise<ListResult<HotVideoItem>> {
+	try {
+		return await fetchRankRaw(rid)
+	} catch (e) {
+		console.log('[video] fetchRank error')
+		console.log(e)
+		const failed = new ListResult<HotVideoItem>()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+/** 默认搜索词（源 Api.searchDefault，需 WBI 签名） */
+export async function fetchDefaultSearch(): Promise<string> {
+	const res = await wbiGet('/x/web-interface/wbi/search/default', new Params())
+	if (res == null) {
+		return ''
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		return ''
+	}
+	const data = objOf(res, 'data')
+	if (data == null) {
+		return ''
+	}
+	return strOf(data, 'name')
+}

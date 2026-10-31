@@ -1,0 +1,1018 @@
+<template>
+	<view class="lr">
+		<!-- 房间背景图（源：Positioned bottom 铺满 + Opacity 0.6；缺省用房间封面兜底） -->
+		<view class="lr-bg">
+			<network-img v-if="bgImage.length > 0" class="lr-bg-img" :src="bgImage" width="100%" height="100%"></network-img>
+		</view>
+
+		<!-- 顶部占位：状态栏 +（非竖屏直播间再加 56 顶栏高），源 view.dart Column 首个 SizedBox 同款 -->
+		<view class="lr-topgap" :style="topGapStyle"></view>
+
+		<!-- 播放器区（高度三分支见 playerStyle；圆角 6 裁切，源 Container 同款） -->
+		<view class="lr-player" :style="playerStyle">
+			<video
+				id="lr-video"
+				class="lr-video"
+				:src="playSrc"
+				:controls="false"
+				:autoplay="true"
+				:header="headerObj"
+				:show-loading="true"
+				:show-center-play-btn="false"
+				:show-play-btn="false"
+				:show-fullscreen-btn="false"
+				:show-progress="false"
+				:is-live="true"
+				object-fit="contain"
+				@loadedmetadata="onLoadedMetadata"
+				@play="onPlay"
+				@canplay="onCanPlay"
+				@waiting="onVideoWaiting"
+				@pause="onVideoPause"
+				@error="onVideoError"
+				@fullscreenchange="onFullscreenChange"
+			></video>
+
+			<!-- 起播前封面（keyframe 优先，query cover 兜底） -->
+			<view class="lr-cover" :style="coverLayerStyle">
+				<network-img :src="coverSrc" width="100%" height="100%"></network-img>
+				<view class="lr-cover-mask"></view>
+				<view class="lr-cover-hint">
+					<text class="lr-cover-hint-text">{{ playSrc.length == 0 ? '正在获取直播流…' : '正在缓冲…' }}</text>
+				</view>
+			</view>
+
+			<!-- 播放器弹幕层（复用 P4：直播走 pushLocal 即时上屏，pull-segments=false 不打视频弹幕接口） -->
+			<danmaku-layer
+				class="lr-dm"
+				:cid="roomId"
+				:playing="true"
+				:progress-ms="dmClock"
+				:enabled="danmakuOn"
+				:pull-segments="false"
+				:show-area="0.6"
+				:font-scale="1.0"
+			></danmaku-layer>
+
+			<!-- 拉流失败：明确文案 + 重试（不静默黑屏） -->
+			<view class="lr-error" :style="errorLayerStyle">
+				<text class="lr-error-text">{{ errorText }}</text>
+				<view class="lr-error-retry" @click="reloadPlay">
+					<text class="lr-error-retry-text">点击重试</text>
+				</view>
+			</view>
+
+			<!-- 播放器控制条：刷新 / 画质 / 全屏（源 bottom_control.dart；PiP 按钮 D4 后置不渲染） -->
+			<live-bottom-control
+				v-if="playerReady"
+				class="lr-ctrl"
+				:qn-desc="qnDesc"
+				:qn-list="qnList"
+				:current-qn="currentQn"
+				@refresh="reloadPlay"
+				@quality="changeQn"
+				@fullscreen="enterFullscreen"
+			></live-bottom-control>
+		</view>
+
+		<!-- 顶栏（源 AppBar：透明底、白字，返回 + 头像 34 + 昵称 14 / 观看数 12） -->
+		<view class="lr-top" :style="topBarStyle">
+			<view class="lr-back" @click="exitPage">
+				<text class="lr-back-icon" :style="backIconStyle">{{ backGlyph }}</text>
+			</view>
+			<view class="lr-anchor" :style="anchorSkeletonStyle">
+				<view class="lr-anchor-skeleton-face"></view>
+				<view class="lr-anchor-skeleton-text">
+					<view class="lr-sk-line lr-sk-name"></view>
+					<view class="lr-sk-line lr-sk-sub"></view>
+				</view>
+			</view>
+			<view class="lr-anchor" :style="anchorInfoStyle">
+				<view class="lr-anchor-face">
+					<network-img :src="anchorFace" width="34px" height="34px" radius="17px"></network-img>
+				</view>
+				<view class="lr-anchor-text">
+					<text class="lr-name" :max-lines="1">{{ anchorName }}</text>
+					<view v-if="watchedText.length > 0" class="lr-watched-row">
+						<text class="lr-watched">{{ watchedText }}</text>
+					</view>
+				</view>
+			</view>
+		</view>
+
+		<!-- 聊天消息列表（源定位：top = 状态栏+56+(竖屏?屏宽:9/16 播放高)，bottom = 90+安全区） -->
+		<view class="lr-msgs" :style="msgBoxStyle">
+			<live-chat-list :messages="messages" :portrait="isPortrait"></live-chat-list>
+			<!-- 弹幕通道不可用（D-1 降级）：占位说明，播放/画质/顶栏不受影响 -->
+			<view class="lr-dm-tip" :style="dmTipStyle">
+				<text class="lr-dm-tip-text">弹幕服务连接失败</text>
+			</view>
+		</view>
+
+		<!-- 底部输入条（源：左右 14 / 上 4 / 下 安全区+20，灰 10% 底 + 白 10% 上边，圆角 20） -->
+		<view class="lr-inputbar" :style="inputBarStyle">
+			<view class="lr-input-inner">
+				<view class="lr-dm-toggle" @click="toggleDanmaku">
+					<text class="lr-dm-icon" :style="dmIconStyle">{{ danmakuGlyph }}</text>
+				</view>
+				<input
+					class="lr-input"
+					:value="draft"
+					placeholder="发送弹幕"
+					placeholder-style="color:rgba(255,255,255,0.6);font-size:13px;"
+					:maxlength="100"
+					confirm-type="send"
+					@input="onDraftInput"
+					@confirm="sendDanmaku"
+				></input>
+				<view class="lr-send" @click="sendDanmaku">
+					<text class="lr-send-icon" :style="sendIconStyle">{{ sendGlyph }}</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, onUnmounted } from 'vue'
+import { onLoad, onUnload, onBackPress } from '@dcloudio/uni-app'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import DanmakuLayer from '../../components/player/danmaku-layer.uvue'
+import LiveChatList from '../../components/live/live-chat-list.uvue'
+import LiveBottomControl from '../../components/live/live-bottom-control.uvue'
+import {
+	liveRoomInfo, liveRoomInfoH5, liveRoomEntry, sendLiveDanmaku,
+	pickLiveHlsUrl, qualityStateOf, defaultLiveQn, LiveQualityState, formatSummaryOf
+} from '../../api/live.uts'
+import { LivePlayResult, LiveH5Result, LiveMessage, liveQnDesc } from '../../models/live.uts'
+import { DanmakuItem } from '../../models/danmaku.uts'
+import { useDanmaku } from '../../composables/useDanmaku.uts'
+import { LiveSocketClient } from '../../composables/useLiveSocket.uts'
+import { statusBarHeight, safeAreaBottom } from '../../utils/safeArea.uts'
+import { UA_DESKTOP, REFERER } from '../../utils/constants.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+import { liveGlyphOf, liveIconStyle } from '../../utils/iconsLive.uts'
+import { getBool, SK } from '../../utils/storage.uts'
+
+/**
+ * 直播间（源头：`lib/pages/live_room/view.dart` + `controller.dart` + `widgets/bottom_control.dart`）。
+ *
+ * 结构（1:1 源码，逐层对应）：
+ *  ① 整页黑底 + 房间背景图（app_background，opacity 0.6，缺省房间封面兜底）铺满；
+ *  ② 顶部占位 = 状态栏 +（非竖屏直播间再加 56 顶栏高）；
+ *  ③ 播放器区高度三分支：竖屏直播间（is_portrait）= 屏高 − 状态栏；普通直播间 = 屏宽 × 9/16；
+ *     圆角 6 裁切；内含 video + 弹幕层 + 起播封面 + 错误态 + 控制条（刷新/画质/全屏）；
+ *  ④ 顶栏浮层：返回 + 主播头像 34 + 昵称 14 + watched_show.text_large 12（H5 信息独立加载，不阻塞播放）；
+ *  ⑤ 聊天消息列表：气泡行（昵称 60% 白 + 正文），自动滚底 + 上滑浮出「新消息」；
+ *  ⑥ 底部输入条：弹幕开关（subtitles 图标）+ 输入框 + 发送。
+ *
+ * 弹幕通道：`useLiveSocket`（websocket + zlib + cmd 白名单）。chat 消息同时进聊天列表与播放器弹幕层
+ * （复用 P4 `useDanmaku().pushLocal`，直播无进度轴，用本地时钟驱动弹幕层取用）。
+ * 通道不可用时按设计 §五 D-1 降级：聊天区显示「弹幕服务连接失败」，播放/画质/顶栏不受影响。
+ *
+ * 源码结构核对：直播间**没有**礼物/榜单/关注按钮（`lib/pages/live_room/` 全目录无 gift/rank/attention
+ * 的 UI 消费点，`joinRoomTip` 只写不读）——本页照实不新增这些界面。
+ *
+ * 差异（已登记 设计_直播域 §十一）：
+ *  - 拉流走 HLS（内置 video 约束，D3），延迟 2-4s；FLV 低延迟随插件后置；
+ *  - 全屏按钮调 video 原生全屏（自绘横屏全屏页需独立路由，本批页面清单只登记 /liveRoom）；
+ *  - PiP 按钮不渲染（D4）；列表顶部渐隐（源 ShaderMask）不做。
+ */
+const ROOM_TOOLBAR_HEIGHT: number = 56
+/** 消息列表下边距：源 bottom = 90 + 安全区 */
+const MSG_BOTTOM_BASE: number = 90
+/** 聊天列表上限（超出丢最旧，防长时挂机内存膨胀） */
+const MAX_MESSAGES: number = 200
+/** 弹幕层取用节拍（毫秒）：直播无进度轴，用本地时钟喂 danmaku-layer 的 progressMs */
+const DM_CLOCK_STEP: number = 200
+
+const roomId = ref<number>(0)
+const playSrc = ref<string>('')
+const coverSrc = ref<string>('')
+const bgImage = ref<string>('')
+const errorText = ref<string>('')
+const coverShown = ref<boolean>(false)
+const playerReady = ref<boolean>(false)
+
+const anchorLoaded = ref<boolean>(false)
+const anchorName = ref<string>('')
+const anchorFace = ref<string>('')
+const watchedText = ref<string>('')
+
+const isPortrait = ref<boolean>(false)
+const playing = ref<boolean>(false)
+const currentQn = ref<number>(0)
+const qnList = ref<Array<number>>([])
+
+const danmakuOn = ref<boolean>(true)
+const dmClock = ref<number>(0)
+const dmState = ref<string>('connecting')
+const messages = ref<Array<LiveMessage>>([])
+const draft = ref<string>('')
+const sending = ref<boolean>(false)
+
+let playLoading = false
+let exited = false
+let dmTimer: number = -1
+/** 画质切换目标（-1 = 非切换触发的重拉）；用于「current_qn 未变 → 切换失败」判定 */
+let requestedQn: number = -1
+let tempQn: number = 0
+
+const danmaku = useDanmaku()
+const socket = new LiveSocketClient()
+
+const backGlyph = glyphOf('arrow-back')
+const backIconStyle = iconStyle('arrow-back', 22, '#FFFFFF')
+const sendGlyph = liveGlyphOf('send')
+const sendIconStyle = liveIconStyle('send', 20, '#FFFFFF')
+
+const statusBar = statusBarHeight()
+const safeBottom = safeAreaBottom()
+
+const windowWidth = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowWidth
+	} catch (e) {
+		return 390
+	}
+})()
+
+const windowHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowHeight
+	} catch (e) {
+		return 844
+	}
+})()
+
+const enableCdn = getBool(SK.enableCDN, true)
+/** 起播看门狗：直播流偶发静默不启动（无 play/error 事件，真机实测），超时换线路重试一次 */
+const PLAY_START_TIMEOUT = 10000
+let cdnPrefer = enableCdn
+let startupRetried = false
+let playWatchdog = -1
+
+const qnDesc = computed((): string => {
+	return liveQnDesc(currentQn.value)
+})
+
+const danmakuGlyph = computed((): string => {
+	return danmakuOn.value ? liveGlyphOf('subtitles-outlined') : liveGlyphOf('subtitles-off-outlined')
+})
+
+const dmIconStyle = computed((): string => {
+	return liveIconStyle(danmakuOn.value ? 'subtitles-outlined' : 'subtitles-off-outlined', 19, '#FFFFFF')
+})
+
+// 蒸汽端 v-if 转 false 不卸载节点（P8 真机结论），互斥层一律用 display 切换
+const coverLayerStyle = computed((): string => {
+	return (coverShown.value && coverSrc.value.length > 0) ? '' : 'display:none;'
+})
+
+const errorLayerStyle = computed((): string => {
+	return errorText.value.length > 0 ? '' : 'display:none;'
+})
+
+const anchorSkeletonStyle = computed((): string => {
+	return anchorLoaded.value ? 'display:none;' : ''
+})
+
+const anchorInfoStyle = computed((): string => {
+	return anchorLoaded.value ? '' : 'display:none;'
+})
+
+const dmTipStyle = computed((): string => {
+	return dmState.value == 'failed' ? '' : 'display:none;'
+})
+
+/** 播放器高度：源三分支（横屏=全屏高；竖屏直播间=屏高−状态栏；普通=屏宽×9/16） */
+const playerHeight = computed((): number => {
+	if (isPortrait.value) {
+		return windowHeight - statusBar
+	}
+	return Math.round(windowWidth * 9 / 16)
+})
+
+const playerStyle = computed((): string => {
+	return 'height:' + playerHeight.value.toString() + 'px;'
+})
+
+const topGapStyle = computed((): string => {
+	const extra = isPortrait.value ? 0 : ROOM_TOOLBAR_HEIGHT
+	return 'height:' + (statusBar + extra).toString() + 'px;'
+})
+
+const topBarStyle = computed((): string => {
+	return 'padding-top:' + statusBar.toString() + 'px;height:' + (statusBar + ROOM_TOOLBAR_HEIGHT).toString() + 'px;'
+})
+
+/** 消息区：源 top = 状态栏 + 顶栏高 + 播放器高（竖屏直播间时用屏宽占位，源码同款） */
+const msgBoxStyle = computed((): string => {
+	const playerPart = isPortrait.value ? windowWidth : Math.round(windowWidth * 9 / 16)
+	const top = statusBar + ROOM_TOOLBAR_HEIGHT + playerPart
+	const bottom = MSG_BOTTOM_BASE + safeBottom
+	return 'top:' + top.toString() + 'px;bottom:' + bottom.toString() + 'px;'
+})
+
+const inputBarStyle = computed((): string => {
+	return 'padding-bottom:' + (safeBottom + 20).toString() + 'px;'
+})
+
+// 播放器（ExoPlayer）不走平台 cookie jar，防盗链头必须自带（口径同 player-stage 的源 playerInit）
+const headerObj: UTSJSONObject = {}
+headerObj.set('referer', REFERER)
+headerObj.set('user-agent', UA_DESKTOP)
+
+
+function clearPlayWatchdog() {
+	if (playWatchdog >= 0) {
+		clearTimeout(playWatchdog)
+		playWatchdog = -1
+	}
+}
+
+/** 超时未起播且无错误事件时：先换 CDN 线路重拉一次，仍失败才进错误态（不静默黑屏） */
+function startPlayWatchdog() {
+	clearPlayWatchdog()
+	playWatchdog = setTimeout(() => {
+		playWatchdog = -1
+		if (playing.value || errorText.value.length > 0) {
+			return
+		}
+		if (!startupRetried) {
+			startupRetried = true
+			cdnPrefer = !cdnPrefer
+			console.log('[live-room] watchdog: no start in 10s, retry with alt cdn')
+			loadPlayInfo(currentQn.value)
+			return
+		}
+		console.log('[live-room] watchdog: retry failed, show error')
+		errorText.value = '直播播放失败，请点击重试'
+	}, PLAY_START_TIMEOUT)
+}
+
+function videoContext(): VideoContext | null {
+	try {
+		return uni.createVideoContext('lr-video')
+	} catch (e) {
+		console.log('[live-room] createVideoContext failed')
+		return null
+	}
+}
+
+// ---------------------------------------------------------------- 拉流
+
+async function loadPlayInfo(qn: number) {
+	if (playLoading || roomId.value <= 0) {
+		return
+	}
+	playLoading = true
+	const requestQn = qn > 0 ? qn : defaultLiveQn()
+	const result: LivePlayResult = await liveRoomInfo(roomId.value, requestQn)
+	playLoading = false
+	if (!result.status || result.data == null) {
+		errorText.value = result.message.length > 0 ? result.message : '直播流获取失败'
+		return
+	}
+	const data = result.data
+	isPortrait.value = data.isPortrait
+	playerReady.value = true
+	const quality: LiveQualityState = qualityStateOf(data)
+	// 源：以服务端 current_qn 为准
+	const serverQn = quality.currentQn
+	if (requestedQn > 0 && serverQn == tempQn) {
+		// 请求切档但服务端仍回原档 = 切换失败（源 SmartDialog 同款提示）
+		uni.showToast({ title: '画质切换失败，请检查登录状态', icon: 'none' })
+	}
+	currentQn.value = serverQn
+	qnList.value = quality.acceptQn
+	requestedQn = -1
+	const url = pickLiveHlsUrl(data, cdnPrefer)
+	if (url.length == 0) {
+		// 全无 HLS（仅 FLV 流）：真实呈现，不硬播（ExoPlayer FLV 支持不保证，D3 后置）
+		console.log('[live-room] no hls format room=' + roomId.value.toString() + ' streams=' +
+			formatSummaryOf(data))
+		errorText.value = '该直播间流格式暂不支持(FLV)，待后续版本'
+		return
+	}
+	errorText.value = ''
+	coverShown.value = coverSrc.value.length > 0
+	playSrc.value = url
+	// autoplay 只在初始化时生效；src 异步取回后显式起播（P4 fullscreen 同款真机结论）
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.play()
+	}
+	console.log('[live-room] hls ok room=' + roomId.value.toString() + ' portrait=' + data.isPortrait.toString() +
+		' qn=' + serverQn.toString() + ' accept=' + qnList.value.length.toString())
+	startPlayWatchdog()
+}
+
+async function loadH5() {
+	if (roomId.value <= 0) {
+		return
+	}
+	const result: LiveH5Result = await liveRoomInfoH5(roomId.value)
+	if (!result.status || result.data == null) {
+		// 顶栏独立加载不阻塞播放：失败保留 query 兜底值
+		console.log('[live-room] h5 fail: ' + result.message)
+		anchorLoaded.value = anchorName.value.length > 0
+		return
+	}
+	const h5 = result.data
+	if (h5.uname.length > 0) {
+		anchorName.value = h5.uname
+	}
+	if (h5.face.length > 0) {
+		anchorFace.value = h5.face
+	}
+	if (h5.keyframe.length > 0 && coverSrc.value.length == 0) {
+		coverSrc.value = h5.keyframe
+	}
+	if (h5.appBackground.length > 0) {
+		bgImage.value = h5.appBackground
+	} else {
+		bgImage.value = coverSrc.value
+	}
+	watchedText.value = h5.watchedTextLarge
+	anchorLoaded.value = true
+}
+
+function reloadPlay() {
+	clearPlayWatchdog()
+	startupRetried = false
+	cdnPrefer = enableCdn
+	errorText.value = ''
+	playSrc.value = ''
+	playerReady.value = false
+	loadPlayInfo(currentQn.value)
+}
+
+/** 画质切换：源 changeQn（先记 temp 再请求，回包 current_qn 未变即失败提示） */
+function changeQn(code: number) {
+	if (code == currentQn.value) {
+		return
+	}
+	tempQn = currentQn.value
+	requestedQn = code
+	loadPlayInfo(code)
+}
+
+/** 原生全屏态（@fullscreenchange 维护）：全屏时返回键只退全屏，不退页 */
+const isFullscreen = ref<boolean>(false)
+
+onBackPress(() => {
+	if (isFullscreen.value) {
+		const ctx = videoContext()
+		if (ctx != null) {
+			ctx.exitFullScreen()
+		}
+		return true
+	}
+	// 非全屏：把返回交回系统导航栈（在 back 回调里自己调 navigateBack 会被判 cancel，
+	// 而 reLaunch 兜底会丢频道上下文）；页面清理仍由 onUnload 承担
+	return false
+})
+
+/** 全屏：调 video 原生全屏（自绘横屏全屏页需独立路由，本批清单只登记 /liveRoom） */
+function enterFullscreen() {
+	const ctx = videoContext()
+	if (ctx == null) {
+		return
+	}
+	console.log('[live-room] request native fullscreen')
+	ctx.requestFullScreen()
+}
+
+function onFullscreenChange(event: UniVideoFullScreenChangeEvent) {
+	isFullscreen.value = event.detail.fullScreen
+	console.log('[live-room] fullscreen=' + event.detail.fullScreen.toString())
+}
+
+// ---------------------------------------------------------------- 弹幕通道
+
+function startDmClock() {
+	if (dmTimer >= 0) {
+		return
+	}
+	dmTimer = setInterval(() => {
+		dmClock.value = dmClock.value + DM_CLOCK_STEP
+	}, DM_CLOCK_STEP)
+}
+
+function stopDmClock() {
+	if (dmTimer >= 0) {
+		clearInterval(dmTimer)
+		dmTimer = -1
+	}
+}
+
+function appendMessage(msg: LiveMessage) {
+	messages.value.push(msg)
+	while (messages.value.length > MAX_MESSAGES) {
+		messages.value.splice(0, 1)
+	}
+}
+
+function pushDanmaku(msg: LiveMessage) {
+	if (!danmakuOn.value) {
+		return
+	}
+	const item = new DanmakuItem()
+	item.progress = dmClock.value
+	// 源直播间弹幕固定滚动模式 1（DanmakuItem(message, color)）
+	item.mode = 1
+	item.fontsize = 25
+	item.color = msg.colorDecimal
+	item.content = msg.message
+	item.pool = 0
+	item.midHash = msg.uid.toString()
+	danmaku.pushLocal(roomId.value, item)
+}
+
+function setupSocket() {
+	socket.onMessage = (msg: LiveMessage) => {
+		if (msg.type == 'chat') {
+			appendMessage(msg)
+			pushDanmaku(msg)
+			return
+		}
+		if (msg.type == 'online') {
+			// 人气值：源只 print 不消费 UI，这里保留日志便于诊断
+			console.log('[live-room] popularity=' + msg.message)
+			return
+		}
+		// join / follow / superChat：源无展示落点（joinRoomTip 只写不读、SC 不渲染），不消费
+	}
+	socket.onState = (state: string) => {
+		dmState.value = state
+		console.log('[live-room] dm state=' + state)
+	}
+	socket.start(roomId.value)
+	startDmClock()
+}
+
+function toggleDanmaku() {
+	danmakuOn.value = !danmakuOn.value
+}
+
+function onDraftInput(event: UniInputEvent) {
+	draft.value = event.detail.value
+}
+
+async function sendDanmaku() {
+	const text = draft.value.trim()
+	if (text.length == 0 || sending.value) {
+		return
+	}
+	sending.value = true
+	const result = await sendLiveDanmaku(roomId.value, text)
+	sending.value = false
+	if (result.status) {
+		// 成功清空输入；弹幕由服务端广播回来（源同款，不做本地假回显）
+		draft.value = ''
+		return
+	}
+	// 失败保留输入，message 可直接展示（含凭据缺失的真实失败态）
+	uni.showToast({ title: result.message, icon: 'none' })
+}
+
+// ---------------------------------------------------------------- 播放事件
+
+function onLoadedMetadata() {
+	console.log('[live-room] video loadedmetadata')
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.play()
+	}
+}
+
+/** 起播就绪兜底：部分机型只 setSrc 不自动起播，canplay 时再要一次 */
+function onCanPlay() {
+	clearPlayWatchdog()
+	console.log('[live-room] video canplay playing=' + playing.value.toString())
+	if (!playing.value) {
+		const ctx = videoContext()
+		if (ctx != null) {
+			ctx.play()
+		}
+	}
+}
+
+function onVideoWaiting() {
+	console.log('[live-room] video waiting')
+}
+
+function onVideoPause() {
+	console.log('[live-room] video pause')
+	playing.value = false
+}
+
+function onPlay() {
+	clearPlayWatchdog()
+	// 起播成功即复位重试态，后续切画质/刷新仍有完整重试额度
+	startupRetried = false
+	cdnPrefer = enableCdn
+	console.log('[live-room] video play')
+	playing.value = true
+	coverShown.value = false
+}
+
+function onVideoError(event: UniVideoErrorEvent) {
+	if (playSrc.value.length == 0) {
+		// 取流中不算失败
+		return
+	}
+	console.log('[live-room] video error code=' + event.detail.errCode.toString())
+	errorText.value = '直播播放失败'
+}
+
+function exitPage() {
+	if (exited) {
+		return
+	}
+	exited = true
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.pause()
+	}
+	const stack = getCurrentPages()
+	if (stack.length > 1) {
+		// back 事件回调内同步调 navigateBack 会被判定冲突（真机实测 fail cancel），延后一拍再退
+		setTimeout(() => {
+			uni.navigateBack({
+				delta: 1,
+				fail: (err) => {
+					// 退页失败必须复原锁，否则 exited 常驻 true 会把页面困死（真机实测）
+					exited = false
+					console.log('[live-room] navigateBack fail: ' + err.errMsg + ' -> reLaunch fallback')
+					uni.reLaunch({ url: '/pages/main/main' })
+				}
+			})
+		}, 0)
+		return
+	}
+	// 深链直进（栈内只有本页）回首页，避免停在原地
+	uni.reLaunch({ url: '/pages/main/main' })
+}
+
+onUnload(() => {
+	// 退房清理：停弹幕时钟、断 socket、停播放、上报离房（源 onClose 的 heartBeat 同款）
+	clearPlayWatchdog()
+	stopDmClock()
+	socket.stop()
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.pause()
+	}
+	danmaku.reset()
+	if (roomId.value > 0) {
+		liveRoomEntry(roomId.value)
+	}
+})
+
+onLoad((options) => {
+	if (options == null) {
+		errorText.value = '缺少直播间参数（roomid）'
+		return
+	}
+	const rawRoomId = options['roomid']
+	if (rawRoomId != null) {
+		const parsed = parseInt(rawRoomId as string)
+		roomId.value = isNaN(parsed) ? 0 : parsed
+	}
+	if (roomId.value <= 0) {
+		errorText.value = '缺少直播间参数（roomid）'
+		return
+	}
+	// query 兜底值先渲染（列表页传入），接口回来覆盖
+	const rawCover = options['cover']
+	const rawUname = options['uname']
+	const rawFace = options['face']
+	if (rawCover != null && (rawCover as string).length > 0) {
+		coverSrc.value = rawCover as string
+	}
+	if (rawUname != null && (rawUname as string).length > 0) {
+		anchorName.value = rawUname as string
+	}
+	if (rawFace != null && (rawFace as string).length > 0) {
+		anchorFace.value = rawFace as string
+	}
+	coverShown.value = coverSrc.value.length > 0
+	console.log('[live-room] enter room=' + roomId.value.toString())
+	// 拉流 / 房间信息 / 弹幕 / 进房上报 四路并行，互不阻塞
+	loadPlayInfo(defaultLiveQn())
+	loadH5()
+	setupSocket()
+	liveRoomEntry(roomId.value)
+})
+
+onUnmounted(() => {
+	clearPlayWatchdog()
+	stopDmClock()
+	socket.stop()
+})
+</script>
+
+<style>
+	.lr {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		background-color: #000000;
+		position: relative;
+	}
+
+	/* ---------------- 背景图 ---------------- */
+	.lr-bg {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		opacity: 0.6;
+		background-color: #000000;
+	}
+
+	.lr-bg-img {
+		width: 100%;
+		height: 100%;
+	}
+
+	.lr-topgap {
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* ---------------- 播放器 ---------------- */
+	.lr-player {
+		position: relative;
+		width: 100%;
+		border-radius: 6px;
+		overflow: hidden;
+		background-color: #000000;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.lr-video {
+		width: 100%;
+		height: 100%;
+	}
+
+	.lr-cover {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+	}
+
+	.lr-cover-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.2);
+	}
+
+	.lr-cover-hint {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 16px;
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+	}
+
+	.lr-cover-hint-text {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.85);
+	}
+
+	.lr-dm {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+	}
+
+	.lr-error {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		background-color: rgba(0, 0, 0, 0.62);
+	}
+
+	.lr-error-text {
+		font-size: 14px;
+		color: #FFFFFF;
+		text-align: center;
+		padding-left: 24px;
+		padding-right: 24px;
+	}
+
+	.lr-error-retry {
+		margin-top: 12px;
+		height: 34px;
+		padding-left: 14px;
+		padding-right: 14px;
+		border-radius: 17px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		background-color: rgba(255, 255, 255, 0.18);
+	}
+
+	.lr-error-retry-text {
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+
+	.lr-ctrl {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+	}
+
+	/* ---------------- 顶栏 ---------------- */
+	.lr-top {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.lr-back {
+		width: 56px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lr-back-icon {
+		font-family: MaterialIcons;
+	}
+
+	.lr-anchor {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.lr-anchor-face {
+		width: 34px;
+		height: 34px;
+		border-radius: 17px;
+		overflow: hidden;
+	}
+
+	.lr-anchor-text {
+		margin-left: 10px;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.lr-name {
+		font-size: 14px;
+		color: #FFFFFF;
+	}
+
+	.lr-watched-row {
+		display: flex;
+		flex-direction: row;
+		margin-top: 1px;
+	}
+
+	.lr-watched {
+		font-size: 12px;
+		color: #FFFFFF;
+	}
+
+	.lr-anchor-skeleton-face {
+		width: 34px;
+		height: 34px;
+		border-radius: 17px;
+		background-color: rgba(255, 255, 255, 0.16);
+	}
+
+	.lr-anchor-skeleton-text {
+		margin-left: 10px;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.lr-sk-line {
+		border-radius: 3px;
+		background-color: rgba(255, 255, 255, 0.16);
+	}
+
+	.lr-sk-name {
+		width: 88px;
+		height: 13px;
+	}
+
+	.lr-sk-sub {
+		margin-top: 6px;
+		width: 60px;
+		height: 10px;
+	}
+
+	/* ---------------- 聊天消息区 ---------------- */
+	.lr-msgs {
+		position: absolute;
+		left: 0;
+		right: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.lr-dm-tip {
+		height: 28px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lr-dm-tip-text {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.55);
+	}
+
+	/* ---------------- 底部输入条 ---------------- */
+	.lr-inputbar {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		padding-left: 14px;
+		padding-right: 14px;
+		padding-top: 4px;
+		background-color: rgba(128, 128, 128, 0.1);
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(255, 255, 255, 0.1);
+		border-radius: 20px;
+	}
+
+	.lr-input-inner {
+		height: 34px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.lr-dm-toggle {
+		width: 34px;
+		height: 34px;
+		border-radius: 17px;
+		background-color: rgba(128, 128, 128, 0.1);
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lr-dm-icon {
+		font-family: MaterialIcons;
+	}
+
+	.lr-input {
+		flex: 1;
+		height: 34px;
+		margin-left: 8px;
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+
+	.lr-send {
+		width: 34px;
+		height: 34px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lr-send-icon {
+		font-family: MaterialIcons;
+	}
+</style>

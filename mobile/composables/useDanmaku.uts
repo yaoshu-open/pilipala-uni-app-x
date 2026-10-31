@@ -1,0 +1,241 @@
+import { DanmakuItem, DanmakuSegmentResult } from '../models/danmaku.uts'
+import { fetchDanmakuSegment } from '../api/danmaku.uts'
+
+/**
+ * 弹幕调度器（模块级单例；源头：`lib/pages/danmaku/controller.dart#PlDanmakuController`）。
+ *
+ * 与源实现的对应与差异：
+ *  - 段长 6 分钟（360000ms）、源按 `progress ~/ 100`（100ms 一桶）归并——两处一致；
+ *  - 源一次性按视频总时长建 `requestedSeg` 布尔数组，本实现用 Map 惰性登记段号，
+ *    因为进详情时总时长可能还没拿到（播放地址未回），不依赖时长也能开始拉；
+ *  - 源只取当前段（`getCurrentDanmaku` 里按需补拉），本实现进入时**预取当前段 + 下一段**，
+ *    避免跨段那一刻空窗；
+ *  - 源 `assert(requestedSeg[segmentIndex] == false)` 在越界/重复时会直接抛异常，
+ *    本实现全部降级为「记日志 + 返回空数组」，不向渲染层抛。
+ *
+ * 时间口径：所有入参 progressMs 都是**视频内进度（毫秒）**，不是墙钟时间。
+ * 渲染层每次心跳调 takeAt(progress)，进入/切P/seek 后调 ensureRange(cid, progress)。
+ */
+
+/** 接口分段长度：6 分钟一段（源 segmentLength = 60 * 6 * 1000） */
+const SEGMENT_LENGTH_MS: number = 360000
+/** 桶粒度：100ms（源 `progress ~/ 100`） */
+const BUCKET_SIZE_MS: number = 100
+/** 同一段最多尝试次数（失败后不无限重试，避免心跳每 100ms 打一次接口） */
+const MAX_SEGMENT_ATTEMPTS: number = 3
+/** 失败重试冷却（毫秒）：两次尝试之间的最小间隔 */
+const RETRY_COOLDOWN_MS: number = 5000
+
+export class DanmakuScheduler {
+	/** 当前弹幕归属的 cid（-1 = 未绑定）；cid 变化时自动清空，防两条视频的弹幕混桶 */
+	private cid: number = -1
+	/** 100ms 桶 → 该桶弹幕 */
+	private buckets: Map<number, Array<DanmakuItem>> = new Map<number, Array<DanmakuItem>>()
+	/** 已投递给渲染层的桶（同一进度只投递一次） */
+	private served: Map<number, boolean> = new Map<number, boolean>()
+	/** 已成功取回的段（段号从 1 开始，与接口一致） */
+	private loadedSegments: Map<number, boolean> = new Map<number, boolean>()
+	/** 请求中的段（并发去重） */
+	private inFlight: Map<number, boolean> = new Map<number, boolean>()
+	/** 本地即时上屏队列（发送成功的弹幕）：不落桶，等渲染层下一次心跳直接取走 */
+	private pendingLocal: Array<DanmakuItem> = []
+	/** 已尝试次数 */
+	private attempts: Map<number, number> = new Map<number, number>()
+	/** 最近一次尝试的时间戳（冷却用） */
+	private lastAttemptAt: Map<number, number> = new Map<number, number>()
+
+	/** 100ms 桶下标（负进度按 0 处理，负数桶没有意义） */
+	private static bucketIndexOf(progressMs: number): number {
+		const progress = progressMs < 0 ? 0 : progressMs
+		return Math.floor(progress / BUCKET_SIZE_MS)
+	}
+
+	/** 接口段号：从 1 开始（源 controller 传 calcSegment(...) + 1） */
+	private static segmentIndexOf(progressMs: number): number {
+		const progress = progressMs < 0 ? 0 : progressMs
+		return Math.floor(progress / SEGMENT_LENGTH_MS) + 1
+	}
+
+	/**
+	 * 进入/推进时调用：预取当前段与下一段（已请求过的段不会重复请求）。
+	 * cid 与当前不一致时自动 reset（调用方通常已显式调 reset()，这里只是兜底）。
+	 */
+	ensureRange(cid: number, progressMs: number): void {
+		if (cid <= 0) {
+			return
+		}
+		if (cid != this.cid) {
+			this.reset()
+			this.cid = cid
+		}
+		const segmentNo = DanmakuScheduler.segmentIndexOf(progressMs)
+		this.requestSegment(segmentNo)
+		this.requestSegment(segmentNo + 1)
+	}
+
+	/**
+	 * 取走该 100ms 桶的弹幕：同一个桶只投递一次（渲染层心跳会对同一进度反复调用），
+	 * 第二次起返回空数组。桶里还没有数据（段未回来）时返回空数组，且**不**标记已投递，
+	 * 数据到达后仍可投递（晚到的弹幕按当前进度上屏）。
+	 */
+	takeAt(progressMs: number): Array<DanmakuItem> {
+		const result: Array<DanmakuItem> = []
+		// 本地发送的弹幕排最前：它们的进度就是发送瞬间的进度，桶多半已经投递过（served），
+		// 走桶会永远投不出去，故单独排队、下次心跳必取（渲染层据此立刻上屏，不等下一段网络数据）
+		if (this.pendingLocal.length > 0) {
+			for (let i = 0; i < this.pendingLocal.length; i++) {
+				result.push(this.pendingLocal[i])
+			}
+			this.pendingLocal.splice(0, this.pendingLocal.length)
+		}
+		const bucket = DanmakuScheduler.bucketIndexOf(progressMs)
+		if (this.served.has(bucket)) {
+			return result
+		}
+		const list = this.buckets.get(bucket)
+		if (list == null || list.length == 0) {
+			return result
+		}
+		this.served.set(bucket, true)
+		for (let i = 0; i < list.length; i++) {
+			result.push(list[i])
+		}
+		return result
+	}
+
+	/**
+	 * 本地即时上屏：把一条「已发送成功」的弹幕交给渲染层下次心跳取用。
+	 *
+	 * 为什么不走 `putItems` 落桶：发送瞬间的进度所在的 100ms 桶通常已经投递过（served 标记），
+	 * 落桶后会永远投不出去。这里单独排队，由 `takeAt` 无条件取走；
+	 * cid 与当前池不一致时先 reset 再绑定，避免本地条带进上一条视频。
+	 */
+	pushLocal(cid: number, item: DanmakuItem): void {
+		if (cid <= 0) {
+			return
+		}
+		if (cid != this.cid) {
+			this.reset()
+			this.cid = cid
+		}
+		this.pendingLocal.push(item)
+	}
+
+	/** 切换分P/合集、退出播放时清空（模块级单例，不清会带到下一个视频） */
+	reset(): void {
+		this.cid = -1
+		this.buckets.clear()
+		this.pendingLocal.splice(0, this.pendingLocal.length)
+		this.served.clear()
+		this.loadedSegments.clear()
+		this.inFlight.clear()
+		this.attempts.clear()
+		this.lastAttemptAt.clear()
+	}
+
+	/** 发起一段请求（同步返回，网络结果在 loadSegment 内落地；失败只记日志） */
+	private requestSegment(segmentNo: number): void {
+		if (this.cid <= 0 || segmentNo < 1) {
+			return
+		}
+		if (this.loadedSegments.has(segmentNo)) {
+			return
+		}
+		if (this.inFlight.has(segmentNo)) {
+			return
+		}
+		const attemptValue = this.attempts.get(segmentNo)
+		const attempt = attemptValue == null ? 0 : attemptValue
+		if (attempt >= MAX_SEGMENT_ATTEMPTS) {
+			return
+		}
+		if (attempt > 0) {
+			const lastValue = this.lastAttemptAt.get(segmentNo)
+			const last = lastValue == null ? 0 : lastValue
+			if (Date.now() - last < RETRY_COOLDOWN_MS) {
+				return
+			}
+		}
+		this.attempts.set(segmentNo, attempt + 1)
+		this.lastAttemptAt.set(segmentNo, Date.now())
+		this.inFlight.set(segmentNo, true)
+		// 返回值故意不 await：本方法在渲染心跳里调用，不能阻塞（loadSegment 内部自带 try/catch，不会产生未处理拒绝）
+		this.loadSegment(segmentNo)
+	}
+
+	/** 拉取并落桶；全程吞异常（失败只记日志，弹幕缺失不影响播放） */
+	private async loadSegment(segmentNo: number): Promise<void> {
+		const cid = this.cid
+		try {
+			const result: DanmakuSegmentResult = await fetchDanmakuSegment(cid, segmentNo)
+			this.inFlight.delete(segmentNo)
+			if (this.cid != cid) {
+				// 请求期间切了分P/合集：这段属于上一条视频，丢弃
+				return
+			}
+			if (!result.status) {
+				console.log('[useDanmaku] segment fail cid=' + cid.toString() + ' seg=' + segmentNo.toString() + ' msg=' + result.message)
+				return
+			}
+			this.loadedSegments.set(segmentNo, true)
+			this.putItems(result.items)
+		} catch (e) {
+			this.inFlight.delete(segmentNo)
+			console.log('[useDanmaku] segment error cid=' + cid.toString() + ' seg=' + segmentNo.toString())
+			console.log(e)
+		}
+	}
+
+	/** 按每条弹幕自己的 progress 落桶（跨段/段边界都靠这里归位，不依赖段号换算） */
+	private putItems(items: Array<DanmakuItem>): void {
+		for (let i = 0; i < items.length; i++) {
+			const item = items[i]
+			const bucket = DanmakuScheduler.bucketIndexOf(item.progress)
+			// 已投递过的桶不再补数据：该时间点的渲染已经发生
+			if (this.served.has(bucket)) {
+				continue
+			}
+			const existing = this.buckets.get(bucket)
+			if (existing == null) {
+				const list: Array<DanmakuItem> = []
+				list.push(item)
+				this.buckets.set(bucket, list)
+				continue
+			}
+			// 同段重复返回、相邻段重叠时的内容级去重（同进度 + 同正文 + 同发送者 + 同类型）
+			let duplicated = false
+			for (let j = 0; j < existing.length; j++) {
+				const other = existing[j]
+				if (other.progress == item.progress && other.content == item.content && other.midHash == item.midHash && other.mode == item.mode) {
+					duplicated = true
+					break
+				}
+			}
+			if (!duplicated) {
+				existing.push(item)
+			}
+		}
+	}
+}
+
+let scheduler: DanmakuScheduler | null = null
+
+/**
+ * 取弹幕调度器（模块级单例）。
+ *
+ * 约定（渲染层按此调用，签名不可改）：
+ *   const danmaku = useDanmaku()
+ *   danmaku.ensureRange(cid, progressMs)   // 进入/切P/seek 后
+ *   danmaku.takeAt(progressMs)             // 播放心跳，返回该 100ms 桶新弹幕（含本地发送队列）
+ *   danmaku.reset()                        // 切分P/合集、退出播放
+ *   danmaku.pushLocal(cid, item)           // 发送成功后的本地即时上屏（不进桶，下次心跳必取）
+ *
+ * 注意：takeAt 对已投递的桶不再返回（按契约只投递一次）。若 seek 回退后需要重放已投递的弹幕，
+ * 调用方应在 seek 后调 reset() 再 ensureRange()（reset 会清掉已拉段标记，重新拉取）。
+ */
+export function useDanmaku(): DanmakuScheduler {
+	if (scheduler == null) {
+		scheduler = new DanmakuScheduler()
+	}
+	return scheduler
+}

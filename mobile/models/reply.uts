@@ -1,0 +1,727 @@
+import { strOf, numOf, objOf, arrOf, boolOf } from '../utils/json.uts'
+import { toSecureUrl } from '../utils/url.uts'
+
+/**
+ * 评论域模型。源头：`lib/models/video/reply/{data,item,content,member,page,upper,emote}.dart`。
+ * 字段名与源保持一致（源 snake_case JSON 键在 from() 内映射），供评论列表、楼中楼、发评论与表情面板复用。
+ *
+ * 与源的两处必要差异（其余照搬）：
+ *  1. rpid / root / parent 用**字符串**承载（源为 Dart int）：B 站 rpid 已是 19 位量级，
+ *     UTS number 走 double 会丢精度，接口层一律传字符串；数值形态仅作 `rpid` 兜底。
+ *  2. 正文富文本无法在渲染期遍历 `content.emote` / `at_name_to_mid` 的对象键
+ *     （UTSJSONObject 不支持 keys()，见 utils/json.uts 文件头），因此在解析期就把正文切成
+ *     `segments` 切片，渲染层只按切片类型出组件。
+ */
+
+/** 正文里的表情（源 content.emote[token] → { url, meta.size }） */
+export class ReplyEmote {
+	/** 正文中的占位文本，如 "[微笑]" */
+	token: string = ''
+	url: string = ''
+	/** 源 meta.size：1=小表情、2=大表情，图片边长 = size * 20px */
+	size: number = 1
+}
+
+/** 正文切片：text 纯文本 / emote 表情图 / at @用户 / time 时间戳 / link 话题或链接 */
+export class ReplySegment {
+	type: string = 'text'
+	text: string = ''
+	/** at 切片的用户 mid */
+	mid: string = ''
+	/** emote 切片的图片地址 */
+	url: string = ''
+	size: number = 1
+	/** time 切片对应的跳转秒数 */
+	seconds: number = 0
+}
+
+/** 被 @ 的用户（源 content.members） */
+export class ReplyUserRef {
+	mid: string = ''
+	uname: string = ''
+}
+
+/** 取 id 类字段：接口可能给字符串也可能给数字（源 ReplyItem.mid 声明为 String，实际两者都出现过） */
+export function idText(obj: UTSJSONObject, key: string): string {
+	const asText = obj.getString(key)
+	if (asText != null && asText.length > 0) {
+		return asText
+	}
+	const asNum = obj.getNumber(key)
+	if (asNum == null) {
+		return ''
+	}
+	return asNum.toString()
+}
+
+/** 全量替换（不依赖 String.replace 的单次/全量语义差异） */
+function replaceAllText(text: string, from: string, to: string): string {
+	if (from.length == 0) {
+		return text
+	}
+	let out = ''
+	let rest = text
+	let idx = rest.indexOf(from)
+	while (idx >= 0) {
+		out = out + rest.substring(0, idx) + to
+		rest = rest.substring(idx + from.length)
+		idx = rest.indexOf(from)
+	}
+	return out + rest
+}
+
+const LATIN_LOWER = 'abcdefghijklmnopqrstuvwxyz'
+
+/** 源 content.fromJson 的实体转义（顺序与源一致，&amp; 最后处理避免二次解码） */
+function decodeEntities(text: string): string {
+	let out = text
+	out = replaceAllText(out, '&lt;', '<')
+	out = replaceAllText(out, '&gt;', '>')
+	out = replaceAllText(out, '&#34;', '"')
+	out = replaceAllText(out, '&quot;', '"')
+	out = replaceAllText(out, '&#39;', "'")
+	out = replaceAllText(out, '&apos;', "'")
+	out = replaceAllText(out, '&nbsp;', ' ')
+	out = replaceAllText(out, '&amp;', '&')
+	return out
+}
+
+function isDigitChar(ch: string): boolean {
+	if (ch.length != 1) {
+		return false
+	}
+	const value = parseInt(ch)
+	if (isNaN(value)) {
+		return false
+	}
+	return value >= 0 && value <= 9
+}
+
+function isLatinChar(ch: string): boolean {
+	if (ch.length != 1) {
+		return false
+	}
+	return LATIN_LOWER.indexOf(ch.toLowerCase()) >= 0
+}
+
+/** 等价源正则的 \w：字母/数字/下划线（中文不算，与 JS 正则一致） */
+function isWordChar(ch: string): boolean {
+	if (ch.length != 1) {
+		return false
+	}
+	if (ch == '_') {
+		return true
+	}
+	return isDigitChar(ch) || isLatinChar(ch)
+}
+
+function findEmote(emotes: Array<ReplyEmote>, token: string): ReplyEmote | null {
+	for (let i = 0; i < emotes.length; i++) {
+		if (emotes[i].token == token) {
+			return emotes[i]
+		}
+	}
+	return null
+}
+
+/**
+ * 解析正文里出现的表情 token。
+ * 源是遍历 content.emote 的键做正则可选分支；这里反向做：扫正文里的 [xxx]，
+ * 再按 token 回查 emote 对象（getJSON 支持任意键名，不需要 keys()）。
+ */
+function collectEmotes(message: string, emoteObj: UTSJSONObject | null): Array<ReplyEmote> {
+	const list: Array<ReplyEmote> = []
+	if (emoteObj == null || message.length == 0) {
+		return list
+	}
+	let cursor = 0
+	while (cursor < message.length) {
+		const open = message.indexOf('[', cursor)
+		if (open < 0) {
+			break
+		}
+		const close = message.indexOf(']', open + 1)
+		if (close < 0) {
+			break
+		}
+		const token = message.substring(open, close + 1)
+		// 表情 token 最长约 10 个字符，超长视为普通文本方括号
+		if (token.length <= 16 && findEmote(list, token) == null) {
+			const raw = emoteObj.getJSON(token)
+			if (raw != null) {
+				const emote = new ReplyEmote()
+				emote.token = token
+				// 表情图 URL 常为 http 明文，release 包原生 image 会拒载（详见 utils/url.uts）
+				emote.url = toSecureUrl(strOf(raw, 'url'))
+				const meta = objOf(raw, 'meta')
+				emote.size = meta == null ? 1 : numOf(meta, 'size')
+				if (emote.size <= 0) {
+					emote.size = 1
+				}
+				if (emote.url.length > 0) {
+					list.push(emote)
+				}
+			}
+		}
+		cursor = close + 1
+	}
+	return list
+}
+
+/** 时间戳匹配结果（长度 0 表示不匹配） */
+class TimestampMatch {
+	length: number = 0
+	seconds: number = 0
+}
+
+/** 匹配源正则 `(\b(?:\d+[:：])?[0-5]?[0-9][:：][0-5]?[0-9]\b)`：mm:ss 或 hh:mm:ss */
+function matchTimestamp(message: string, start: number): TimestampMatch {
+	const result = new TimestampMatch()
+	if (start > 0) {
+		const prev = message.substring(start - 1, start)
+		if (isWordChar(prev)) {
+			return result
+		}
+	}
+	let cursor = start
+	let first = ''
+	while (cursor < message.length && first.length < 2 && isDigitChar(message.substring(cursor, cursor + 1))) {
+		first = first + message.substring(cursor, cursor + 1)
+		cursor += 1
+	}
+	if (first.length == 0) {
+		return result
+	}
+	const sep = message.substring(cursor, cursor + 1)
+	if (sep != ':' && sep != '：') {
+		return result
+	}
+	cursor += 1
+	let second = ''
+	while (cursor < message.length && second.length < 2 && isDigitChar(message.substring(cursor, cursor + 1))) {
+		second = second + message.substring(cursor, cursor + 1)
+		cursor += 1
+	}
+	if (second.length == 0) {
+		return result
+	}
+	let third = ''
+	let end = cursor
+	const sep2 = message.substring(cursor, cursor + 1)
+	if (sep2 == ':' || sep2 == '：') {
+		let probe = cursor + 1
+		let text = ''
+		while (probe < message.length && text.length < 2 && isDigitChar(message.substring(probe, probe + 1))) {
+			text = text + message.substring(probe, probe + 1)
+			probe += 1
+		}
+		if (text.length == 2) {
+			third = text
+			end = probe
+		}
+	}
+	const next = message.substring(end, end + 1)
+	if (next.length > 0 && isWordChar(next)) {
+		return result
+	}
+	let hour = 0
+	let minute = 0
+	let secondValue = 0
+	if (third.length == 2) {
+		hour = parseInt(first)
+		minute = parseInt(second)
+		secondValue = parseInt(third)
+	} else {
+		minute = parseInt(first)
+		secondValue = parseInt(second)
+	}
+	result.length = end - start
+	result.seconds = hour * 3600 + minute * 60 + secondValue
+	return result
+}
+
+function findAtUser(message: string, start: number, users: Array<ReplyUserRef>): ReplyUserRef | null {
+	for (let i = 0; i < users.length; i++) {
+		const user = users[i]
+		if (user.uname.length == 0) {
+			continue
+		}
+		const prefix = '@' + user.uname
+		if (message.substring(start, start + prefix.length) == prefix) {
+			return user
+		}
+	}
+	return null
+}
+
+function pushTextSegment(segments: Array<ReplySegment>, text: string) {
+	if (text.length == 0) {
+		return
+	}
+	const segment = new ReplySegment()
+	segment.type = 'text'
+	segment.text = text
+	segments.push(segment)
+}
+
+function pushTokenSegment(segments: Array<ReplySegment>, type: string, text: string) {
+	const segment = new ReplySegment()
+	segment.type = type
+	segment.text = text
+	segments.push(segment)
+}
+
+/** 链接片段消费长度：从 start 起连续的 URL 字符（到空格/中文标点为止） */
+function consumeUrl(message: string, start: number): number {
+	let cursor = start
+	while (cursor < message.length) {
+		const ch = message.substring(cursor, cursor + 1)
+		if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '，' || ch == '。' || ch == '、' || ch == '）' || ch == '】') {
+			break
+		}
+		cursor += 1
+	}
+	return cursor - start
+}
+
+/** 把正文切成 text/emote/at/time/link 五类切片（渲染层逐片挂事件） */
+function buildSegments(message: string, users: Array<ReplyUserRef>, emotes: Array<ReplyEmote>): Array<ReplySegment> {
+	const segments: Array<ReplySegment> = []
+	const length = message.length
+	let buffer = ''
+	let i = 0
+	while (i < length) {
+		const ch = message.substring(i, i + 1)
+		// 表情：[微笑]
+		if (ch == '[') {
+			const close = message.indexOf(']', i + 1)
+			if (close > i + 1 && close - i <= 16) {
+				const token = message.substring(i, close + 1)
+				const emote = findEmote(emotes, token)
+				if (emote != null) {
+					pushTextSegment(segments, buffer)
+					buffer = ''
+					const segment = new ReplySegment()
+					segment.type = 'emote'
+					segment.text = token
+					segment.url = emote.url
+					segment.size = emote.size
+					segments.push(segment)
+					i = close + 1
+					continue
+				}
+			}
+		}
+		// @用户：只认 content.members 里给出的 uname（源同款，不做模糊匹配）
+		if (ch == '@') {
+			const user = findAtUser(message, i, users)
+			if (user != null) {
+				pushTextSegment(segments, buffer)
+				buffer = ''
+				const segment = new ReplySegment()
+				segment.type = 'at'
+				segment.text = '@' + user.uname
+				segment.mid = user.mid
+				segments.push(segment)
+				i = i + 1 + user.uname.length
+				continue
+			}
+		}
+		// 话题：#话题#
+		if (ch == '#') {
+			const close = message.indexOf('#', i + 1)
+			if (close > i + 1 && close - i <= 42) {
+				pushTextSegment(segments, buffer)
+				buffer = ''
+				pushTokenSegment(segments, 'link', message.substring(i, close + 1))
+				i = close + 1
+				continue
+			}
+		}
+		// 链接：http(s):// 开头，或 BV 号
+		if (ch == 'h') {
+			const head = message.substring(i, i + 8)
+			if (head == 'https://' || message.substring(i, i + 7) == 'http://') {
+				const size = consumeUrl(message, i)
+				pushTextSegment(segments, buffer)
+				buffer = ''
+				pushTokenSegment(segments, 'link', message.substring(i, i + size))
+				i = i + size
+				continue
+			}
+		}
+		if (ch == 'B' && message.substring(i, i + 2) == 'BV' && i + 12 <= length) {
+			const code = message.substring(i + 2, i + 12)
+			let ok = true
+			for (let k = 0; k < code.length; k++) {
+				if (!isWordChar(code.substring(k, k + 1))) {
+					ok = false
+					break
+				}
+			}
+			if (ok) {
+				pushTextSegment(segments, buffer)
+				buffer = ''
+				pushTokenSegment(segments, 'link', message.substring(i, i + 12))
+				i = i + 12
+				continue
+			}
+		}
+		// 时间戳：mm:ss / hh:mm:ss
+		if (isDigitChar(ch)) {
+			const stamp = matchTimestamp(message, i)
+			if (stamp.length > 0) {
+				pushTextSegment(segments, buffer)
+				buffer = ''
+				const segment = new ReplySegment()
+				segment.type = 'time'
+				const raw = message.substring(i, i + stamp.length)
+				segment.text = replaceAllText(raw, '：', ':')
+				segment.seconds = stamp.seconds
+				segments.push(segment)
+				i = i + stamp.length
+				continue
+			}
+		}
+		buffer = buffer + ch
+		i += 1
+	}
+	pushTextSegment(segments, buffer)
+	return segments
+}
+
+/** 评论正文（源 ReplyContent） */
+export class ReplyContent {
+	message: string = ''
+	/** 源 isText：无 @ / 投票 / 图片时可折叠为 3 行 */
+	isText: boolean = true
+	emotes: Array<ReplyEmote> = []
+	atUsers: Array<ReplyUserRef> = []
+	pictures: Array<string> = []
+	segments: Array<ReplySegment> = []
+
+	static from(obj: UTSJSONObject | null): ReplyContent {
+		const content = new ReplyContent()
+		if (obj == null) {
+			return content
+		}
+		content.message = decodeEntities(strOf(obj, 'message'))
+		const members = arrOf(obj, 'members')
+		for (let i = 0; i < members.length; i++) {
+			const user = new ReplyUserRef()
+			user.mid = idText(members[i], 'mid')
+			user.uname = strOf(members[i], 'uname')
+			if (user.uname.length > 0) {
+				content.atUsers.push(user)
+			}
+		}
+		content.emotes = collectEmotes(content.message, objOf(obj, 'emote'))
+		const pictures = arrOf(obj, 'pictures')
+		for (let i = 0; i < pictures.length; i++) {
+			const src = strOf(pictures[i], 'img_src')
+			if (src.length > 0) {
+				content.pictures.push(src)
+			}
+		}
+		content.isText = content.atUsers.length == 0 && content.pictures.length == 0
+		content.segments = buildSegments(content.message, content.atUsers, content.emotes)
+		return content
+	}
+}
+
+/** 评论作者（源 ReplyMember） */
+export class ReplyMember {
+	mid: string = ''
+	uname: string = ''
+	sign: string = ''
+	avatar: string = ''
+	/** 源 level_info.current_level */
+	level: number = 0
+	vipStatus: number = 0
+	vipType: number = 0
+	/** 源 official_verify.type：0 个人认证 / 1 机构认证 / -1 无 */
+	officialType: number = -1
+
+	static from(obj: UTSJSONObject | null): ReplyMember {
+		const member = new ReplyMember()
+		if (obj == null) {
+			return member
+		}
+		member.mid = idText(obj, 'mid')
+		member.uname = strOf(obj, 'uname')
+		member.sign = strOf(obj, 'sign')
+		member.avatar = strOf(obj, 'avatar')
+		const levelInfo = objOf(obj, 'level_info')
+		member.level = levelInfo == null ? 0 : numOf(levelInfo, 'current_level')
+		const vip = objOf(obj, 'vip')
+		if (vip != null) {
+			member.vipStatus = numOf(vip, 'vipStatus')
+			member.vipType = numOf(vip, 'vipType')
+		}
+		// 源读的是拼写错误的 officia_verify（恒为 null），这里两种键都兼容
+		let official = objOf(obj, 'official_verify')
+		if (official == null) {
+			official = objOf(obj, 'officia_verify')
+		}
+		if (official != null) {
+			member.officialType = numOf(official, 'type')
+		}
+		return member
+	}
+}
+
+/** 楼层附加信息（源 ReplyControl） */
+export class ReplyControl {
+	upReply: boolean = false
+	isUpTop: boolean = false
+	upLike: boolean = false
+	/** 源：sub_reply_entry_text 里的数字 >= 3 才展示二级预览区 */
+	isShow: boolean = false
+	entryText: string = ''
+	titleText: string = ''
+	time: string = ''
+	/** 源 location 形如「IP属地：广东」，取冒号后的属地 */
+	location: string = ''
+
+	static from(obj: UTSJSONObject | null): ReplyControl {
+		const control = new ReplyControl()
+		if (obj == null) {
+			return control
+		}
+		control.upReply = boolOf(obj, 'up_reply')
+		control.isUpTop = boolOf(obj, 'is_up_top')
+		control.upLike = boolOf(obj, 'up_like')
+		control.entryText = strOf(obj, 'sub_reply_entry_text')
+		control.titleText = strOf(obj, 'sub_reply_title_text')
+		control.time = strOf(obj, 'time_desc')
+		const rawLocation = strOf(obj, 'location')
+		let cut = rawLocation.indexOf('：')
+		if (cut < 0) {
+			cut = rawLocation.indexOf(':')
+		}
+		if (cut >= 0) {
+			control.location = rawLocation.substring(cut + 1)
+		}
+		control.isShow = firstNumber(control.entryText) >= 3
+		return control
+	}
+}
+
+/** 取字符串里第一个整数（源用正则 firstMatch 后 int.parse）；无数字返回 -1 */
+function firstNumber(text: string): number {
+	let digits = ''
+	for (let i = 0; i < text.length; i++) {
+		const ch = text.substring(i, i + 1)
+		if (isDigitChar(ch)) {
+			digits = digits + ch
+		} else if (digits.length > 0) {
+			break
+		}
+	}
+	if (digits.length == 0) {
+		return -1
+	}
+	return parseInt(digits)
+}
+
+/** 一条评论（源 ReplyItemModel） */
+export class ReplyItem {
+	/** 评论 id（字符串形态，精度安全）；数值兜底见 rpidNum */
+	rpid: string = ''
+	rpidNum: number = 0
+	oid: number = 0
+	type: number = 0
+	mid: string = ''
+	/** 根评论 id（一级评论为 "0"） */
+	root: string = '0'
+	/** 父评论 id */
+	parent: string = '0'
+	/** 该评论下的回复总数 */
+	count: number = 0
+	like: number = 0
+	/** 源 action：0 未操作 / 1 已点赞 / 2 不喜欢 */
+	action: number = 0
+	ctime: number = 0
+	member: ReplyMember = new ReplyMember()
+	content: ReplyContent = new ReplyContent()
+	replies: Array<ReplyItem> = []
+	upActionLike: boolean = false
+	invisible: boolean = false
+	replyControl: ReplyControl | null = null
+	isUp: boolean = false
+	isTop: boolean = false
+	cardLabels: Array<string> = []
+
+	static from(obj: UTSJSONObject | null, upperMid: string, isTop: boolean): ReplyItem {
+		const item = new ReplyItem()
+		if (obj == null) {
+			return item
+		}
+		item.rpid = idText(obj, 'rpid_str')
+		if (item.rpid.length == 0) {
+			item.rpid = idText(obj, 'rpid')
+		}
+		item.rpidNum = numOf(obj, 'rpid')
+		item.oid = numOf(obj, 'oid')
+		item.type = numOf(obj, 'type')
+		item.mid = idText(obj, 'mid')
+		item.root = idText(obj, 'root')
+		if (item.root.length == 0) {
+			item.root = '0'
+		}
+		item.parent = idText(obj, 'parent')
+		if (item.parent.length == 0) {
+			item.parent = '0'
+		}
+		item.count = numOf(obj, 'count')
+		item.like = numOf(obj, 'like')
+		item.action = numOf(obj, 'action')
+		item.ctime = numOf(obj, 'ctime')
+		item.member = ReplyMember.from(objOf(obj, 'member'))
+		item.content = ReplyContent.from(objOf(obj, 'content'))
+		item.invisible = boolOf(obj, 'invisible')
+		item.isTop = isTop
+		const upAction = objOf(obj, 'up_action')
+		if (upAction != null) {
+			item.upActionLike = boolOf(upAction, 'like')
+		}
+		const control = objOf(obj, 'reply_control')
+		item.replyControl = control == null ? null : ReplyControl.from(control)
+		const replyList = arrOf(obj, 'replies')
+		for (let i = 0; i < replyList.length; i++) {
+			item.replies.push(ReplyItem.from(replyList[i], upperMid, false))
+		}
+		const labels = arrOf(obj, 'card_label')
+		for (let i = 0; i < labels.length; i++) {
+			const text = strOf(labels[i], 'text_content')
+			if (text.length > 0) {
+				item.cardLabels.push(text)
+			}
+		}
+		item.isUp = upperMid.length > 0 && item.member.mid == upperMid
+		return item
+	}
+}
+
+/** 分页信息（源 ReplyPage；acount 为接口原始拼写，语义是总条数） */
+export class ReplyPage {
+	num: number = 0
+	size: number = 0
+	count: number = 0
+	acount: number = 0
+
+	static from(obj: UTSJSONObject | null): ReplyPage {
+		const page = new ReplyPage()
+		if (obj == null) {
+			return page
+		}
+		page.num = numOf(obj, 'num')
+		page.size = numOf(obj, 'size')
+		page.count = numOf(obj, 'count')
+		page.acount = numOf(obj, 'acount')
+		return page
+	}
+}
+
+/** 评论列表数据（源 ReplyData） */
+export class ReplyData {
+	page: ReplyPage = new ReplyPage()
+	replies: Array<ReplyItem> = []
+	topReplies: Array<ReplyItem> = []
+	/** 源 upper.top（UP 主置顶评论） */
+	upperTop: ReplyItem | null = null
+	upperMid: string = ''
+
+	static from(obj: UTSJSONObject | null): ReplyData {
+		const data = new ReplyData()
+		if (obj == null) {
+			return data
+		}
+		data.page = ReplyPage.from(objOf(obj, 'page'))
+		const upper = objOf(obj, 'upper')
+		if (upper != null) {
+			data.upperMid = idText(upper, 'mid')
+			const top = objOf(upper, 'top')
+			data.upperTop = top == null ? null : ReplyItem.from(top, data.upperMid, false)
+		}
+		const replies = arrOf(obj, 'replies')
+		for (let i = 0; i < replies.length; i++) {
+			data.replies.push(ReplyItem.from(replies[i], data.upperMid, false))
+		}
+		const topReplies = arrOf(obj, 'top_replies')
+		for (let i = 0; i < topReplies.length; i++) {
+			data.topReplies.push(ReplyItem.from(topReplies[i], data.upperMid, true))
+		}
+		return data
+	}
+}
+
+/** 评论列表结果（code 保留接口原值：12061 = 评论区已关闭） */
+export class ReplyListResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	data: ReplyData | null = null
+}
+
+/** 评论写操作结果（点赞） */
+export class ReplyActionResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+}
+
+/** 发评论结果（item 为接口回传的新评论对象） */
+export class ReplyAddResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	item: ReplyItem | null = null
+	successToast: string = ''
+}
+
+/** 表情（源 Emote；type=4 的包是颜文字，用 text 显示） */
+export class EmoteItem {
+	text: string = ''
+	url: string = ''
+	/** 源 meta.size：1 或 2 */
+	size: number = 1
+}
+
+/** 表情包分组（源 PackageItem） */
+export class EmotePackage {
+	id: number = 0
+	text: string = ''
+	type: number = 0
+	emotes: Array<EmoteItem> = []
+
+	static from(obj: UTSJSONObject): EmotePackage {
+		const pack = new EmotePackage()
+		pack.id = numOf(obj, 'id')
+		pack.text = strOf(obj, 'text')
+		pack.type = numOf(obj, 'type')
+		const emotes = arrOf(obj, 'emote')
+		for (let i = 0; i < emotes.length; i++) {
+			const emote = new EmoteItem()
+			emote.text = strOf(emotes[i], 'text')
+			// 表情图 URL 常为 http 明文，release 包原生 image 会拒载（详见 utils/url.uts）
+			emote.url = toSecureUrl(strOf(emotes[i], 'url'))
+			const meta = objOf(emotes[i], 'meta')
+			emote.size = meta == null ? 1 : numOf(meta, 'size')
+			if (emote.size <= 0) {
+				emote.size = 1
+			}
+			if (emote.text.length > 0) {
+				pack.emotes.push(emote)
+			}
+		}
+		return pack
+	}
+}
+
+/** 表情面板结果（源 EmoteModelData.packages） */
+export class EmoteResult {
+	status: boolean = false
+	message: string = ''
+	packages: Array<EmotePackage> = []
+}

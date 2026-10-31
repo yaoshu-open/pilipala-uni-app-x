@@ -1,0 +1,13 @@
+/**
+ * 小程序端无 cookie jar 可读（平台只维护会话，不向业务代码暴露 cookie）。
+ * 恒返回空串，写操作按「凭据缺失」明确失败。
+ */
+export function getCookie(url: string): string {
+	console.log('[pl-cookie] 小程序端不支持读取 cookie jar（url=' + url + '）')
+	return ''
+}
+
+export function clearAllCookies(): boolean {
+	console.log('[pl-cookie] 小程序端不支持清空 cookie jar')
+	return false
+}

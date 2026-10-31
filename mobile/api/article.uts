@@ -1,0 +1,310 @@
+import { ArticleCvResult, ArticleReadInfo, OpusResult, OpusDetailInfo, DynamicHtmlInfo, DynamicHtmlResult } from '../models/article.uts'
+import { REFERER, REQUEST_TIMEOUT, UA_DESKTOP } from '../utils/constants.uts'
+import { apiGet } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { objOf } from '../utils/json.uts'
+import { toSecureUrl } from '../utils/url.uts'
+
+/**
+ * 图文/专栏域接口层（源头：`lib/http/read.dart` 的 ReadHttp.parseArticleOpus / parseArticleCv）。
+ *
+ * 两条取数链（均为「HTML/JSON → 结构化模型」，解析失败返回明确 message，绝不静默空白）：
+ *  1. opus 图文：GET `https://www.bilibili.com/opus/{id}`（UA=pc）→ 取 body 内首个 `<script>` 块
+ *     （即 `window.__INITIAL_STATE__={...}`）→ 首个 `{` 到末个 `};` 的 JSON 串 → `OpusDetailInfo`。
+ *     与源 parseArticleOpus 的 indexOf('{')/lastIndexOf('};') 截取算法逐字对应。
+ *  2. cv 专栏：GET `/x/article/view?id={cvid}` → `data` 直接摊平为 `ArticleReadInfo`
+ *     （title/publish_time/author/stats/opus.content.paragraphs）。**站点改版后 cv 页不再输出
+ *     __INITIAL_STATE__**（实测 2026：返回 article-web 空壳），HTML 截取链对本端不可用，
+ *     故改用同内容源的 JSON 端点；`content` 为纯文本，无 opus 段落时按行拆段渲染。
+ *
+ * 本文件不重复实现 viewinfo：`/x/article/viewinfo` 已有 api/dynamics.uts#fetchArticleViewInfo（P6 建）。
+ */
+
+/** 把正文 HTML 里的懒加载图片换成可直接渲染的 src（`data-src="//i0.hdslb.com/..."` → `src="https://..."`） */
+export function fixContentImgSrc(html: string): string {
+	let out = ''
+	let from = 0
+	while (true) {
+		const mark = html.indexOf('data-src="', from)
+		if (mark < 0) {
+			out += html.substring(from)
+			break
+		}
+		const valueStart = mark + 'data-src="'.length
+		const valueEnd = html.indexOf('"', valueStart)
+		if (valueEnd < 0) {
+			out += html.substring(from)
+			break
+		}
+		let url = html.substring(valueStart, valueEnd)
+		if (url.startsWith('//')) {
+			url = 'https:' + url
+		} else {
+			// 绝对地址同样可能是 http 明文（release 包禁明文，详见 utils/url.uts）
+			url = toSecureUrl(url)
+		}
+		out += html.substring(from, mark)
+		out += 'src="' + url + '"'
+		from = valueEnd + 1
+	}
+	return out
+}
+
+/** 从 HTML 提取 body 后首个 script 块内的 {...} JSON 串；失败返回空串 */
+function extractStateJson(html: string): string {
+	// 状态脚本在 body 内；head 里也有 script（预加载/统计），必须跳过——先定位 <body
+	let searchFrom = 0
+	const bodyMark = html.indexOf('<body')
+	if (bodyMark >= 0) {
+		searchFrom = bodyMark
+	}
+	const scriptStart = html.indexOf('<script', searchFrom)
+	if (scriptStart < 0) {
+		return ''
+	}
+	const tagEnd = html.indexOf('>', scriptStart)
+	if (tagEnd < 0) {
+		return ''
+	}
+	const blockEnd = html.indexOf('</script>', tagEnd)
+	if (blockEnd < 0) {
+		return ''
+	}
+	const block = html.substring(tagEnd + 1, blockEnd)
+	const jsonStart = block.indexOf('{')
+	const jsonEnd = block.lastIndexOf('};')
+	if (jsonStart < 0 || jsonEnd < jsonStart) {
+		return ''
+	}
+	return block.substring(jsonStart, jsonEnd + 1)
+}
+
+/** canonical 指向 /read/cv{id} 时返回 cv 号（源 parseArticleOpus 的 isCv 分诊），否则空串 */
+function extractCanonicalCv(html: string): string {
+	const mark = html.indexOf('rel="canonical"')
+	if (mark < 0) {
+		return ''
+	}
+	const hrefMark = html.indexOf('href="', mark)
+	if (hrefMark < 0) {
+		return ''
+	}
+	const valueStart = hrefMark + 'href="'.length
+	const valueEnd = html.indexOf('"', valueStart)
+	if (valueEnd <= valueStart) {
+		return ''
+	}
+	const href = html.substring(valueStart, valueEnd)
+	const cvMark = href.indexOf('/cv')
+	if (cvMark < 0) {
+		return ''
+	}
+	let digits = ''
+	let i = cvMark + 3
+	while (i < href.length) {
+		const ch = href.substring(i, i + 1)
+		if (ch < '0' || ch > '9') {
+			break
+		}
+		digits += ch
+		i++
+	}
+	return digits
+}
+
+// ---------------------------------------------------------------- opus 图文（HTML 状态解析）
+
+function fetchOpusRaw(id: string): Promise<OpusResult> {
+	return new Promise<OpusResult>((resolve) => {
+		const result = new OpusResult()
+		const url = 'https://www.bilibili.com/opus/' + id
+		const header: UTSJSONObject = {}
+		header.set('referer', REFERER)
+		// 源 extra {'ua': 'pc'}：pc UA 才拿得到完整 SSR 状态
+		header.set('user-agent', UA_DESKTOP)
+		uni.request({
+			url: url,
+			method: 'GET',
+			header: header,
+			timeout: REQUEST_TIMEOUT,
+			success: (res) => {
+				if (res.data == null) {
+					result.message = '图文内容为空，请稍后重试'
+					console.log('[article] opus empty body id=' + id + ' status=' + res.statusCode.toString())
+					resolve(result)
+					return
+				}
+				const html = res.data as string
+				const cvId = extractCanonicalCv(html)
+				if (cvId.length > 0) {
+					// 源：canonical 指 cv 时由 opus 页 redirect 到 read 页（页面侧 redirectTo）
+					result.isCv = true
+					result.cvId = cvId
+					console.log('[article] opus canonical cv id=' + id + ' cv=' + cvId)
+				}
+				const jsonText = extractStateJson(html)
+				if (jsonText.length == 0) {
+					result.message = '图文解析失败（页面结构可能已变化）'
+					console.log('[article] opus state json missing id=' + id + ' len=' + html.length.toString())
+					resolve(result)
+					return
+				}
+				try {
+					const state = JSON.parse<UTSJSONObject>(jsonText)
+					if (state == null) {
+						result.message = '图文解析失败（数据格式异常）'
+						console.log('[article] opus state parse null id=' + id)
+						resolve(result)
+						return
+					}
+					const info = OpusDetailInfo.from(state)
+					if (info.title.length == 0 && info.paragraphs.length == 0) {
+						result.message = '图文内容解析为空，请稍后重试'
+						console.log('[article] opus detail empty id=' + id)
+						resolve(result)
+						return
+					}
+					result.data = info
+					result.status = true
+					console.log('[article] opus ok id=' + id + ' title=' + info.title.length.toString() +
+						' paras=' + info.paragraphs.length.toString() + ' ctype=' + info.commentType.toString())
+					resolve(result)
+				} catch (e) {
+					result.message = '图文解析失败（数据格式异常）'
+					console.log('[article] opus state parse error id=' + id)
+					console.log(e)
+					resolve(result)
+				}
+			},
+			fail: (err) => {
+				result.message = '网络异常，请稍后重试'
+				console.log('[article] opus request fail id=' + id + ' err=' + JSON.stringify(err))
+				resolve(result)
+			}
+		})
+	})
+}
+
+/** 抓取 opus 图文（HTML → __INITIAL_STATE__ → 结构化模型）；canonical 重定向由调用方按 comment_type 分诊 */
+export async function fetchArticleOpus(id: string): Promise<OpusResult> {
+	try {
+		return await fetchOpusRaw(id)
+	} catch (e) {
+		console.log('[article] fetchArticleOpus error id=' + id)
+		console.log(e)
+		const failed = new OpusResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- cv 专栏（JSON 端点）
+
+async function fetchArticleViewRaw(cvid: string): Promise<ArticleCvResult> {
+	const result = new ArticleCvResult()
+	const params = new Params()
+	params.set('id', cvid)
+	const res = await apiGet('/x/article/view', params)
+	if (res == null) {
+		result.message = '网络异常，请稍后重试'
+		return result
+	}
+	const code = res.getNumber('code')
+	if (code == null || code != 0) {
+		const message = res.getString('message')
+		result.message = message == null || message.length == 0 ? '专栏请求失败' : message
+		console.log('[article] cv code=' + (code == null ? -1 : code).toString() + ' id=' + cvid)
+		return result
+	}
+	const data = objOf(res, 'data')
+	const info = ArticleReadInfo.fromArticleView(data)
+	if (info.title.length == 0 && info.paragraphs.length == 0 && info.contentText.length == 0) {
+		result.message = '专栏内容解析为空，请稍后重试'
+		console.log('[article] cv data empty id=' + cvid)
+		return result
+	}
+	result.data = info
+	result.status = true
+	console.log('[article] cv ok id=' + cvid + ' opus=' + (info.hasOpus ? 'yes' : 'no') +
+		' paras=' + info.paragraphs.length.toString())
+	return result
+}
+
+/** 抓取 cv 专栏正文（/x/article/view → 结构化模型） */
+export async function fetchArticleCv(cvid: string): Promise<ArticleCvResult> {
+	try {
+		return await fetchArticleViewRaw(cvid)
+	} catch (e) {
+		console.log('[article] fetchArticleCv error id=' + cvid)
+		console.log(e)
+		const failed = new ArticleCvResult()
+		failed.message = '数据解析异常，请稍后重试'
+		return failed
+	}
+}
+
+// ---------------------------------------------------------------- 动态/专栏 HTML 详情（html 页）
+
+/** 从 id 里取第一段连续数字（源 reqReadHtml 的 digitRegExp 同款；cv/动态 id 都含数字） */
+function firstDigits(id: string): string {
+	let digits = ''
+	for (let i = 0; i < id.length; i++) {
+		const ch = id.substring(i, i + 1)
+		if (ch >= '0' && ch <= '9') {
+			digits += ch
+		} else if (digits.length > 0) {
+			break
+		}
+	}
+	return digits
+}
+
+/**
+ * 动态/专栏 HTML 详情取数（源 `lib/pages/html/controller.dart#reqHtml`）。
+ *  - dynamicType = opus / picture：抓 opus 页 → __INITIAL_STATE__ → 作者/时间/段落/评论 oid（type 11/12）；
+ *  - 其它（read/article/...）：走专栏 JSON 端点 → 作者/正文，评论 oid = id 内首段数字（源同款）。
+ * 任一分支失败都返回明确 message，页面落整页错误态（源 HtmlRender 失败只回 'error' 文本）。
+ */
+export async function fetchDynamicHtml(id: string, dynamicType: string): Promise<DynamicHtmlResult> {
+	const result = new DynamicHtmlResult()
+	const info = new DynamicHtmlInfo()
+	if (dynamicType == 'opus' || dynamicType == 'picture') {
+		const opus = await fetchArticleOpus(id)
+		if (!opus.status || opus.data == null) {
+			result.message = opus.message.length > 0 ? opus.message : '动态解析失败'
+			return result
+		}
+		const detail = opus.data
+		info.avatar = detail.authorFace
+		info.uname = detail.authorName
+		info.updateTime = detail.pubTime
+		info.paragraphs = detail.paragraphs
+		info.commentId = detail.commentIdStr
+		// 源 controller：picture → 11，其余 → 12
+		info.commentType = dynamicType == 'picture' ? 11 : 12
+	} else {
+		const cv = await fetchArticleCv(firstDigits(id))
+		if (!cv.status || cv.data == null) {
+			result.message = cv.message.length > 0 ? cv.message : '内容解析失败'
+			return result
+		}
+		const detail = cv.data
+		info.avatar = detail.author.face
+		info.uname = detail.author.name
+		info.updateTime = ''
+		info.paragraphs = detail.paragraphs
+		info.contentText = detail.contentText
+		info.commentId = firstDigits(id)
+		info.commentType = 12
+	}
+	if (info.commentId.length == 0) {
+		result.message = '评论信息解析失败（缺少 comment_id）'
+		console.log('[article] html commentId missing id=' + id + ' type=' + dynamicType)
+		return result
+	}
+	result.data = info
+	result.status = true
+	console.log('[article] html ok id=' + id + ' type=' + dynamicType + ' ctype=' + info.commentType.toString() +
+		' paras=' + info.paragraphs.length.toString())
+	return result
+}

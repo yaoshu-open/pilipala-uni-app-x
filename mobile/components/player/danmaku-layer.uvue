@@ -1,0 +1,860 @@
+<template>
+	<!--
+		弹幕渲染层：绝对铺满父容器，pointer-events 穿透，不拦截播放器手势。
+		用 canvas 单层绘制，不逐条生成 view——高密度场景下 view 节点数会爆。
+	-->
+	<view class="dl" :style="rootStyle">
+		<canvas id="dl-canvas" class="dl-canvas"></canvas>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed, watch, onMounted, onUnmounted, nextTick, getCurrentInstance } from 'vue'
+import { useDanmaku } from '../../composables/useDanmaku.uts'
+import { DanmakuItem } from '../../models/danmaku.uts'
+
+/**
+ * 弹幕渲染层（canvas）。只负责“把弹幕画出来”，不取数、不发送、不持有业务状态。
+ *
+ * 数据：`useDanmaku()` 提供（分段预取 + 按进度取用）。父级每次 timeupdate 传 progressMs，
+ *       本组件据此 ensureRange 预取、takeAt 取当帧新弹幕入队。
+ * 时间轴：progressMs 只决定“该放哪几条”；每条入队后按本地帧时钟推进（ageMs 累加），
+ *       所以暂停/恢复不跳帧，也不受 timeupdate 粒度（约 250ms）影响。
+ * 轨道：滚动（mode 1/2/3）按显示区域比例分轨；顶部（mode 5）与底部（mode 4）各自占位。
+ * 防重叠：新条只进“尾部已完全进入画面、且新条不会追尾”的轨道；全满则丢弃该条，不叠盖。
+ *
+ * 源头：`lib/pages/danmaku/view.dart`（弹幕层配置装配）、`lib/utils/danmaku.dart`（模式映射与颜色）。
+ * 说明：mode 4=底部、mode 5=顶部（源 `DmUtils.getPosition`），blockTypes 2/4/5/6 与源一致。
+ */
+
+const props = defineProps({
+	/** 当前弹幕池 cid */
+	cid: { type: Number, default: 0 },
+	/** 是否在播放；false 时冻结推进（已入队弹幕不丢） */
+	playing: { type: Boolean, default: false },
+	/** 当前播放进度（毫秒），父级每次 timeupdate 传入 */
+	progressMs: { type: Number, default: 0 },
+	/** 弹幕开关；关闭时隐藏渲染并停止推进，不清空弹幕池数据 */
+	enabled: { type: Boolean, default: true },
+	/** 显示区域比例 0~1（弹幕只出现在该高度的区域内） */
+	showArea: { type: Number, default: 0.5 },
+	/** 整体不透明度 0~1 */
+	opacity: { type: Number, default: 1.0 },
+	/** 字号缩放 0.5~2.5（字号 = 15 * fontScale） */
+	fontScale: { type: Number, default: 1.0 },
+	/** 单条滚动时长（秒） */
+	durationSec: { type: Number, default: 4.0 },
+	/** 描边宽度 0~3（0 = 无描边） */
+	strokeWidth: { type: Number, default: 1.5 },
+	/** 屏蔽类型：5=顶部 4=底部 2=滚动 6=彩色 */
+	blockTypes: {
+		type: Array,
+		default() {
+			return [] as Array<number>
+		}
+	},
+	/**
+	 * 是否按 cid 分段拉取视频弹幕（默认 true）。
+	 * 直播形态传 false：弹幕由 websocket 实时推送、经父级调用 pushLocal 进队列，
+	 * 不能按 cid 去打视频弹幕接口（直播间号不是 cid，请求必然失败且无意义）。
+	 */
+	pullSegments: { type: Boolean, default: true }
+})
+
+/** 基准字号（源 DanmakuOption.fontSize: 15 * fontSizeVal） */
+const BASE_FONT_SIZE = 15
+/** 轨道高 = 字号 * 该比例 */
+const LINE_HEIGHT_RATIO = 1.35
+/** 轨道最小高（字号缩到 0.5 时仍要有可读行距） */
+const MIN_LANE_HEIGHT = 18
+/** 同轨相邻弹幕的横向最小间隙（px） */
+const GAP_PX = 12
+/** 在屏弹幕上限：超出丢最旧（防极端密度下无限增长） */
+const MAX_LIVE = 200
+/** 帧间隔（ms） */
+const FRAME_MS = 16
+/** 单帧最大推进量（ms）：切后台/卡顿回来时不跳帧 */
+const MAX_FRAME_DT = 200
+/** 进度前跳超过该值判定为 seek（切 P / 拖进度条） */
+const SEEK_JUMP_MS = 2000
+/** 进度回退超过该值判定为 seek（留 300ms 容差抵消 timeupdate 抖动） */
+const SEEK_BACK_MS = 300
+/** 画布上下文 / 尺寸的最大重试次数 */
+const RETRY_MAX = 6
+
+/**
+ * 一条“在屏”弹幕的渲染态。
+ * 与数据模型 DanmakuItem 分离：模型管业务字段，这里只管几何与计时。
+ */
+class LiveDanmaku {
+	content: string = ''
+	/** 1=滚动 2=顶部 3=底部 */
+	kind: number = 1
+	/** 已解析为 #RRGGBB */
+	color: string = '#FFFFFF'
+	lane: number = 0
+	/** 文本像素宽（按入队时字号量得） */
+	width: number = 0
+	/** 已存活毫秒（仅播放中累加） */
+	ageMs: number = 0
+	/** 本条总存活毫秒（入队时快照，运行中改时长不影响它） */
+	totalMs: number = 4000
+	fontSize: number = 15
+}
+
+// canvas id 固定：createCanvasContextAsync 带 component 做实例作用域查找，
+// 不同页面各有自己的组件实例，互不影响；同页（同一播放区）不允许挂两个弹幕层。
+const instance = getCurrentInstance()
+const dm = useDanmaku()
+
+let renderCtx: CanvasRenderingContext2D | null = null
+/** 画布逻辑尺寸（CSS px，绘制坐标系） */
+let cssW: number = 0
+let cssH: number = 0
+/** 是否成功按 dpr 放大画布背面（App 端宽高只读时为 false，退化为 1x） */
+let hidpi: boolean = false
+
+const liveItems: Array<LiveDanmaku> = []
+
+// —— 轨道占用表，时间基准为本地时钟 nowLocal（只在播放中推进）——
+/** 滚动轨：上一条的入队时刻 / 文本宽 / 速度(px per ms) / 总时长 */
+let scrollLastSpawn: Array<number> = []
+let scrollLastWidth: Array<number> = []
+let scrollLastSpeed: Array<number> = []
+let scrollLastTotal: Array<number> = []
+/** 顶部 / 底部轨：该轨空出的时刻 */
+let topFreeAt: Array<number> = []
+let bottomFreeAt: Array<number> = []
+
+let timerId: number = 0
+let lastTickMs: number = 0
+let nowLocal: number = 0
+/** 上一次消费的进度（-1 = 尚未对齐） */
+let lastProgress: number = -1
+let ctxRetry: number = 0
+/** 尺寸为 0 的告警只打一次（重试由播放心跳驱动，避免日志刷屏） */
+let sizeWarned: boolean = false
+/** 尺寸复查倒计时（帧）：布局变化（旋转/全屏）后重新配置画布 */
+let resizeTick: number = 30
+/** 已卸载：挂起的重试回调不得再操作画布/上下文 */
+let disposed: boolean = false
+/** 「有进度但不播放」的接线提示只打一次 */
+let playingHintShown: boolean = false
+
+// 绘制状态缓存：同字号/同颜色连续绘制时跳过重复赋值
+let appliedFont: string = ''
+let appliedFill: string = ''
+let appliedStroke: number = -1
+
+const rootStyle = computed((): string => {
+	let alpha = props.opacity
+	if (alpha < 0) {
+		alpha = 0
+	}
+	if (alpha > 1) {
+		alpha = 1
+	}
+	// 关闭时整层透明：保留画布实例（重开不用重建上下文），同时停止推进
+	if (!props.enabled) {
+		alpha = 0
+	}
+	return 'opacity:' + alpha.toString() + ';'
+})
+
+function clamp(value: number, min: number, max: number): number {
+	if (value < min) {
+		return min
+	}
+	if (value > max) {
+		return max
+	}
+	return value
+}
+
+function fontSizePx(): number {
+	return Math.max(8, Math.round(BASE_FONT_SIZE * props.fontScale * 10) / 10)
+}
+
+function laneHeight(): number {
+	return Math.max(MIN_LANE_HEIGHT, fontSizePx() * LINE_HEIGHT_RATIO)
+}
+
+/** 弹幕可视区高度：显示区域比例作用在整层（滚动/顶部从上往下，底部从该区域底边往上） */
+function areaHeight(): number {
+	return cssH * clamp(props.showArea, 0.1, 1)
+}
+
+function scrollLaneCount(): number {
+	return Math.max(1, Math.floor(areaHeight() / laneHeight()))
+}
+
+/** 顶部/底部各占的轨数：取滚动轨的一半，避免上下区域在中间打架 */
+function fixedLaneCount(): number {
+	return Math.max(1, Math.floor(scrollLaneCount() / 2))
+}
+
+function durationMs(): number {
+	return clamp(props.durationSec, 0.5, 30) * 1000
+}
+
+function hex2(value: number): string {
+	const text = value.toString(16).toUpperCase()
+	return text.length == 1 ? '0' + text : text
+}
+
+/** 十进制 RGB（源 DmUtils.decimalToColor）→ #RRGGBB */
+function colorOf(decimalColor: number): string {
+	let value = Math.floor(decimalColor)
+	if (value < 0 || value > 16777215) {
+		return '#FFFFFF'
+	}
+	const r = (value >> 16) & 255
+	const g = (value >> 8) & 255
+	const b = value & 255
+	return '#' + hex2(r) + hex2(g) + hex2(b)
+}
+
+/** 模式 → 泳道类型：1/2/3 滚动，4 底部，5 顶部（源 DmUtils.getPosition） */
+function kindOfMode(mode: number): number {
+	if (mode >= 1 && mode <= 3) {
+		return 1
+	}
+	if (mode == 4) {
+		return 3
+	}
+	if (mode == 5) {
+		return 2
+	}
+	return 1
+}
+
+function blockList(): Array<number> {
+	return props.blockTypes as Array<number>
+}
+
+/** 该泳道类型是否被屏蔽（2=滚动 4=底部 5=顶部） */
+function isKindBlocked(kind: number, types: Array<number>): boolean {
+	for (let i = 0; i < types.length; i++) {
+		const value = types[i]
+		if (kind == 1 && value == 2) {
+			return true
+		}
+		if (kind == 3 && value == 4) {
+			return true
+		}
+		if (kind == 2 && value == 5) {
+			return true
+		}
+	}
+	return false
+}
+
+/** 是否屏蔽彩色（源行为：彩色条改白字，而非丢弃） */
+function isColorBlocked(types: Array<number>): boolean {
+	for (let i = 0; i < types.length; i++) {
+		if (types[i] == 6) {
+			return true
+		}
+	}
+	return false
+}
+
+function colorFor(item: DanmakuItem): string {
+	const decimal = item.color
+	if (isColorBlocked(blockList()) && decimal != 16777215) {
+		return '#FFFFFF'
+	}
+	return colorOf(decimal)
+}
+
+function pixelRatio(): number {
+	try {
+		const info = uni.getWindowInfo()
+		const ratio = info.pixelRatio
+		if (ratio > 0) {
+			return ratio
+		}
+	} catch (e) {
+		console.log('[danmaku] getWindowInfo 失败，按 1x 处理')
+	}
+	return 1
+}
+
+// ————————————————— 画布装配 —————————————————
+
+/**
+ * 量取容器实际尺寸并按 dpr 放大画布背面。
+ *
+ * 尺寸取 canvas 元素的布局尺寸（offsetWidth/Height，即容器实际尺寸）：
+ * 不用 getSystemInfo 的窗口宽推算——本层可能不是全宽，也可能被父级裁切。
+ * App 端 canvas 宽高可能只读：先写哨兵值探测可写性，可写才 scale(dpr)，
+ * 否则绘制坐标会被放大 dpr 倍（画面整体跑出画布）。
+ *
+ * 尺寸为 0（布局未就绪）时不在这里挂定时器：由 onProgress（播放心跳，约 4 次/秒）
+ * 与 checkResize 重试，避免组件在无布局场景下留一条永不结束的重试定时器。
+ */
+function configureCanvas() {
+	if (disposed) {
+		return
+	}
+	const ctx = renderCtx
+	if (ctx == null) {
+		return
+	}
+	const w = ctx.canvas.offsetWidth
+	const h = ctx.canvas.offsetHeight
+	if (w <= 0 || h <= 0) {
+		if (!sizeWarned) {
+			sizeWarned = true
+			console.log('[danmaku] 画布布局尺寸为 0，等待布局就绪后重试')
+		}
+		return
+	}
+	sizeWarned = false
+	cssW = w
+	cssH = h
+	const dpr = pixelRatio()
+	const targetW = Math.round(w * dpr)
+	const targetH = Math.round(h * dpr)
+	// 探测画布背面尺寸是否可写（App 端 canvas 宽高可能只读）：
+	// 先写哨兵值 1 再读回，可写才按 dpr 放大；不可写就保持布局像素、按 CSS px 绘制
+	// （1x 略糊但不跑版；盲目 scale 会把整层放大 dpr 倍直接跑出画布）
+	let controllable = false
+	try {
+		ctx.canvas.width = 1
+		ctx.canvas.height = 1
+		controllable = ctx.canvas.width == 1 && ctx.canvas.height == 1
+	} catch (e) {
+		controllable = false
+	}
+	if (controllable) {
+		ctx.canvas.width = targetW
+		ctx.canvas.height = targetH
+		ctx.scale(dpr, dpr)
+		hidpi = true
+	} else {
+		hidpi = false
+	}
+	// 重新设置宽高会重置绘制状态，这里统一复位（含状态缓存）
+	ctx.textBaseline = 'top'
+	ctx.textAlign = 'left'
+	ctx.lineJoin = 'round'
+	appliedFont = ''
+	appliedFill = ''
+	appliedStroke = -1
+	ctx.clearRect(0, 0, cssW, cssH)
+	console.log('[danmaku] 画布就绪 ' + w.toString() + 'x' + h.toString() + ' dpr=' + dpr.toString() + ' hidpi=' + hidpi.toString())
+}
+
+/** 布局变化（旋转/全屏/容器改尺寸）时重新配置；不必每帧问布局，按帧计数抽查 */
+function checkResize() {
+	resizeTick--
+	if (resizeTick > 0) {
+		return
+	}
+	resizeTick = 30
+	const ctx = renderCtx
+	if (ctx == null) {
+		return
+	}
+	const w = ctx.canvas.offsetWidth
+	const h = ctx.canvas.offsetHeight
+	if (w > 0 && h > 0 && (Math.abs(w - cssW) > 1 || Math.abs(h - cssH) > 1)) {
+		configureCanvas()
+	}
+}
+
+/**
+ * 取 2d 上下文（跨端异步 API 是唯一跨端写法；带 component 限定在本组件内查 id）。
+ * 失败不静默：画布拿不到等于弹幕层不存在，重试有上限并打错误日志。
+ */
+function createCanvasContext() {
+	if (disposed || renderCtx != null) {
+		return
+	}
+	if (instance == null) {
+		console.error('[danmaku] 无法获取组件实例，画布不可用')
+		return
+	}
+	const proxy = instance.proxy
+	if (proxy == null) {
+		console.error('[danmaku] 组件代理为空，画布不可用')
+		return
+	}
+	uni.createCanvasContextAsync({
+		id: 'dl-canvas',
+		component: proxy,
+		success: (context: CanvasContext) => {
+			const ctx = context.getContext('2d')
+			if (ctx == null) {
+				console.error('[danmaku] 2d 上下文为空，弹幕层不可用')
+				return
+			}
+			renderCtx = ctx
+			ctxRetry = 0
+			configureCanvas()
+		},
+		fail: (error: UniError) => {
+			console.error('[danmaku] 创建画布上下文失败: ' + error.errMsg)
+			if (ctxRetry >= RETRY_MAX) {
+				console.error('[danmaku] 画布上下文多次创建失败，弹幕层不可用')
+				return
+			}
+			ctxRetry++
+			setTimeout(() => {
+				createCanvasContext()
+			}, 120 * ctxRetry)
+		}
+	})
+}
+
+// ————————————————— 轨道分配 —————————————————
+
+function ensureScrollLanes(count: number) {
+	while (scrollLastSpawn.length < count) {
+		scrollLastSpawn.push(0)
+		scrollLastWidth.push(0)
+		scrollLastSpeed.push(0)
+		scrollLastTotal.push(0)
+	}
+}
+
+function ensureFixedLanes(count: number) {
+	while (topFreeAt.length < count) {
+		topFreeAt.push(0)
+	}
+	while (bottomFreeAt.length < count) {
+		bottomFreeAt.push(0)
+	}
+}
+
+/**
+ * 选一条可入队的滚动轨；-1 = 全部占满（该条丢弃）。
+ *
+ * 判据（两条同时满足才算空出）：
+ * ① 上一条尾部已完全进入画面并留出 GAP：t >= t_prev + (w_prev + GAP) / v_prev
+ * ② 新条不会在上一条离场前追尾（长文本更快，必须算追上时间）：
+ *    t >= t_prev + T_prev - (W - GAP) / v_new
+ */
+function pickScrollLane(width: number, speed: number, totalMs: number): number {
+	const count = scrollLaneCount()
+	ensureScrollLanes(count)
+	if (speed <= 0 || cssW <= GAP_PX) {
+		return -1
+	}
+	for (let i = 0; i < count; i++) {
+		const lastSpawn = scrollLastSpawn[i]
+		const lastWidth = scrollLastWidth[i]
+		const lastSpeed = scrollLastSpeed[i]
+		const lastTotal = scrollLastTotal[i]
+		if (lastSpeed <= 0 || lastTotal <= 0) {
+			return i
+		}
+		const tailCleared = lastSpawn + (lastWidth + GAP_PX) / lastSpeed
+		const noCatchUp = lastSpawn + lastTotal - (cssW - GAP_PX) / speed
+		const earliest = Math.max(tailCleared, noCatchUp)
+		if (nowLocal >= earliest) {
+			return i
+		}
+	}
+	return -1
+}
+
+// ————————————————— 渲染态与绘制 —————————————————
+
+function measureTextWidth(text: string, fontPx: number): number {
+	const ctx = renderCtx
+	if (ctx == null) {
+		// 上下文未就绪时的兜底估算（仅影响轨道间距，不影响可见性）
+		return text.length * fontPx * 0.92
+	}
+	ctx.font = fontPx.toString() + 'px sans-serif'
+	appliedFont = ctx.font
+	return ctx.measureText(text).width
+}
+
+function pushLive(content: string, kind: number, color: string, lane: number, width: number, fontPx: number, totalMs: number) {
+	const live = new LiveDanmaku()
+	live.content = content
+	live.kind = kind
+	live.color = color
+	live.lane = lane
+	live.width = width
+	live.ageMs = 0
+	live.totalMs = totalMs
+	live.fontSize = fontPx
+	liveItems.push(live)
+	// 性能护栏：极端密度下丢最旧，避免无界增长
+	while (liveItems.length > MAX_LIVE) {
+		liveItems.splice(0, 1)
+	}
+}
+
+function advance(dt: number) {
+	let i = liveItems.length - 1
+	while (i >= 0) {
+		const live = liveItems[i]
+		live.ageMs += dt
+		if (live.ageMs >= live.totalMs) {
+			liveItems.splice(i, 1)
+		}
+		i--
+	}
+}
+
+function laneTopY(lane: number): number {
+	return lane * laneHeight()
+}
+
+function bottomLaneTopY(lane: number): number {
+	const top = areaHeight() - (lane + 1) * laneHeight()
+	return top < 0 ? 0 : top
+}
+
+function draw() {
+	const ctx = renderCtx
+	if (ctx == null || cssW <= 0 || cssH <= 0) {
+		return
+	}
+	ctx.clearRect(0, 0, cssW, cssH)
+	if (liveItems.length == 0) {
+		return
+	}
+	const stroke = clamp(props.strokeWidth, 0, 3)
+	for (let i = 0; i < liveItems.length; i++) {
+		const live = liveItems[i]
+		let x = 0
+		let y = 0
+		if (live.kind == 1) {
+			const progress = live.totalMs <= 0 ? 1 : live.ageMs / live.totalMs
+			x = cssW - progress * (cssW + live.width)
+			y = laneTopY(live.lane)
+		} else if (live.kind == 2) {
+			x = (cssW - live.width) / 2
+			y = laneTopY(live.lane)
+		} else {
+			x = (cssW - live.width) / 2
+			y = bottomLaneTopY(live.lane)
+		}
+		const lineH = Math.max(MIN_LANE_HEIGHT, live.fontSize * LINE_HEIGHT_RATIO)
+		const textY = y + (lineH - live.fontSize) / 2
+
+		const font = live.fontSize.toString() + 'px sans-serif'
+		if (font != appliedFont) {
+			ctx.font = font
+			appliedFont = font
+		}
+		if (live.color != appliedFill) {
+			ctx.fillStyle = live.color
+			appliedFill = live.color
+		}
+		if (stroke > 0) {
+			if (stroke != appliedStroke) {
+				ctx.lineWidth = stroke
+				ctx.strokeStyle = '#000000'
+				appliedStroke = stroke
+			}
+			ctx.strokeText(live.content, x, textY)
+		}
+		ctx.fillText(live.content, x, textY)
+	}
+}
+
+function clearCanvas() {
+	const ctx = renderCtx
+	if (ctx != null && cssW > 0 && cssH > 0) {
+		ctx.clearRect(0, 0, cssW, cssH)
+	}
+}
+
+// ————————————————— 帧循环 —————————————————
+
+/**
+ * 单帧推进 + 自调度下一帧（约 16ms）。
+ * 停止条件：无存活弹幕 / 暂停 / 关闭——不空转重绘。
+ */
+function onFrame() {
+	timerId = 0
+	const wall = Date.now()
+	let dt = wall - lastTickMs
+	lastTickMs = wall
+	if (dt < 0) {
+		dt = 0
+	}
+	if (dt > MAX_FRAME_DT) {
+		dt = MAX_FRAME_DT
+	}
+	nowLocal += dt
+	advance(dt)
+	checkResize()
+	draw()
+	if (liveItems.length > 0 && props.playing && props.enabled) {
+		timerId = setTimeout(() => {
+			onFrame()
+		}, FRAME_MS)
+	}
+}
+
+function startLoop() {
+	if (timerId != 0) {
+		return
+	}
+	if (liveItems.length == 0) {
+		return
+	}
+	if (!props.playing || !props.enabled) {
+		return
+	}
+	// 起帧前对齐时间基准：暂停期间不累计 dt，恢复时不跳帧
+	lastTickMs = Date.now()
+	timerId = setTimeout(() => {
+		onFrame()
+	}, FRAME_MS)
+}
+
+function stopLoop() {
+	if (timerId != 0) {
+		clearTimeout(timerId)
+		timerId = 0
+	}
+}
+
+// ————————————————— 入队 —————————————————
+
+function enqueue(item: DanmakuItem) {
+	if (renderCtx == null || cssW <= 0 || cssH <= 0) {
+		return
+	}
+	const content = item.content
+	if (content.length == 0) {
+		return
+	}
+	const kind = kindOfMode(item.mode)
+	if (isKindBlocked(kind, blockList())) {
+		return
+	}
+	const fontPx = fontSizePx()
+	const width = measureTextWidth(content, fontPx)
+	const color = colorFor(item)
+	const totalMs = durationMs()
+	if (kind == 1) {
+		const speed = (cssW + width) / totalMs
+		const lane = pickScrollLane(width, speed, totalMs)
+		if (lane < 0) {
+			// 轨道全满：丢弃，不叠盖（与源 DanmakuView 的丢帧行为等价）
+			return
+		}
+		scrollLastSpawn[lane] = nowLocal
+		scrollLastWidth[lane] = width
+		scrollLastSpeed[lane] = speed
+		scrollLastTotal[lane] = totalMs
+		pushLive(content, kind, color, lane, width, fontPx, totalMs)
+	} else {
+		// 顶部/底部分开占位：同轨一次只放一条（固定位置，叠放即互相遮挡）
+		const count = fixedLaneCount()
+		ensureFixedLanes(count)
+		let lane = -1
+		if (kind == 2) {
+			for (let i = 0; i < count; i++) {
+				if (nowLocal >= topFreeAt[i]) {
+					lane = i
+					break
+				}
+			}
+			if (lane < 0) {
+				return
+			}
+			topFreeAt[lane] = nowLocal + totalMs
+		} else {
+			for (let i = 0; i < count; i++) {
+				if (nowLocal >= bottomFreeAt[i]) {
+					lane = i
+					break
+				}
+			}
+			if (lane < 0) {
+				return
+			}
+			bottomFreeAt[lane] = nowLocal + totalMs
+		}
+		pushLive(content, kind, color, lane, width, fontPx, totalMs)
+	}
+	startLoop()
+}
+
+// ————————————————— 状态复位 —————————————————
+
+function resetLanes() {
+	scrollLastSpawn.splice(0, scrollLastSpawn.length)
+	scrollLastWidth.splice(0, scrollLastWidth.length)
+	scrollLastSpeed.splice(0, scrollLastSpeed.length)
+	scrollLastTotal.splice(0, scrollLastTotal.length)
+	topFreeAt.splice(0, topFreeAt.length)
+	bottomFreeAt.splice(0, bottomFreeAt.length)
+}
+
+function resetRenderState() {
+	liveItems.splice(0, liveItems.length)
+	resetLanes()
+	nowLocal = 0
+	clearCanvas()
+}
+
+/** 切 P / seek / 重开弹幕：本地渲染态与合成层游标一起复位，避免补播陈旧弹幕 */
+function hardReset() {
+	stopLoop()
+	resetRenderState()
+	dm.reset()
+	lastProgress = -1
+}
+
+// ————————————————— 进度驱动 —————————————————
+
+function onProgress(value: number) {
+	if (value < 0) {
+		return
+	}
+	if (!props.enabled || !props.playing) {
+		// 暂停/关闭期间不消费：记住进度，恢复后按新进度对齐（不补播）
+		if (props.enabled && !props.playing && !playingHintShown) {
+			playingHintShown = true
+			// 有进度却不播放：多半是父级漏传 playing（弹幕会一直不出），留一条可诊断的痕
+			console.log('[danmaku] 收到播放进度但 playing=false，弹幕暂停推进')
+		}
+		lastProgress = value
+		return
+	}
+	if (props.cid <= 0) {
+		return
+	}
+	if (renderCtx == null) {
+		// 画布上下文未就绪时不消费游标，等就绪后按当前进度取用（避免丢弹幕）
+		return
+	}
+	if (cssW <= 0 || cssH <= 0) {
+		// 布局尺寸还没量到：借播放心跳重试（约 4 次/秒），量到后自动进入正常取用
+		configureCanvas()
+		return
+	}
+	if (lastProgress >= 0) {
+		const jumpedForward = value - lastProgress > SEEK_JUMP_MS
+		const jumpedBackward = value < lastProgress - SEEK_BACK_MS
+		if (jumpedForward || jumpedBackward) {
+			hardReset()
+		}
+	}
+	lastProgress = value
+	if (props.pullSegments) {
+		dm.ensureRange(props.cid, value)
+	}
+	const batch = dm.takeAt(value)
+	for (let i = 0; i < batch.length; i++) {
+		enqueue(batch[i])
+	}
+}
+
+// ————————————————— 生命周期与响应 —————————————————
+
+onMounted(() => {
+	nextTick(() => {
+		createCanvasContext()
+	})
+})
+
+onUnmounted(() => {
+	disposed = true
+	stopLoop()
+	liveItems.splice(0, liveItems.length)
+	resetLanes()
+	dm.reset()
+	lastProgress = -1
+	renderCtx = null
+})
+
+watch((): number => props.progressMs, (value: number) => {
+	onProgress(value)
+})
+
+watch((): number => props.cid, (value: number) => {
+	hardReset()
+	if (value > 0) {
+		onProgress(props.progressMs)
+	}
+})
+
+watch((): boolean => props.playing, (value: boolean) => {
+	if (value) {
+		startLoop()
+	} else {
+		stopLoop()
+	}
+})
+
+watch((): boolean => props.enabled, (value: boolean) => {
+	if (value) {
+		// 重新开弹幕：对齐当前进度，不补播关闭期间的弹幕
+		hardReset()
+		onProgress(props.progressMs)
+	} else {
+		stopLoop()
+		resetRenderState()
+	}
+})
+
+/** 屏蔽配置改动即时生效：已在屏的对应泳道条目立即撤下，彩色条目改白字 */
+function applyBlockFilter(types: Array<number>) {
+	let changed = false
+	let i = liveItems.length - 1
+	while (i >= 0) {
+		const live = liveItems[i]
+		if (isKindBlocked(live.kind, types)) {
+			liveItems.splice(i, 1)
+			changed = true
+		} else if (isColorBlocked(types) && live.color != '#FFFFFF') {
+			live.color = '#FFFFFF'
+			changed = true
+		}
+		i--
+	}
+	if (changed) {
+		draw()
+	}
+}
+
+watch((): Array<number> => props.blockTypes as Array<number>, (value: Array<number>) => {
+	applyBlockFilter(value)
+})
+
+watch((): number => props.fontScale, (value: number) => {
+	if (value <= 0) {
+		return
+	}
+	// 字号改动对已在屏的弹幕立即生效：重算字号与文本宽（不等下一条）
+	const fontPx = fontSizePx()
+	for (let i = 0; i < liveItems.length; i++) {
+		const live = liveItems[i]
+		live.fontSize = fontPx
+		live.width = measureTextWidth(live.content, fontPx)
+	}
+	draw()
+})
+</script>
+
+<style>
+	.dl {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		overflow: hidden;
+		/* 只做展示：触摸穿透到下层播放器（App 3.9+ / iOS 4.11+ 支持） */
+		pointer-events: none;
+	}
+
+	.dl-canvas {
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+	}
+</style>

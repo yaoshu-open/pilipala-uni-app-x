@@ -1,0 +1,114 @@
+<template>
+	<view class="rt" :style="rootStyle">
+		<template v-for="(seg, index) in segments" :key="index">
+			<image
+				v-if="seg.type == 'emote'"
+				class="rt-emote"
+				:src="seg.url"
+				:style="emoteStyle(seg.size)"
+				mode="aspectFit"
+			></image>
+			<text v-else-if="seg.type == 'at'" class="rt-token" :style="tokenStyle" @click="onUserTap(seg)">{{ seg.text }}</text>
+			<text v-else-if="seg.type == 'time'" class="rt-token" :style="tokenStyle" @click="onTimeTap(seg)">{{ seg.text }}</text>
+			<text v-else-if="seg.type == 'link'" class="rt-token" :style="tokenStyle" @click="onLinkTap(seg)">{{ seg.text }}</text>
+			<text v-else class="rt-text" :style="textStyle">{{ seg.text }}</text>
+		</template>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { ReplyContent, ReplySegment } from '../../models/reply.uts'
+import { textPrimary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 评论正文切片渲染（设计_视频详情域 §五、§八「富文本 span 点击」）。
+ *
+ * 为什么不是 rich-text：`rich-text` 不支持 span 级点击，用它渲染等于假装能点。
+ * 因此在模型层把正文切成 text / emote / at / time / link 五类切片（models/reply.uts#buildSegments），
+ * 这里逐片出组件：表情出 `<image>`（按 meta.size 缩放），可点切片出 `<text>` 并挂事件。
+ *
+ * 截断：`max-lines` 对 text 之外的切片无效（flex 布局没有行数概念），
+ * 统一用 `max-height = lineHeight * maxLines + overflow:hidden` 做裁剪（3 行 = 60px）。
+ * 折叠只用于一级评论预览；二级面板/楼中楼不传 maxLines。
+ */
+const props = defineProps({
+	content: { type: Object, default: null },
+	fontSize: { type: Number, default: 14 },
+	lineHeight: { type: Number, default: 20 },
+	/** 0 表示不截断 */
+	maxLines: { type: Number, default: 0 },
+	color: { type: String, default: '' }
+})
+
+const emit = defineEmits(['seek', 'open-user', 'open-link'])
+
+const primary = themeColor(currentThemeIndex())
+
+const segments = computed((): Array<ReplySegment> => {
+	const raw = props.content
+	if (raw == null) {
+		return [] as Array<ReplySegment>
+	}
+	return (raw as ReplyContent).segments
+})
+
+const rootStyle = computed((): string => {
+	if (props.maxLines <= 0) {
+		return ''
+	}
+	return 'max-height:' + (props.lineHeight * props.maxLines).toString() + 'px;overflow:hidden;'
+})
+
+const textStyle = computed((): string => {
+	const color = props.color.length > 0 ? props.color : textPrimary()
+	return 'font-size:' + props.fontSize.toString() + 'px;line-height:' + props.lineHeight.toString() +
+		'px;color:' + color + ';'
+})
+
+const tokenStyle = computed((): string => {
+	return 'font-size:' + props.fontSize.toString() + 'px;line-height:' + props.lineHeight.toString() +
+		'px;color:' + primary + ';'
+})
+
+function emoteStyle(size: number): string {
+	const side = (size > 1 ? 40 : 20).toString()
+	return 'width:' + side + 'px;height:' + side + 'px;'
+}
+
+function onUserTap(seg: ReplySegment) {
+	if (seg.mid.length == 0) {
+		return
+	}
+	emit('open-user', seg.mid)
+}
+
+function onTimeTap(seg: ReplySegment) {
+	emit('seek', seg.text, seg.seconds)
+}
+
+function onLinkTap(seg: ReplySegment) {
+	emit('open-link', seg.text)
+}
+</script>
+
+<style>
+	.rt {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+	.rt-text {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.rt-token {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.rt-emote {
+		margin-left: 1px;
+		margin-right: 1px;
+	}
+</style>

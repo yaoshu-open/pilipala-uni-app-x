@@ -1,0 +1,213 @@
+<template>
+	<view class="fe">
+		<app-navbar :title="navTitle">
+			<template v-slot:right>
+				<view class="fe-nav-lock" @click="onTogglePrivacy">
+					<p-icon :name="privacy == 0 ? 'lock-open' : 'lock'" :size="22" :color="lockColor"></p-icon>
+				</view>
+				<view class="fe-nav-save" @click="onSubmit">
+			<text class="fe-nav-save-text" :style="saveTextStyle">保存</text>
+				</view>
+			</template>
+		</app-navbar>
+
+		<view class="fe-form">
+			<view class="fe-title-row">
+				<input
+					class="fe-title-input"
+					:style="inputStyle"
+					:value="title"
+					:maxlength="50"
+					placeholder="收藏夹名称"
+					placeholder-class="fe-placeholder"
+					:focus="autofocus"
+					@input="onTitleInput"
+				/>
+			</view>
+			<view class="fe-divider" :style="dividerStyle"></view>
+			<view class="fe-intro-row">
+				<textarea
+					class="fe-intro-input"
+					:style="inputStyle"
+					:value="intro"
+					:maxlength="200"
+					placeholder="输入收藏夹简介"
+					placeholder-class="fe-placeholder"
+					:auto-height="true"
+					@input="onIntroInput"
+				></textarea>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import { favFolderAdd, favFolderEdit } from '../../api/fav.uts'
+import { FavActionResult } from '../../models/fav.uts'
+import { textPrimary, textSecondary, errorText as errorTextColor, withAlpha } from '../../utils/theme.uts'
+
+/**
+ * 新建/编辑收藏夹（源头：`lib/pages/fav_edit/view.dart`）。
+ *
+ *  - 深链：favEdit（无参=add「新建收藏夹」）/ favEdit?mediaId&title&intro&privacy（edit「编辑收藏夹」）；
+ *  - 顶栏右侧：隐私锁切换（privacy=0 公开→lock_open 正常色，点击转私密；=1 私密→lock error 色，
+ *    基线 4x 取证公开态确为开锁形态）+「保存」文字按钮（基线实测固定暗金，不随主题色）；
+ *  - 表单：名称输入（placeholder「收藏夹名称」，底 1px 分隔线）+ 简介输入（placeholder「输入收藏夹简介」）；
+ *  - 保存校验：空标题拦截 toast「请输入收藏夹名称」（源 validator 同文案）；
+ *  - 成功 toast「新建成功/编辑成功」（源文案）后返回上级；失败 toast 接口 message
+ *    （含凭据缺失「登录凭据缺失，请重新登录后再试」，UI 状态不变）。
+ */
+const type = ref<string>('add')
+const mediaId = ref<number>(0)
+const title = ref<string>('')
+const intro = ref<string>('')
+/** 0 公开 / 1 私密 */
+const privacy = ref<number>(0)
+const submitting = ref<boolean>(false)
+const autofocus = ref<boolean>(false)
+
+/** 「保存」文字：基线 P5_fav_edit 实测为固定暗金（#785E15 族，与 mine 页金点缀同源），不随主题色 */
+const SAVE_GOLD: string = '#7A6017'
+
+const navTitle = computed((): string => type.value == 'add' ? '新建收藏夹' : '编辑收藏夹')
+const inputStyle = computed((): string => 'color:' + textPrimary() + ';')
+const saveTextStyle: string = 'color:' + SAVE_GOLD + ';'
+const dividerStyle: string = 'background-color:' + withAlpha(textSecondary(), 0.2) + ';'
+
+// 锁图标颜色：公开=正文色、私密=错误色（源 Icons.lock_open 0xe3b0 / lock 0xe3ae，经 p-icon 呈现）
+const lockColor = computed((): string => privacy.value == 0 ? textPrimary() : errorTextColor())
+
+function onTitleInput(event: UniInputEvent) {
+	title.value = event.detail.value
+}
+
+function onIntroInput(event: UniInputEvent) {
+	intro.value = event.detail.value
+}
+
+function onTogglePrivacy() {
+	privacy.value = privacy.value == 0 ? 1 : 0
+}
+
+async function onSubmit() {
+	if (submitting.value) {
+		return
+	}
+	const trimmed = title.value.trim()
+	if (trimmed.length == 0) {
+		uni.showToast({ title: '请输入收藏夹名称', icon: 'none' })
+		return
+	}
+	submitting.value = true
+	let res: FavActionResult
+	if (type.value == 'edit') {
+		res = await favFolderEdit(mediaId.value, title.value, intro.value, privacy.value)
+	} else {
+		res = await favFolderAdd(title.value, intro.value, privacy.value)
+	}
+	submitting.value = false
+	if (res.status) {
+		uni.showToast({ title: res.successToast, icon: 'none' })
+		setTimeout(() => {
+			uni.navigateBack({ delta: 1 })
+		}, 300)
+	} else {
+		uni.showToast({ title: res.message, icon: 'none' })
+	}
+}
+
+onLoad((options) => {
+	if (options != null && options['mediaId'] != null) {
+		const rawMediaId = options['mediaId']
+		if (rawMediaId != null && rawMediaId.length > 0) {
+			const parsed = parseInt(rawMediaId)
+			if (!isNaN(parsed)) {
+				type.value = 'edit'
+				mediaId.value = parsed
+				autofocus.value = false
+			}
+		}
+		const rawTitle = options['title']
+		if (rawTitle != null && rawTitle.length > 0) {
+			title.value = decodeURIComponent(rawTitle)
+		}
+		const rawIntro = options['intro']
+		if (rawIntro != null && rawIntro.length > 0) {
+			intro.value = decodeURIComponent(rawIntro)
+		}
+		const rawPrivacy = options['privacy']
+		if (rawPrivacy != null && rawPrivacy.length > 0) {
+			privacy.value = rawPrivacy == '1' ? 1 : 0
+		}
+	} else {
+		// 新建模式：名称框自动聚焦（源 autofocus: true）
+		autofocus.value = true
+	}
+})
+</script>
+
+<style>
+	.fe {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fe-nav-lock {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.fe-nav-save {
+		height: 56px;
+		padding-left: 8px;
+		padding-right: 14px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.fe-nav-save-text {
+		font-size: 15px;
+	}
+	.fe-form {
+		display: flex;
+		flex-direction: column;
+	}
+	.fe-title-row {
+		padding-left: 14px;
+		padding-right: 14px;
+		padding-top: 10px;
+		padding-bottom: 5px;
+	}
+	.fe-title-input {
+		height: 44px;
+		font-size: 15px;
+	}
+	.fe-divider {
+		height: 1px;
+		margin-left: 14px;
+		margin-right: 14px;
+	}
+	.fe-intro-row {
+		padding-left: 14px;
+		padding-right: 14px;
+		padding-top: 5px;
+		padding-bottom: 5px;
+	}
+	.fe-intro-input {
+		width: 100%;
+		font-size: 15px;
+		line-height: 22px;
+	}
+	.fe-placeholder {
+		color: #9A9CA5;
+		font-size: 15px;
+	}
+</style>

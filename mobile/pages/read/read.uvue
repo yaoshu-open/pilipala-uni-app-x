@@ -1,0 +1,390 @@
+<template>
+	<view class="rd" :style="pageStyle">
+		<app-navbar :title="title" :show-back="true" :title-opacity="navTitleOpacity">
+			<template #right>
+				<view class="rd-more" @click="openMenu">
+					<p-icon name="more-vert" :size="22" :color="textPrimary()"></p-icon>
+				</view>
+			</template>
+		</app-navbar>
+
+		<scroll-view class="rd-scroll" direction="vertical" @scroll="onScroll">
+			<!-- 标题：24 粗体 / 字距 1 / 行高 1.5（源 _buildTitle 同款） -->
+			<view class="rd-title-block">
+				<text class="rd-title" :style="titleStyle">{{ title }}</text>
+			</view>
+
+			<view class="rd-content" :style="contentStyle">
+				<view class="rd-loading" :style="loadingStyle">
+					<view v-for="n in 5" :key="'sk-' + n.toString()" class="rd-sk-row">
+						<skeleton-block width="92%" height="14px" radius="4px"></skeleton-block>
+						<view class="rd-sk-gap"></view>
+						<skeleton-block width="60%" height="13px" radius="4px"></skeleton-block>
+						<view class="rd-sk-gap"></view>
+					</view>
+				</view>
+
+				<view class="rd-error" :style="errorStyle">
+					<text class="rd-error-text" :style="secondaryStyle">{{ errorText }}</text>
+					<view class="rd-retry" @click="loadAll">
+						<text class="rd-retry-text" :style="primaryStyle">点击重试</text>
+					</view>
+				</view>
+
+				<view class="rd-body" :style="bodyStyle">
+					<!-- 统计行：时间 · N浏览 · N点赞（源 _buildStatsWidget 同款，13 outline） -->
+					<view class="rd-stats">
+						<text class="rd-stat" :style="secondaryStyle">{{ statsText }}</text>
+					</view>
+
+					<!-- 作者行：头像 48 + 昵称 + K 等级图标 + 粉丝/文章数（源 _buildAuthorWidget 同款） -->
+					<view class="rd-author" @click="openAuthor">
+						<network-img :src="authorFace" width="48px" height="48px" radius="24px"></network-img>
+						<view class="rd-gap10"></view>
+						<view class="rd-author-body">
+							<view class="rd-author-name-row">
+								<text class="rd-author-name" :style="authorNameStyle" :max-lines="1">{{ authorName }}</text>
+								<view class="rd-gap6"></view>
+								<image v-if="levelIconVisible" class="rd-level" :src="levelIcon"></image>
+							</view>
+							<text class="rd-author-meta" :style="secondaryStyle" :max-lines="1">{{ authorMeta }}</text>
+						</view>
+					</view>
+
+					<!-- 正文：opus 结构化段落优先；否则纯文本按行拆段（站点改版后 cv 正文为纯文本） -->
+					<article-body v-if="hasOpus" :paragraphs="paragraphs"></article-body>
+					<view v-else class="rd-plain">
+						<text
+							v-for="(line, index) in plainLines"
+							:key="'ln-' + index.toString()"
+							class="rd-plain-line"
+							:style="plainStyle"
+						>{{ line }}</text>
+					</view>
+				</view>
+			</view>
+			<view class="rd-bottom" :style="bottomStyle"></view>
+		</scroll-view>
+
+		<!-- 更多菜单（源 PopupMenuButton：查看原网页） -->
+		<view class="rd-menu-mask" :style="menuMaskStyle" @click="closeMenu">
+			<view class="rd-menu" :style="menuStyle">
+				<view class="rd-menu-item" @click.stop="onOpenOrigin">
+					<text class="rd-menu-text" :style="titleTextStyle">查看原网页</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import ArticleBody from '../../components/article/article-body.uvue'
+import { fetchArticleCv } from '../../api/article.uts'
+import { ArticleParagraph } from '../../models/article.uts'
+import { navigateTo } from '../../utils/routes.uts'
+import { pageBackground, textPrimary, textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+import { safeAreaBottom, statusBarHeight } from '../../utils/safeArea.uts'
+import { numFormat, dateFormat } from '../../utils/format.uts'
+
+/**
+ * 专栏阅读（源头：`lib/pages/read/view.dart` + `controller.dart`）。
+ *
+ * 取数：`/x/article/view?id={cvid}` → `ArticleReadInfo`（api/article.uts#fetchArticleCv）。
+ *  源为抓 cv 页 HTML 的 __INITIAL_STATE__；站点改版后 cv 页只回 article-web 空壳（实测 2026），
+ *  改用同内容源的 JSON 端点（title/author/stats/publish_time/opus 段落一一对应）。
+ * 结构（1:1）：导航栏（滚动 > 100 标题淡入 + ⋮「查看原网页」）→ 标题 24 粗体 → 统计行（时间 · 浏览 · 点赞）
+ *  → 作者行（48 头像 + 昵称 + 等级图标 + 粉丝/文章）→ 正文（opus 段落 / 纯文本按行拆段）。
+ * 差异：源 SelectableText 可选中复制（无等价）；纯文本正文的富排版弱于源 HtmlRender（图片改由
+ *  opus 段落或原网页兜底）；源无评论区，本页同样不含评论。
+ */
+const cvid = ref<string>('')
+const title = ref<string>('')
+const authorName = ref<string>('')
+const authorFace = ref<string>('')
+const authorMid = ref<number>(0)
+const authorFans = ref<number>(0)
+const authorLevel = ref<number>(0)
+const totalArtNum = ref<number>(0)
+const publishTime = ref<number>(0)
+const viewCount = ref<number>(0)
+const likeCount = ref<number>(0)
+const paragraphs = ref<Array<ArticleParagraph>>([])
+const hasOpus = ref<boolean>(false)
+const contentText = ref<string>('')
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const scrollY = ref<number>(0)
+const menuVisible = ref<boolean>(false)
+
+const primary = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const titleTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryStyle = computed((): string => 'color:' + primary + ';')
+const plainStyle = computed((): string => 'color:' + textPrimary() + ';')
+const authorNameStyle = computed((): string => 'color:' + textPrimary() + ';')
+const contentStyle = computed((): string => 'padding-left:16px;padding-right:16px;')
+const bottomStyle = computed((): string => 'height:' + (safeAreaBottom() + 40).toString() + 'px;')
+const loadingStyle = computed((): string => state.value == 'loading' ? 'display:flex;' : 'display:none;')
+const errorStyle = computed((): string => state.value == 'error' ? 'display:flex;' : 'display:none;')
+const bodyStyle = computed((): string => state.value == 'ready' ? 'display:flex;' : 'display:none;')
+const menuMaskStyle = computed((): string => menuVisible.value ? 'display:flex;' : 'display:none;')
+const menuStyle = computed((): string => 'margin-top:' + (statusBarHeight() + 44).toString() + 'px;background-color:' + pageBackground() + ';')
+const navTitleOpacity = computed((): number => scrollY.value > 100 ? 1 : 0)
+const levelIconVisible = computed((): boolean => authorLevel.value >= 0 && authorLevel.value <= 6)
+const levelIcon = computed((): string => '/static/images/lv/lv' + authorLevel.value.toString() + '.png')
+const authorMeta = computed((): string => '粉丝: ' + numFormat(authorFans.value) + '   文章: ' + numFormat(totalArtNum.value))
+const statsText = computed((): string => {
+	let text = dateFormat(publishTime.value, 'detail')
+	if (text.length > 0) {
+		text += '   '
+	}
+	text += numFormat(viewCount.value) + '浏览 · ' + numFormat(likeCount.value) + '点赞'
+	return text
+})
+const plainLines = computed((): Array<string> => {
+	const text = contentText.value
+	const lines: Array<string> = []
+	if (text.length == 0) {
+		return lines
+	}
+	const raw = text.split('\n')
+	for (let i = 0; i < raw.length; i++) {
+		const line = raw[i].trim()
+		if (line.length > 0) {
+			lines.push(line)
+		}
+	}
+	return lines
+})
+
+function onScroll(event: UniScrollEvent) {
+	scrollY.value = Math.round(event.detail.scrollTop)
+}
+
+async function loadAll() {
+	state.value = 'loading'
+	errorText.value = ''
+	const res = await fetchArticleCv(cvid.value)
+	if (!res.status || res.data == null) {
+		state.value = 'error'
+		errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		return
+	}
+	const info = res.data
+	title.value = info.title.length > 0 ? info.title : title.value
+	authorName.value = info.author.name
+	authorFace.value = info.author.face
+	authorMid.value = info.author.mid
+	authorFans.value = info.author.fans
+	authorLevel.value = info.author.level
+	totalArtNum.value = info.totalArtNum
+	publishTime.value = info.publishTime
+	viewCount.value = info.viewCount
+	likeCount.value = info.likeCount
+	paragraphs.value = info.paragraphs
+	hasOpus.value = info.hasOpus
+	contentText.value = info.contentText
+	state.value = 'ready'
+}
+
+function openMenu() {
+	menuVisible.value = true
+}
+
+function closeMenu() {
+	menuVisible.value = false
+}
+
+function onOpenOrigin() {
+	menuVisible.value = false
+	const url = 'https://www.bilibili.com/read/cv' + cvid.value
+	navigateTo('/pages/webview/webview?url=' + encodeURIComponent(url) + '&type=webview&pageTitle=' + encodeURIComponent(title.value))
+}
+
+function openAuthor() {
+	if (authorMid.value <= 0) {
+		return
+	}
+	navigateTo('/pages/member/member?mid=' + authorMid.value.toString())
+}
+
+onBackPress(() => {
+	if (menuVisible.value) {
+		closeMenu()
+		return true
+	}
+	return false
+})
+
+onLoad((options) => {
+	const rawId = options != null ? options['id'] : null
+	if (rawId == null || (rawId as string).length == 0) {
+		state.value = 'error'
+		errorText.value = '缺少专栏参数（id）'
+		return
+	}
+	cvid.value = rawId as string
+	const rawTitle = options != null ? options['title'] : null
+	if (rawTitle != null) {
+		title.value = rawTitle as string
+	}
+	loadAll()
+})
+</script>
+
+<style>
+	.rd {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.rd-more {
+		width: 44px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.rd-scroll {
+		flex: 1;
+	}
+	.rd-title-block {
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 16px;
+		padding-bottom: 4px;
+	}
+	.rd-title {
+		font-size: 24px;
+		font-weight: 700;
+		letter-spacing: 1px;
+		line-height: 36px;
+	}
+	.rd-content {
+		display: flex;
+		flex-direction: column;
+	}
+	.rd-loading {
+		display: flex;
+		flex-direction: column;
+		padding-top: 8px;
+	}
+	.rd-sk-row {
+		display: flex;
+		flex-direction: column;
+		padding-bottom: 4px;
+	}
+	.rd-sk-gap {
+		height: 6px;
+	}
+	.rd-error {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		height: 100px;
+	}
+	.rd-error-text {
+		font-size: 14px;
+	}
+	.rd-retry {
+		margin-top: 10px;
+	}
+	.rd-retry-text {
+		font-size: 14px;
+	}
+	.rd-body {
+		display: flex;
+		flex-direction: column;
+	}
+	.rd-stats {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-bottom: 30px;
+	}
+	.rd-stat {
+		font-size: 13px;
+	}
+	.rd-author {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-bottom: 20px;
+	}
+	.rd-author-body {
+		display: flex;
+		flex-direction: column;
+	}
+	.rd-author-name-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.rd-author-name {
+		font-size: 14px;
+		font-weight: 500;
+	}
+	.rd-level {
+		width: 26px;
+		height: 11px;
+	}
+	.rd-author-meta {
+		font-size: 13px;
+	}
+	.rd-gap6 {
+		width: 6px;
+	}
+	.rd-gap10 {
+		width: 10px;
+	}
+	.rd-plain {
+		display: flex;
+		flex-direction: column;
+	}
+	.rd-plain-line {
+		font-size: 14px;
+		line-height: 21px;
+		margin-bottom: 10px;
+	}
+	.rd-bottom {
+		width: 100%;
+	}
+	.rd-menu-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+	}
+	.rd-menu {
+		width: 150px;
+		border-radius: 8px;
+		padding-top: 6px;
+		padding-bottom: 6px;
+		margin-right: 10px;
+	}
+	.rd-menu-item {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+	}
+	.rd-menu-text {
+		font-size: 15px;
+	}
+</style>

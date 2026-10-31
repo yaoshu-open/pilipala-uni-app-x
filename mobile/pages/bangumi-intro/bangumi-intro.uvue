@@ -1,0 +1,2071 @@
+<template>
+	<view class="bg" :style="pageStyle">
+		<!-- 状态栏避让（口径同 pages/video：播放区从状态栏下方开始，底色跟页面） -->
+		<view class="bg-statusbar" :style="statusBarStyle"></view>
+
+		<view class="bg-stage">
+			<player-stage
+				:src="playSrc"
+				:backup-src="playBackupSrc"
+				:cover="cover"
+				:title="title"
+				:start-time="startSec"
+				:auto-play="autoPlay"
+				:duration-hint="durationHint"
+				@back="onBack"
+				@progress="onStageProgress"
+				@playing="onStagePlaying"
+				@fullscreen="onEnterFullscreen"
+			></player-stage>
+			<!-- 弹幕层：铺播放区「控制条以上」部分（口径同 pages/video，高度 = 播放区高 - 控制条 62px） -->
+			<view class="bg-dm" :style="dmLayerStyle">
+				<danmaku-layer
+					:cid="cid"
+					:playing="stagePlaying"
+					:progress-ms="progressMs"
+					:enabled="dmEnabled"
+					:show-area="dmShowArea"
+					:opacity="dmOpacity"
+					:font-scale="dmFontScale"
+					:duration-sec="dmDuration"
+					:stroke-width="dmStrokeWidth"
+					:block-types="dmBlockTypes"
+				></danmaku-layer>
+			</view>
+		</view>
+
+		<view class="bg-play-error" :style="playErrorStyle" @click="onRetryPlay">
+			<text class="bg-play-error-text" :style="playErrorTextStyle">{{ playError }}</text>
+			<text class="bg-play-error-retry" :style="primaryTextStyle">点击重试</text>
+		</view>
+
+		<view class="bg-loading" :style="loadingStyle">
+			<view v-for="n in 4" :key="'sk-' + n.toString()" class="bg-sk-row">
+				<skeleton-block width="100%" height="14px" radius="4px"></skeleton-block>
+				<view class="bg-sk-gap"></view>
+				<skeleton-block width="70%" height="12px" radius="4px"></skeleton-block>
+			</view>
+		</view>
+
+		<view class="bg-fill" :style="errorViewStyle">
+			<p-http-error :message="errorText" @retry="onRetryDetail"></p-http-error>
+		</view>
+
+		<view class="bg-main" :style="mainStyle">
+			<!-- Tab 栏（1:1 视频详情基线：简介/评论 等分 + 发弹幕 + 弹幕开关） -->
+			<view class="bg-tabs" :style="tabsStyle">
+				<view class="bg-tabs-left" :style="tabsHalfStyle">
+					<view class="bg-tab" @click="onTabIntro">
+						<view class="bg-tab-inner" :style="tabUnderlineStyle('intro')">
+							<text class="bg-tab-text" :style="tabTextStyle('intro')">简介</text>
+						</view>
+					</view>
+					<view class="bg-tab" @click="onTabReply">
+						<view class="bg-tab-inner" :style="tabUnderlineStyle('reply')">
+							<text class="bg-tab-text" :style="tabTextStyle('reply')">评论 {{ replyCountText }}</text>
+						</view>
+					</view>
+				</view>
+				<view class="bg-tabs-right" :style="tabsHalfStyle">
+					<view class="bg-dm-send" @click="openDanmakuSheet">
+						<text class="bg-dm-send-text" :style="primaryTextStyle">发弹幕</text>
+					</view>
+					<view class="bg-dm-switch" @click="onToggleDanmaku">
+						<p-icon name="chat-bubble-outline" :size="18" :color="dmEnabled ? primary : textSecondary()"></p-icon>
+					</view>
+				</view>
+			</view>
+
+			<view class="bg-content">
+				<!-- 简介 Tab：信息面板 → 互动行 → 选集面板（1:1 番剧基线，无 UP 行/相关推荐） -->
+				<scroll-view v-show="tab == 'intro'" class="bg-scroll" :scroll-top="scrollTop">
+					<view class="bg-body" :style="bodyStyle">
+						<!-- 信息面板：封面卡（评分角标）+ 右列（标题/追番钮/数据/放送/简介折叠） -->
+						<view class="bg-info">
+							<view class="bg-cover">
+								<image class="bg-cover-img" :src="cover" mode="aspectFill"></image>
+								<view class="bg-score" :style="scoreBadgeStyle">
+									<text class="bg-score-text">{{ scoreText }}</text>
+								</view>
+							</view>
+							<!-- 右列整块可点：展开简介详情弹层（源 InkWell 同款） -->
+							<view class="bg-info-right" @click="openIntroSheet">
+								<view class="bg-title-row">
+									<text class="bg-title" :style="titleTextStyle" :max-lines="1">{{ title }}</text>
+								<view class="bg-fav-btn" :style="favBtnStyle" @click.stop="onToggleFollowSeason">
+									<p-icon :name="followed ? 'favorite' : 'favorite-border'" :size="22" :color="primary"></p-icon>
+								</view>
+								</view>
+								<view class="bg-stat-row">
+									<p-icon name="visibility" :size="12" :color="textSecondary()"></p-icon>
+									<text class="bg-stat-text" :style="secondaryTextStyle">{{ statViewsText }}</text>
+									<view class="bg-stat-gap"></view>
+									<p-icon name="subtitles-outlined" :size="12" :color="textSecondary()"></p-icon>
+									<text class="bg-stat-text" :style="secondaryTextStyle">{{ statDanmuText }}</text>
+								</view>
+								<text class="bg-meta" :style="secondaryTextStyle" :max-lines="1">{{ metaLineText }}</text>
+								<text class="bg-meta" :style="secondaryTextStyle" :max-lines="1">{{ info != null ? info.newEpDesc : '' }}</text>
+								<view class="bg-desc-flex"></view>
+								<text class="bg-desc" :style="secondaryTextStyle" :max-lines="3">简介：{{ info != null ? info.evaluate : '' }}</text>
+							</view>
+						</view>
+
+						<!-- 互动行（1:1 基线：赞/币/藏/评论/分享 五等分；oid=当前分集 bvid/aid，复用 api/play.uts） -->
+						<view class="bg-actions">
+							<view class="bg-act" @click="onLikeTap">
+								<p-icon :name="liked ? 'thumb-up' : 'thumb-up-alt-outlined'" :size="20" :color="liked ? primary : textSecondary()"></p-icon>
+								<text class="bg-act-text" :style="actTextStyle(liked)">{{ likeNum.toString() }}</text>
+							</view>
+							<view class="bg-act" @click="onCoinTap">
+								<p-icon name="monetization-on-outlined" :size="20" :color="coined ? primary : textSecondary()"></p-icon>
+								<text class="bg-act-text" :style="actTextStyle(coined)">{{ coinNum.toString() }}</text>
+							</view>
+							<view class="bg-act" @click="onFavTap">
+								<p-icon :name="faved ? 'star' : 'star-outline'" :size="20" :color="faved ? primary : textSecondary()"></p-icon>
+								<text class="bg-act-text" :style="actTextStyle(faved)">{{ favNum.toString() }}</text>
+							</view>
+							<view class="bg-act" @click="onTabReply">
+								<p-icon name="chat-bubble-outline" :size="20" :color="textSecondary()"></p-icon>
+								<text class="bg-act-text" :style="actTextStyle(false)">{{ replyNum.toString() }}</text>
+							</view>
+							<view class="bg-act" @click="onShareTap">
+								<p-icon name="share-outlined" :size="20" :color="textSecondary()"></p-icon>
+								<text class="bg-act-text" :style="actTextStyle(false)">{{ shareNum.toString() }}</text>
+							</view>
+						</view>
+
+						<!-- 选集面板（episodes 非空才渲染）：状态行 + 横向选集（当前话主色高亮 + 会员标记） -->
+						<view v-if="episodes.length > 0" class="bg-eps">
+							<view class="bg-eps-head">
+								<text class="bg-eps-title" :style="titleTextStyle">选集</text>
+								<text class="bg-eps-playing" :style="secondaryTextStyle" :max-lines="1"> 正在播放：{{ playingLongTitle }}</text>
+								<view class="bg-eps-status" @click="onToggleOrder">
+									<text class="bg-eps-status-text" :style="primaryTextStyle" :max-lines="1">{{ info != null ? info.newEpDesc : '' }}</text>
+								</view>
+							</view>
+							<!-- 横向滚动三要素（规约 §2.2）：容器 row + 确定宽 + 子项 flex-shrink:0 -->
+							<scroll-view class="bg-eps-scroll" direction="horizontal" :show-scrollbar="false">
+								<view class="bg-eps-row">
+									<view
+										v-for="(ep, i) in shownEpisodes"
+										:key="'ep-' + ep.id.toString()"
+										class="bg-ep"
+										:style="epStyle(i)"
+										@click="onSwitchEpisode(i)"
+									>
+										<view class="bg-ep-line1">
+											<p-icon :name="isPlayingIndex(i) ? 'play-circle' : ''" :size="12" :color="primary"></p-icon>
+											<text class="bg-ep-no" :style="epTextStyle(i)">{{ epIndexLabel(i) }}</text>
+											<view class="bg-ep-flex"></view>
+											<text class="bg-ep-badge" :style="primaryTextStyle">{{ ep.badge }}</text>
+										</view>
+										<text class="bg-ep-title" :style="epTextStyle(i)" :max-lines="1">{{ ep.longTitle.length > 0 ? ep.longTitle : ep.title }}</text>
+									</view>
+								</view>
+							</scroll-view>
+						</view>
+					</view>
+				</scroll-view>
+
+				<view class="bg-reply-closed" :style="replyClosedStyle">
+					<text class="bg-reply-closed-text" :style="secondaryTextStyle">该内容的评论区已关闭，暂时无法发表评论</text>
+				</view>
+
+				<!-- 评论 Tab：reply-list 完整复用（oid=分集 aid；watch oid 切集自动重拉） -->
+				<view v-if="replyOpened" class="bg-reply-pane" :style="tab == 'reply' ? 'display:flex;' : 'display:none;'">
+					<reply-list
+						:oid="aid"
+						:up-mid="''"
+						:insert-seq="insertSeq"
+						:insert-item="insertItem"
+						:bottom-inset="replyBottomInset"
+						@open-reply="onOpenReply"
+						@reply="onReplyFromItem"
+						@need-login="showLoginGuide"
+						@seek="onSeekText"
+						@open-user="onOpenUser"
+						@open-link="onOpenLink"
+						@req-code="onReqCode"
+					></reply-list>
+				</view>
+			</view>
+		</view>
+
+		<!-- 发评论入口 -->
+		<view class="bg-input-bar" :style="inputBarWrapStyle">
+			<reply-input
+				:oid="aid"
+				:root="mainRoot"
+				:parent="mainParent"
+				:reply-to-name="replyTargetName"
+				:force-close-seq="emoteCloseSeq"
+				@sent="onSentComment"
+				@need-login="showLoginGuide"
+				@popup-state="onEmoteState"
+				@cancel-reply="onCancelReplyTarget"
+			></reply-input>
+		</view>
+
+		<!-- 发弹幕弹层（口径同 pages/video：键盘高度上移 + pushLocal 即时上屏） -->
+		<view class="bg-dm-mask" :style="dmMaskStyle">
+			<view class="bg-dm-mask-bg" @click="closeDanmakuSheet"></view>
+			<view class="bg-dm-sheet" :style="dmSheetStyle">
+				<view class="bg-dm-sheet-head">
+					<text class="bg-dm-sheet-title" :style="titleTextStyle">发弹幕</text>
+					<text class="bg-dm-sheet-tip" :style="secondaryTextStyle">{{ dmProgressText }}</text>
+					<view class="bg-dm-sheet-close" @click="closeDanmakuSheet">
+						<text class="bg-dm-sheet-close-text" :style="secondaryTextStyle">关闭</text>
+					</view>
+				</view>
+				<view class="bg-dm-sheet-row">
+					<input
+						class="bg-dm-input"
+						:style="dmInputStyle"
+						:value="dmText"
+						:maxlength="100"
+						:adjust-position="false"
+						placeholder="发个友善的弹幕见证当下"
+						placeholder-class="bg-dm-placeholder"
+						confirm-type="send"
+						@input="onDmInput"
+						@confirm="onSendDanmaku"
+					/>
+					<view class="bg-dm-submit" :style="dmSubmitStyle" @click="onSendDanmaku">
+						<text class="bg-dm-submit-text">{{ dmSending ? '发送中' : '发送' }}</text>
+					</view>
+				</view>
+			</view>
+		</view>
+
+		<!-- 二级评论面板（楼中楼，口径同 pages/video） -->
+		<view class="bg-sheet-mask" :style="sheetMaskStyle">
+			<view class="bg-sheet" :style="sheetStyle">
+				<view class="bg-sheet-head">
+					<view class="bg-sheet-grip" @click="toggleSheetHeight">
+						<view class="bg-sheet-grip-bar" :style="gripStyle"></view>
+					</view>
+					<view class="bg-sheet-title-row">
+						<text class="bg-sheet-title" :style="titleTextStyle">评论详情</text>
+						<text class="bg-sheet-tip" :style="secondaryTextStyle">{{ sheetHeightTip }}</text>
+						<view class="bg-sheet-close" @click="closeSheet">
+							<text class="bg-sheet-close-text" :style="secondaryTextStyle">关闭</text>
+						</view>
+					</view>
+				</view>
+				<scroll-view class="bg-sheet-scroll" :lower-threshold="200" @scrolltolower="onSheetLoadMore">
+					<reply-item-view
+						v-if="sheetRoot != null"
+						:item="sheetRoot"
+						level="2"
+						:show-reply-row="false"
+						@need-login="showLoginGuide"
+						@reply="onReplyFromSheet"
+						@seek="onSeekText"
+						@open-user="onOpenUser"
+						@open-link="onOpenLink"
+					></reply-item-view>
+					<view class="bg-sheet-sep" :style="sheetSepStyle"></view>
+					<view v-if="sheetState == 'loading'" class="bg-sheet-state">
+						<text class="bg-sheet-state-text" :style="secondaryTextStyle">加载中…</text>
+					</view>
+					<view v-else-if="sheetState == 'error'" class="bg-sheet-state" @click="reloadSheet">
+						<text class="bg-sheet-state-text" :style="secondaryTextStyle">{{ sheetError }}</text>
+						<text class="bg-sheet-state-retry" :style="primaryTextStyle">点击重试</text>
+					</view>
+					<view v-else-if="sheetList.length == 0" class="bg-sheet-state">
+						<text class="bg-sheet-state-text" :style="secondaryTextStyle">还没有评论</text>
+					</view>
+					<view v-else class="bg-sheet-list">
+						<reply-item-view
+							v-for="reply in sheetList"
+							:key="reply.rpid"
+							:item="reply"
+							level="2"
+							:show-reply-row="false"
+							@need-login="showLoginGuide"
+							@reply="onReplyFromSheet"
+							@seek="onSeekText"
+							@open-user="onOpenUser"
+							@open-link="onOpenLink"
+						></reply-item-view>
+					</view>
+					<view class="bg-sheet-footer">
+						<text class="bg-sheet-footer-text" :style="secondaryTextStyle">{{ sheetFooterText }}</text>
+					</view>
+				</scroll-view>
+				<view class="bg-sheet-input">
+					<reply-input
+						:oid="aid"
+						:root="sheetRootRpid"
+						:parent="sheetParentRpid"
+						:reply-to-name="sheetReplyName"
+						placeholder="回复这条评论"
+						:force-close-seq="emoteCloseSeq"
+						@sent="onSheetSent"
+						@need-login="showLoginGuide"
+						@popup-state="onEmoteState"
+						@cancel-reply="onCancelSheetReply"
+					></reply-input>
+				</view>
+			</view>
+		</view>
+
+		<!-- 简介详情弹层（源 IntroDetail：标题/数据/放送/简介全文/声优） -->
+		<view class="bg-intro-mask" :style="introMaskStyle">
+			<view class="bg-intro-mask-bg" @click="closeIntroSheet"></view>
+			<view class="bg-intro-sheet" :style="introSheetStyle">
+				<view class="bg-intro-grip">
+					<view class="bg-intro-grip-bar" :style="gripStyle"></view>
+				</view>
+				<scroll-view class="bg-intro-scroll" direction="vertical">
+					<text class="bg-intro-title" :style="titleTextStyle">{{ title }}</text>
+					<view class="bg-intro-stat-row">
+						<text class="bg-intro-stat" :style="secondaryTextStyle">{{ statLineText }}</text>
+					</view>
+					<view class="bg-intro-meta-row">
+						<text class="bg-intro-meta" :style="secondaryTextStyle">{{ introMetaText }}</text>
+					</view>
+					<text class="bg-intro-sec" :style="titleTextStyle">简介：</text>
+					<text class="bg-intro-text" :style="secondaryTextStyle">{{ info != null ? info.evaluate : '' }}</text>
+					<text v-if="actorsText.length > 0" class="bg-intro-sec" :style="titleTextStyle">声优</text>
+					<text v-if="actorsText.length > 0" class="bg-intro-text" :style="secondaryTextStyle">{{ actorsText }}</text>
+					<view class="bg-intro-bottom" :style="introBottomStyle"></view>
+				</scroll-view>
+			</view>
+		</view>
+
+		<!-- 投币弹层（源 AlertDialog 1/2 枚单选） -->
+		<view class="bg-coin-mask" :style="coinMaskStyle">
+			<view class="bg-coin-mask-bg" @click="closeCoinSheet"></view>
+			<view class="bg-coin-dialog" :style="coinDialogStyle">
+				<text class="bg-coin-title" :style="titleTextStyle">选择投币个数</text>
+				<view class="bg-coin-opt" @click="onCoinChoose(1)">
+					<text class="bg-coin-opt-text" :style="titleTextStyle">1 枚</text>
+				</view>
+				<view class="bg-coin-opt" @click="onCoinChoose(2)">
+					<text class="bg-coin-opt-text" :style="titleTextStyle">2 枚</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onShow, onHide, onUnload, onBackPress } from '@dcloudio/uni-app'
+import PlayerStage from '../../components/player/player-stage.uvue'
+import DanmakuLayer from '../../components/player/danmaku-layer.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import ReplyList from '../../components/reply/reply-list.uvue'
+import ReplyInput from '../../components/reply/reply-input.uvue'
+import ReplyItemView from '../../components/reply/reply-item.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import { fetchBangumiInfo, bangumiFollowAdd, bangumiFollowDel } from '../../api/bangumi.uts'
+import { fetchPlayUrl, hasLike, hasCoin, hasFav, likeVideo, coinVideo, toggleDefaultFav } from '../../api/play.uts'
+import { fetchReplyReplyList, REPLY_CLOSED_CODE } from '../../api/reply.uts'
+import { sendDanmaku } from '../../api/danmaku.uts'
+import { useDanmaku } from '../../composables/useDanmaku.uts'
+import { BangumiInfo, BangumiEpisode } from '../../models/bangumi.uts'
+import { ReplyItem } from '../../models/reply.uts'
+import { userState } from '../../stores/user.uts'
+import { ensureLoginState } from '../../composables/useLogin.uts'
+import {
+	pageBackground, cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex,
+	withAlpha, errorText as themeErrorText, errorBackground
+} from '../../utils/theme.uts'
+import { numFormat, timeFormat } from '../../utils/format.uts'
+import { toSecureUrl } from '../../utils/url.uts'
+import {
+	getBool, setBool, SK,
+	getDanmakuBlockType, getDanmakuShowArea, getDanmakuOpacity, getDanmakuFontScale,
+	getDanmakuDuration, getDanmakuStrokeWidth
+} from '../../utils/storage.uts'
+import { safeAreaBottom, statusBarHeight } from '../../utils/safeArea.uts'
+
+/**
+ * 番剧详情页（源头：`lib/pages/bangumi/introduction/*`——与视频详情共享 VideoDetailController）。
+ * 复用边界（设计_设置与杂项域 §七，P11 拍板）：**复用** player-stage（durl 播放）、danmaku-layer（分集 cid 弹幕）、
+ * api/play.uts 全部互动函数（赞/币/藏：oid=当前分集 bvid/aid，源 controller 同口径）/ 评论组件 reply-list +
+ * reply-input（oid=分集 aid number + type=1 视频口径，与番剧评论同源）、全屏页跳转链。
+ * **新增**（本页内）：番剧信息面板（封面评分角标+追番钮）/ 选集横排 / 简介弹层 / 投币弹层。
+ * 取流：番剧分集走同一 /x/player/wbi/playurl（bvid+cid，源 changeSeasonOrbangu 同函数），不另建取流接口。
+ * 切分集 = 换 bvid/cid/aid 重取流 + 三态重拉 + 评论组件 watch oid 自动重拉（seek 0 起播）。
+ * 追番：/pgc/web/follow/add|del（seasonId 口径，csrf 前置真实失败态，toast 用 result.toast）。
+ * 会员分集：badge=='会员' 且非大会员 → toast 拦截（源 BangumiPanel.changeFucCall 同款）。
+ * 参数：season_id / ep_id 二选一（源 SearchHttp.bangumiInfo 同款）。
+ */
+
+const seasonId = ref<number>(0)
+const epId = ref<number>(0)
+const bvid = ref<string>('')
+const cid = ref<number>(0)
+const aidNo = ref<number>(0)
+const detail = ref<BangumiInfo | null>(null)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const playSrc = ref<string>('')
+const playBackupSrc = ref<string>('')
+const startSec = ref<number>(0)
+const durationHint = ref<number>(0)
+const playError = ref<string>('')
+const autoPlay = ref<boolean>(true)
+/** 选集正/倒序（源 BangumiPanel 未提供、EpisodeBottomSheet 提供；本页状态行点击切换） */
+const epDesc = ref<boolean>(false)
+
+// 互动三态（oid=分集 bvid/aid）
+const liked = ref<boolean>(false)
+const coined = ref<boolean>(false)
+const faved = ref<boolean>(false)
+const likeNum = ref<number>(0)
+const coinNum = ref<number>(0)
+const favNum = ref<number>(0)
+const replyNum = ref<number>(0)
+const shareNum = ref<number>(0)
+const busy = ref<boolean>(false)
+const followed = ref<boolean>(false)
+const followBusy = ref<boolean>(false)
+const coinVisible = ref<boolean>(false)
+
+// Tab 与评论
+const tab = ref<string>('intro')
+const scrollTop = ref<number>(0)
+const insertSeq = ref<number>(0)
+const insertItem = ref<ReplyItem | null>(null)
+const extraReplyCount = ref<number>(0)
+const replyClosed = ref<boolean>(false)
+const replyOpened = ref<boolean>(false)
+const emoteOpen = ref<boolean>(false)
+const emoteCloseSeq = ref<number>(0)
+const mainRoot = ref<string>('')
+const mainParent = ref<string>('')
+const replyTargetName = ref<string>('')
+
+// 二级评论面板
+const sheetVisible = ref<boolean>(false)
+const sheetExpanded = ref<boolean>(false)
+const sheetRoot = ref<ReplyItem | null>(null)
+const sheetList = ref<Array<ReplyItem>>([])
+const sheetState = ref<string>('loading')
+const sheetError = ref<string>('')
+const sheetPage = ref<number>(0)
+const sheetNoMore = ref<boolean>(false)
+const sheetLoading = ref<boolean>(false)
+const sheetReplyTarget = ref<ReplyItem | null>(null)
+const sheetReplyName = ref<string>('')
+let lastSheetLoadAt: number = 0
+
+// 发弹幕
+const dmSheetVisible = ref<boolean>(false)
+const dmText = ref<string>('')
+const dmSending = ref<boolean>(false)
+const kbHeight = ref<number>(0)
+let kbListenerId: number = -1
+
+// 简介弹层
+const introVisible = ref<boolean>(false)
+
+// 视口
+const winWidth = ref<number>(0)
+const winHeight = ref<number>(0)
+try {
+	const info = uni.getWindowInfo()
+	winWidth.value = info.windowWidth
+	winHeight.value = info.windowHeight
+} catch (e) {
+	winWidth.value = 390
+	winHeight.value = 640
+	console.log('[bangumi] window info failed')
+}
+
+// 弹幕层（配置走 storage 弹幕键，口径同 pages/video）
+const CONTROL_BAR_HEIGHT = 62
+const dmEnabled = ref<boolean>(true)
+const dmShowArea = ref<number>(0.5)
+const dmOpacity = ref<number>(1.0)
+const dmFontScale = ref<number>(1.0)
+const dmDuration = ref<number>(4.0)
+const dmStrokeWidth = ref<number>(1.5)
+const dmBlockTypes = ref<Array<number>>([])
+const stagePlaying = ref<boolean>(false)
+const progressMs = ref<number>(0)
+const pendingResumeSec = ref<number>(-1)
+let fullscreenLaunched = false
+
+const primary = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const statusBarStyle = computed((): string => 'height:' + statusBarHeight().toString() + 'px;background-color:' + pageBackground() + ';')
+const playErrorStyle = computed((): string => {
+	const show = playError.value.length > 0 ? 'display:flex;' : 'display:none;'
+	return show + 'background-color:' + errorBackground() + ';'
+})
+const playErrorTextStyle = computed((): string => 'color:' + themeErrorText() + ';')
+// 状态层统一 display 切换（蒸汽端 v-if 转 false 不卸载节点，P8/P9 各复现一次）
+const loadingStyle = computed((): string => state.value == 'loading' ? 'display:flex;' : 'display:none;')
+const errorViewStyle = computed((): string => state.value == 'error' ? 'display:flex;' : 'display:none;')
+const mainStyle = computed((): string => state.value != 'loading' && state.value != 'error' ? 'display:flex;' : 'display:none;')
+const dmMaskStyle = computed((): string => dmSheetVisible.value ? 'display:flex;' : 'display:none;')
+const sheetMaskStyle = computed((): string => sheetVisible.value ? 'display:flex;' : 'display:none;')
+const introMaskStyle = computed((): string => introVisible.value ? 'display:flex;' : 'display:none;')
+const coinMaskStyle = computed((): string => coinVisible.value ? 'display:flex;' : 'display:none;')
+const replyPaneStyle = computed((): string => replyOpened.value && tab.value == 'reply' ? 'display:flex;' : 'display:none;')
+const replyClosedStyle = computed((): string => tab.value == 'reply' && replyClosed.value ? 'display:flex;' : 'display:none;')
+const inputBarWrapStyle = computed((): string => {
+	const show = state.value == 'ready' && tab.value == 'reply' && !replyClosed.value
+	return show ? 'display:flex;' : 'display:none;'
+})
+const tabsHalfStyle = computed((): string => 'width:' + Math.round((winWidth.value > 0 ? winWidth.value : 390) / 2).toString() + 'px;')
+const tabsStyle = computed((): string => 'background-color:' + cardBackground() + ';border-bottom-color:' + withAlpha(textSecondary(), 0.2) + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const titleTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const gripStyle = computed((): string => 'background-color:' + textSecondary() + ';')
+const sheetSepStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const bodyStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 8).toString() + 'px;')
+const scoreBadgeStyle = computed((): string => 'background-color:' + withAlpha(primary, 0.9) + ';')
+const favBtnStyle = computed((): string => 'background-color:' + withAlpha(primary, 0.12) + ';')
+const favIconStyle = computed((): string => 'color:' + primary + ';')
+const epBadgeBgStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const inputBarHeight = computed((): number => 60 + safeAreaBottom())
+const replyBottomInset = computed((): number => replyClosed.value ? 0 : inputBarHeight.value)
+
+const stageHeight = computed((): number => {
+	const width = winWidth.value > 0 ? winWidth.value : 390
+	return Math.round(width * 9 / 16)
+})
+const dmLayerStyle = computed((): string => {
+	const height = stageHeight.value - CONTROL_BAR_HEIGHT
+	return 'height:' + (height > 0 ? height : 0).toString() + 'px;'
+})
+
+const info = computed((): BangumiInfo | null => detail.value)
+const title = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : d.title
+})
+const cover = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : toSecureUrl(d.cover)
+})
+const aid = computed((): number => aidNo.value)
+const episodes = computed((): Array<BangumiEpisode> => {
+	const d = detail.value
+	return d == null ? [] as Array<BangumiEpisode> : d.episodes
+})
+/** 选集展示序（倒序只反转展示，索引换算回正序） */
+const shownEpisodes = computed((): Array<BangumiEpisode> => {
+	const list = episodes.value
+	if (!epDesc.value) {
+		return list
+	}
+	const reversed: Array<BangumiEpisode> = []
+	for (let i = list.length - 1; i >= 0; i--) {
+		reversed.push(list[i])
+	}
+	return reversed
+})
+const playingIndex = computed((): number => {
+	const list = episodes.value
+	for (let i = 0; i < list.length; i++) {
+		if (list[i].cid == cid.value) {
+			return i
+		}
+	}
+	return -1
+})
+const playingLongTitle = computed((): string => {
+	const idx = playingIndex.value
+	if (idx < 0) {
+		return ''
+	}
+	const ep = episodes.value[idx]
+	return ep.longTitle.length > 0 ? ep.longTitle : ep.title
+})
+const scoreText = computed((): string => {
+	const d = detail.value
+	if (d == null || d.ratingScore <= 0) {
+		return '暂无'
+	}
+	return '评分 ' + d.ratingScore.toString()
+})
+const statLineText = computed((): string => {
+	const d = detail.value
+	if (d == null) {
+		return ''
+	}
+	return numFormat(d.stat.views) + '  ' + numFormat(d.stat.danmakus)
+})
+const statViewsText = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : numFormat(d.stat.views)
+})
+const statDanmuText = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : numFormat(d.stat.danmakus)
+})
+const metaLineText = computed((): string => {
+	const d = detail.value
+	if (d == null) {
+		return ''
+	}
+	let text = d.areaName
+	if (d.pubTimeShow.length > 0) {
+		text = text.length > 0 ? text + ' · ' + d.pubTimeShow : d.pubTimeShow
+	}
+	return text
+})
+const introMetaText = computed((): string => {
+	const d = detail.value
+	if (d == null) {
+		return ''
+	}
+	let text = metaLineText.value
+	if (d.newEpDesc.length > 0) {
+		text = text.length > 0 ? text + ' · ' + d.newEpDesc : d.newEpDesc
+	}
+	return text
+})
+const actorsText = computed((): string => {
+	const d = detail.value
+	return d == null ? '' : d.actors
+})
+const replyCountText = computed((): string => {
+	const d = detail.value
+	if (d == null) {
+		return ''
+	}
+	return numFormat(d.stat.reply + extraReplyCount.value)
+})
+const dmSwitchStyle = computed((): string => 'color:' + (dmEnabled.value ? primary : textSecondary()) + ';')
+	const dmProgressText = computed((): string => '发送位置 ' + timeFormat(Math.floor(progressMs.value / 1000)))
+const dmInputStyle = computed((): string => 'background-color:' + pageBackground() + ';color:' + textPrimary() + ';')
+const dmSubmitEnabled = computed((): boolean => dmText.value.trim().length > 0 && !dmSending.value)
+const dmSubmitStyle = computed((): string => 'background-color:' + (dmSubmitEnabled.value ? primary : withAlpha(textSecondary(), 0.3)) + ';')
+const dmSheetStyle = computed((): string => {
+	const bottomPad = kbHeight.value > 0 ? 10 : safeAreaBottom() + 10
+	const lift = kbHeight.value > 0 ? 'margin-bottom:' + kbHeight.value.toString() + 'px;' : ''
+	return lift + 'padding-bottom:' + bottomPad.toString() + 'px;background-color:' + cardBackground() + ';'
+})
+const sheetStyle = computed((): string => {
+	const base = winHeight.value > 0 ? winHeight.value : 640
+	const height = sheetExpanded.value ? base * 0.88 : base * 0.62
+	return 'height:' + Math.round(height).toString() + 'px;background-color:' + cardBackground() + ';'
+})
+const sheetHeightTip = computed((): string => sheetExpanded.value ? '点击把手收起' : '点击把手展开')
+const introSheetStyle = computed((): string => {
+	const base = winHeight.value > 0 ? winHeight.value : 640
+	return 'height:' + Math.round(base * 0.6).toString() + 'px;background-color:' + cardBackground() + ';'
+})
+const introBottomStyle = computed((): string => 'height:' + (safeAreaBottom() + 20).toString() + 'px;')
+const coinDialogStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const sheetRootRpid = computed((): string => {
+	const root = sheetRoot.value
+	return root == null ? '' : root.rpid
+})
+const sheetParentRpid = computed((): string => {
+	const target = sheetReplyTarget.value
+	if (target != null) {
+		return target.rpid
+	}
+	return sheetRootRpid.value
+})
+const sheetFooterText = computed((): string => {
+	if (sheetState.value != 'ready' || sheetList.value.length == 0) {
+		return ''
+	}
+	if (sheetNoMore.value) {
+		return '没有更多了'
+	}
+	return sheetLoading.value ? '加载中…' : '上拉加载更多'
+})
+
+function tabTextStyle(name: string): string {
+	return 'color:' + (tab.value == name ? primary : textSecondary()) + ';'
+}
+
+function tabUnderlineStyle(name: string): string {
+	return 'border-bottom-color:' + (tab.value == name ? primary : 'rgba(0,0,0,0)') + ';'
+}
+
+function actIconStyle(on: boolean): string {
+	return 'color:' + (on ? primary : textSecondary()) + ';'
+}
+
+function actTextStyle(on: boolean): string {
+	return 'color:' + (on ? primary : textSecondary()) + ';'
+}
+
+function epStyle(shownIndex: number): string {
+	return 'background-color:' + (isPlayingIndex(shownIndex) ? withAlpha(primary, 0.1) : pageBackground()) + ';'
+}
+
+function epTextStyle(shownIndex: number): string {
+	return 'color:' + (isPlayingIndex(shownIndex) ? primary : textPrimary()) + ';'
+}
+
+/** 展示索引（含倒序）是否是当前播放集 */
+function isPlayingIndex(shownIndex: number): boolean {
+	const target = shownEpisodes.value[shownIndex]
+	if (target == null) {
+		return false
+	}
+	return target.cid == cid.value
+}
+
+/** 分集序号：源 BangumiPanel 用**正序列表下标**（第${i+1}话），倒序展示只改显示顺序、序号仍按正序 */
+function epIndexLabel(shownIndex: number): string {
+	const target = shownEpisodes.value[shownIndex]
+	if (target == null) {
+		return ''
+	}
+	const list = episodes.value
+	for (let i = 0; i < list.length; i++) {
+		if (list[i].cid == target.cid) {
+			return '第' + (i + 1).toString() + '话'
+		}
+	}
+	return ''
+}
+
+function scrollToTop() {
+	scrollTop.value = 1
+	setTimeout(() => {
+		scrollTop.value = 0
+	}, 16)
+}
+
+// ---------------------------------------------------------------- 数据加载
+
+async function loadAll() {
+	state.value = 'loading'
+	errorText.value = ''
+	playSrc.value = ''
+	playError.value = ''
+	// 冷启动登录态自愈（P8 deliverable）：追番态/三态依赖登录，不能按内存标志预判
+	await ensureLoginState()
+	const res = await fetchBangumiInfo(seasonId.value, epId.value)
+	if (!res.status || res.data == null) {
+		state.value = 'error'
+		errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		return
+	}
+	const d = res.data
+	detail.value = d
+	followed.value = d.followed == 1
+	likeNum.value = d.stat.likes
+	coinNum.value = d.stat.coins
+	favNum.value = d.stat.favorite
+	replyNum.value = d.stat.reply
+	shareNum.value = d.stat.share
+	// 默认集：epId 对应集优先，否则第一集（源 controller.queryBangumiIntro 同款）
+	const list = d.episodes
+	let current: BangumiEpisode | null = null
+	if (epId.value > 0) {
+		for (let i = 0; i < list.length; i++) {
+			if (list[i].id == epId.value) {
+				current = list[i]
+				break
+			}
+		}
+	}
+	if (current == null && list.length > 0) {
+		current = list[0]
+	}
+	if (current == null || current.cid <= 0 || current.bvid.length == 0) {
+		state.value = 'ready'
+		playError.value = '该剧暂无可播放分集'
+		return
+	}
+	bvid.value = current.bvid
+	cid.value = current.cid
+	aidNo.value = current.aid
+	state.value = 'ready'
+	await loadPlay()
+	await loadActions()
+}
+
+async function loadPlay() {
+	playError.value = ''
+	playSrc.value = ''
+	playBackupSrc.value = ''
+	if (bvid.value.length == 0 || cid.value <= 0) {
+		playError.value = '缺少播放参数，暂时无法起播'
+		return
+	}
+	// 番剧分集与视频同一取流端点（源 changeSeasonOrbangu → VideoDetailController.queryVideoUrl）
+	const res = await fetchPlayUrl(bvid.value, cid.value, false)
+	if (!res.status || res.data == null) {
+		playError.value = res.message.length > 0 ? res.message : '播放地址获取失败'
+		return
+	}
+	const data = res.data
+	if (data.durl.length == 0 || data.durl[0].url.length == 0) {
+		playError.value = '该分集暂无可播放地址（可能需要大会员或登录）'
+		return
+	}
+	startSec.value = data.lastPlayTime > 0 ? Math.floor(data.lastPlayTime / 1000) : 0
+	durationHint.value = data.timeLength > 0 ? Math.floor(data.timeLength / 1000) : 0
+	playSrc.value = data.durl[0].url
+	playBackupSrc.value = data.durl[0].backupUrl
+}
+
+/** 三态重拉（登录态；切分集后调用） */
+async function loadActions() {
+	if (!userState.isLogin || bvid.value.length == 0) {
+		liked.value = false
+		coined.value = false
+		faved.value = false
+		return
+	}
+	const likeRes = await hasLike(bvid.value)
+	if (likeRes.status) {
+		liked.value = likeRes.value
+	}
+	const coinRes = await hasCoin(bvid.value)
+	if (coinRes.status) {
+		coined.value = coinRes.multiply > 0
+	}
+	const favRes = await hasFav(aidNo.value)
+	if (favRes.status) {
+		faved.value = favRes.value
+	}
+}
+
+function onRetryDetail() {
+	loadAll()
+}
+
+function onRetryPlay() {
+	loadPlay()
+}
+
+// ---------------------------------------------------------------- 切分集
+async function onSwitchEpisode(shownIndex: number) {
+	const ep = shownEpisodes.value[shownIndex]
+	if (ep == null || ep.cid <= 0 || ep.bvid.length == 0) {
+		return
+	}
+	// 会员分集拦截（源 BangumiPanel.changeFucCall 同款：badge=='会员' 且非大会员）
+	if (ep.badge == '会员' && userState.info.vipStatus != 1) {
+		uni.showToast({ title: '需要大会员', icon: 'none' })
+		return
+	}
+	if (ep.cid == cid.value) {
+		return
+	}
+	bvid.value = ep.bvid
+	cid.value = ep.cid
+	aidNo.value = ep.aid
+	epId.value = ep.id
+	scrollToTop()
+	await loadPlay()
+	await loadActions()
+}
+
+function onToggleOrder() {
+	epDesc.value = !epDesc.value
+}
+
+// ---------------------------------------------------------------- 互动（oid=分集 bvid/aid，复用 api/play.uts）
+function showLoginGuide() {
+	uni.showModal({
+		title: '未登录',
+		content: '该操作需要登录，是否前往登录？',
+		confirmText: '去登录',
+		cancelText: '取消',
+		success: (res) => {
+			if (res.confirm == true) {
+				uni.navigateTo({ url: '/pages/login/login' })
+			}
+		}
+	})
+}
+
+async function onLikeTap() {
+	if (!userState.isLogin) {
+		showLoginGuide()
+		return
+	}
+	if (busy.value || bvid.value.length == 0) {
+		return
+	}
+	busy.value = true
+	const res = await likeVideo(bvid.value, !liked.value)
+	busy.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	liked.value = !liked.value
+	likeNum.value = likeNum.value + (liked.value ? 1 : -1)
+}
+
+function onCoinTap() {
+	if (!userState.isLogin) {
+		showLoginGuide()
+		return
+	}
+	if (coined.value) {
+		uni.showToast({ title: '已经投过币了', icon: 'none' })
+		return
+	}
+	coinVisible.value = true
+}
+
+function closeCoinSheet() {
+	coinVisible.value = false
+}
+
+async function onCoinChoose(multiply: number) {
+	if (busy.value || bvid.value.length == 0) {
+		return
+	}
+	busy.value = true
+	const res = await coinVideo(bvid.value, multiply)
+	busy.value = false
+	coinVisible.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	coined.value = true
+	coinNum.value = coinNum.value + multiply
+	uni.showToast({ title: '投币成功', icon: 'none' })
+}
+
+async function onFavTap() {
+	if (!userState.isLogin) {
+		showLoginGuide()
+		return
+	}
+	if (busy.value || aidNo.value <= 0) {
+		return
+	}
+	busy.value = true
+	const res = await toggleDefaultFav(aidNo.value)
+	busy.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	faved.value = res.faved
+	favNum.value = favNum.value + (faved.value ? 1 : -1)
+}
+
+function onShareTap() {
+	uni.setClipboardData({
+		data: 'https://www.bilibili.com/bangumi/play/ss' + seasonId.value.toString(),
+		success: (_) => {
+			uni.showToast({ title: '链接已复制，可粘贴分享', icon: 'none' })
+		}
+	})
+}
+
+/** 追番/取消追番（seasonId 口径；toast 用接口 result.toast，失败原样呈现） */
+async function onToggleFollowSeason() {
+	const d = detail.value
+	if (d == null || d.seasonId <= 0) {
+		return
+	}
+	if (!userState.isLogin) {
+		showLoginGuide()
+		return
+	}
+	if (followBusy.value) {
+		return
+	}
+	followBusy.value = true
+	const res = followed.value ? await bangumiFollowDel(d.seasonId) : await bangumiFollowAdd(d.seasonId)
+	followBusy.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message.length > 0 ? res.message : '操作失败', icon: 'none' })
+		return
+	}
+	followed.value = !followed.value
+	uni.showToast({ title: res.toast, icon: 'none' })
+}
+
+// ---------------------------------------------------------------- Tab 与评论事件
+function onTabIntro() {
+	tab.value = 'intro'
+}
+
+function onTabReply() {
+	replyOpened.value = true
+	tab.value = 'reply'
+}
+
+function onReqCode(code: number) {
+	replyClosed.value = code == REPLY_CLOSED_CODE
+}
+
+function onEmoteState(open: boolean) {
+	emoteOpen.value = open
+}
+
+function onSeekText(text: string, _seconds: number) {
+	uni.showToast({ title: '跳到 ' + text + '：播放进度跳转随全屏控制层接入', icon: 'none' })
+}
+
+function onOpenUser(mid: string) {
+	if (mid.length == 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/member/member?mid=' + mid })
+}
+
+function onOpenLink(text: string) {
+	if (text.length == 0) {
+		return
+	}
+	uni.navigateTo({
+		url: '/pages/webview/webview?type=webview&url=' + encodeURIComponent(text)
+	})
+}
+
+function onOpenReply(root: ReplyItem) {
+	sheetRoot.value = root
+	sheetList.value = []
+	sheetReplyTarget.value = null
+	sheetReplyName.value = ''
+	sheetError.value = ''
+	sheetState.value = 'loading'
+	sheetPage.value = 0
+	sheetNoMore.value = false
+	sheetExpanded.value = false
+	sheetVisible.value = true
+	loadSheetPage(1)
+}
+
+function closeSheet() {
+	sheetVisible.value = false
+	sheetRoot.value = null
+	sheetList.value = []
+	sheetReplyTarget.value = null
+	sheetReplyName.value = ''
+}
+
+function toggleSheetHeight() {
+	sheetExpanded.value = !sheetExpanded.value
+}
+
+async function loadSheetPage(pn: number) {
+	if (sheetLoading.value) {
+		return
+	}
+	const root = sheetRoot.value
+	if (root == null || aidNo.value <= 0) {
+		return
+	}
+	sheetLoading.value = true
+	if (pn == 1) {
+		sheetState.value = 'loading'
+		sheetError.value = ''
+	}
+	const res = await fetchReplyReplyList(aidNo.value, root.rpid, pn)
+	sheetLoading.value = false
+	if (!res.status || res.data == null) {
+		if (pn == 1) {
+			sheetState.value = 'error'
+			sheetError.value = res.message.length > 0 ? res.message : '请求异常'
+		} else {
+			uni.showToast({ title: res.message.length > 0 ? res.message : '请求异常', icon: 'none' })
+		}
+		return
+	}
+	const data = res.data
+	const next: Array<ReplyItem> = pn == 1 ? [] : sheetList.value.slice()
+	for (let i = 0; i < data.replies.length; i++) {
+		next.push(data.replies[i])
+	}
+	sheetList.value = next
+	sheetPage.value = pn
+	sheetNoMore.value = data.replies.length < 18
+	sheetState.value = 'ready'
+}
+
+function onSheetLoadMore() {
+	if (sheetState.value != 'ready' || sheetNoMore.value || sheetLoading.value) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastSheetLoadAt < 200) {
+		return
+	}
+	lastSheetLoadAt = now
+	loadSheetPage(sheetPage.value + 1)
+}
+
+function reloadSheet() {
+	loadSheetPage(1)
+}
+
+function onReplyFromSheet(item: ReplyItem) {
+	sheetReplyTarget.value = item
+	sheetReplyName.value = item.member.uname
+}
+
+function onCancelSheetReply() {
+	sheetReplyTarget.value = null
+	sheetReplyName.value = ''
+}
+
+function onSheetSent(item: ReplyItem) {
+	const next: Array<ReplyItem> = [item]
+	for (let i = 0; i < sheetList.value.length; i++) {
+		next.push(sheetList.value[i])
+	}
+	sheetList.value = next
+	sheetState.value = 'ready'
+	const root = sheetRoot.value
+	if (root != null) {
+		root.count = root.count + 1
+		root.replies.push(item)
+	}
+	sheetReplyTarget.value = null
+	sheetReplyName.value = ''
+}
+
+function onReplyFromItem(item: ReplyItem) {
+	mainRoot.value = item.root == '0' ? item.rpid : item.root
+	mainParent.value = item.rpid
+	replyTargetName.value = item.member.uname
+}
+
+function onCancelReplyTarget() {
+	mainRoot.value = ''
+	mainParent.value = ''
+	replyTargetName.value = ''
+}
+
+function onSentComment(item: ReplyItem) {
+	insertItem.value = item
+	insertSeq.value = insertSeq.value + 1
+	extraReplyCount.value = extraReplyCount.value + 1
+	onCancelReplyTarget()
+}
+
+// ---------------------------------------------------------------- 弹幕与全屏（口径同 pages/video）
+function loadDanmakuConfig() {
+	dmEnabled.value = getBool(SK.enableShowDanmaku, false)
+	dmShowArea.value = getDanmakuShowArea()
+	dmOpacity.value = getDanmakuOpacity()
+	dmFontScale.value = getDanmakuFontScale()
+	dmDuration.value = getDanmakuDuration()
+	dmStrokeWidth.value = getDanmakuStrokeWidth()
+	dmBlockTypes.value = getDanmakuBlockType()
+}
+
+function onStageProgress(ms: number) {
+	progressMs.value = ms
+}
+
+function onStagePlaying(playing: boolean) {
+	stagePlaying.value = playing
+}
+
+function onToggleDanmaku() {
+	dmEnabled.value = !dmEnabled.value
+	setBool(SK.enableShowDanmaku, dmEnabled.value)
+	uni.showToast({ title: dmEnabled.value ? '弹幕已开启' : '弹幕已关闭', icon: 'none' })
+}
+
+function openDanmakuSheet() {
+	if (state.value != 'ready') {
+		return
+	}
+	dmText.value = ''
+	dmSheetVisible.value = true
+}
+
+function closeDanmakuSheet() {
+	dmSheetVisible.value = false
+	kbHeight.value = 0
+	uni.hideKeyboard()
+}
+
+function onDmInput(event: UniInputEvent) {
+	dmText.value = event.detail.value
+}
+
+async function onSendDanmaku() {
+	const text = dmText.value.trim()
+	if (text.length == 0) {
+		uni.showToast({ title: '弹幕内容不能为空', icon: 'none' })
+		return
+	}
+	if (dmSending.value) {
+		return
+	}
+	if (cid.value <= 0 || bvid.value.length == 0) {
+		uni.showToast({ title: '分集信息未就绪，请稍后重试', icon: 'none' })
+		return
+	}
+	dmSending.value = true
+	const res = await sendDanmaku(cid.value, bvid.value, text, progressMs.value, 1, 16777215, 25, 0)
+	dmSending.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	const item = res.item
+	if (item != null) {
+		useDanmaku().pushLocal(cid.value, item)
+	}
+	closeDanmakuSheet()
+	uni.showToast({ title: dmEnabled.value ? '弹幕已发送' : '弹幕已发送（弹幕开关已关，开启后可见）', icon: 'none' })
+}
+
+function q(value: string): string {
+	return encodeURIComponent(value)
+}
+
+let fullscreenSrc = ''
+let fullscreenEnterSec = 0
+
+function releaseStageForFullscreen(sec: number) {
+	fullscreenSrc = playSrc.value
+	fullscreenEnterSec = sec
+	try {
+		const ctx = uni.createVideoContext('vd-video')
+		if (ctx != null) {
+			ctx.pause()
+		}
+	} catch (e) {
+		console.log('[bangumi] pause before fullscreen failed')
+	}
+	playSrc.value = ''
+	stagePlaying.value = false
+}
+
+function restoreStageAfterFullscreen(sec: number) {
+	if (fullscreenSrc.length == 0) {
+		return
+	}
+	const url = fullscreenSrc
+	fullscreenSrc = ''
+	if (playSrc.value.length == 0) {
+		startSec.value = sec
+		playSrc.value = url
+		return
+	}
+	try {
+		const ctx = uni.createVideoContext('vd-video')
+		if (ctx != null) {
+			ctx.seek(sec)
+			ctx.play()
+		}
+	} catch (e) {
+		console.log('[bangumi] resume after fullscreen failed')
+	}
+}
+
+function onEnterFullscreen() {
+	if (playSrc.value.length == 0) {
+		uni.showToast({ title: '播放地址未就绪，暂不能全屏', icon: 'none' })
+		return
+	}
+	const startSecOut = progressMs.value > 0 ? Math.floor(progressMs.value / 1000) : 0
+	let url = '/pages/video/fullscreen?bvid=' + bvid.value +
+		'&cid=' + cid.value.toString() +
+		'&src=' + q(playSrc.value) +
+		'&startTime=' + startSecOut.toString() +
+		'&danmakuCid=' + cid.value.toString()
+	if (cover.value.length > 0) {
+		url = url + '&cover=' + q(cover.value)
+	}
+	if (title.value.length > 0) {
+		url = url + '&title=' + q(title.value)
+	}
+	fullscreenLaunched = true
+	releaseStageForFullscreen(startSecOut)
+	uni.navigateTo({
+		url: url,
+		fail: (err) => {
+			console.log('[bangumi] enter fullscreen failed: ' + err.errMsg)
+			fullscreenLaunched = false
+			restoreStageAfterFullscreen(startSecOut)
+		}
+	})
+}
+
+function onFullscreenExit(payload: any) {
+	if (!fullscreenLaunched) {
+		return
+	}
+	if (payload == null) {
+		return
+	}
+	const obj = payload as UTSJSONObject
+	const value = obj.getNumber('position')
+	if (value == null) {
+		return
+	}
+	const position = value as number
+	if (position < 0) {
+		return
+	}
+	pendingResumeSec.value = position
+}
+
+// ---------------------------------------------------------------- 简介弹层
+function openIntroSheet() {
+	introVisible.value = true
+}
+
+function closeIntroSheet() {
+	introVisible.value = false
+}
+
+function onBack() {
+	const stack = getCurrentPages()
+	if (stack.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+// 浮层返回接管：发弹幕 → 二级面板 → 简介 → 投币 → 表情 依次收（页面级钩子，写在组件内无效）
+onBackPress(() => {
+	if (dmSheetVisible.value) {
+		closeDanmakuSheet()
+		return true
+	}
+	if (sheetVisible.value) {
+		closeSheet()
+		return true
+	}
+	if (introVisible.value) {
+		closeIntroSheet()
+		return true
+	}
+	if (coinVisible.value) {
+		closeCoinSheet()
+		return true
+	}
+	if (emoteOpen.value) {
+		emoteCloseSeq.value = emoteCloseSeq.value + 1
+		emoteOpen.value = false
+		return true
+	}
+	return false
+})
+
+onLoad((options) => {
+	const rawSeason = options != null ? options['season_id'] : null
+	if (rawSeason != null) {
+		const parsed = parseInt(rawSeason as string)
+		seasonId.value = isNaN(parsed) ? 0 : parsed
+	}
+	const rawEp = options != null ? options['ep_id'] : null
+	if (rawEp != null) {
+		const parsedEp = parseInt(rawEp as string)
+		epId.value = isNaN(parsedEp) ? 0 : parsedEp
+	}
+	if (seasonId.value <= 0 && epId.value <= 0) {
+		state.value = 'error'
+		errorText.value = '缺少番剧参数（season_id / ep_id），请从番剧入口进入'
+		return
+	}
+	autoPlay.value = getBool(SK.autoPlayEnable, true)
+	loadDanmakuConfig()
+	try {
+		kbListenerId = uni.onKeyboardHeightChange((res) => {
+			kbHeight.value = res.height
+		})
+	} catch (e) {
+		kbHeight.value = 0
+		console.log('[bangumi] keyboard height listener unavailable')
+	}
+	uni.$on('player:fullscreen-exit', onFullscreenExit)
+	loadAll()
+})
+
+onShow(() => {
+	loadDanmakuConfig()
+	if (pendingResumeSec.value >= 0) {
+		const sec = pendingResumeSec.value
+		pendingResumeSec.value = -1
+		fullscreenLaunched = false
+		restoreStageAfterFullscreen(sec)
+	} else if (fullscreenSrc.length > 0 && playSrc.value.length == 0) {
+		restoreStageAfterFullscreen(fullscreenEnterSec)
+	}
+})
+
+onHide(() => {
+	try {
+		const ctx = uni.createVideoContext('vd-video')
+		if (ctx != null) {
+			ctx.pause()
+		}
+	} catch (e) {
+		console.log('[bangumi] pause on hide failed')
+	}
+})
+
+onUnload(() => {
+	uni.$off('player:fullscreen-exit', onFullscreenExit)
+	if (kbListenerId >= 0) {
+		uni.offKeyboardHeightChange(kbListenerId)
+		kbListenerId = -1
+	}
+})
+</script>
+
+<style>
+	.bg {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.bg-statusbar {
+		width: 100%;
+	}
+	.bg-stage {
+		width: 100%;
+		background-color: #000000;
+		position: relative;
+	}
+	.bg-dm {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+	}
+	.bg-play-error {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 6px;
+		padding-bottom: 6px;
+		background-color: #FFF4F4;
+	}
+	.bg-play-error-text {
+		flex: 1;
+		font-size: 12px;
+		color: #C0392B;
+	}
+	.bg-play-error-retry {
+		font-size: 12px;
+		margin-left: 8px;
+	}
+	.bg-loading {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 16px;
+	}
+	.bg-sk-row {
+		display: flex;
+		flex-direction: column;
+		margin-bottom: 14px;
+	}
+	.bg-sk-gap {
+		height: 8px;
+	}
+	.bg-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.bg-main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.bg-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.bg-scroll {
+		flex: 1;
+	}
+	.bg-body {
+		display: flex;
+		flex-direction: column;
+		padding-left: 14px;
+		padding-right: 14px;
+		padding-top: 20px;
+	}
+	/* Tab 栏（口径同 pages/video） */
+	.bg-tabs {
+		height: 45px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		border-bottom-width: 1px;
+		border-bottom-style: solid;
+	}
+	.bg-tabs-left {
+		height: 45px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.bg-tab {
+		flex: 1;
+		height: 45px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-tab-inner {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-top: 13.5px;
+		padding-bottom: 10.5px;
+		border-bottom-width: 3px;
+		border-bottom-style: solid;
+	}
+	.bg-tab-text {
+		font-size: 13px;
+		line-height: 18px;
+	}
+	.bg-tabs-right {
+		height: 45px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+		padding-right: 18px;
+	}
+	.bg-dm-send {
+		width: 64px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-dm-send-text {
+		font-size: 12px;
+	}
+	.bg-dm-switch {
+		width: 38px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-dm-switch-glyph {
+		font-size: 17px;
+	}
+	.bg-reply-closed {
+		display: flex;
+		flex-direction: row;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-bottom: 6px;
+	}
+	.bg-reply-closed-text {
+		font-size: 12px;
+	}
+	.bg-reply-pane {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* 信息面板（源 BangumiInfo：封面 115×153 + 右列） */
+	.bg-info {
+		display: flex;
+		flex-direction: row;
+	}
+	.bg-cover {
+		width: 115px;
+		height: 153px;
+		position: relative;
+	}
+	.bg-cover-img {
+		width: 115px;
+		height: 153px;
+		border-radius: 8px;
+	}
+	/* 评分角标：封面右下（源 PBadge right:6 bottom:6） */
+	.bg-score {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+		padding-left: 6px;
+		padding-right: 6px;
+		padding-top: 2px;
+		padding-bottom: 2px;
+		border-radius: 4px;
+	}
+	.bg-score-text {
+		font-size: 10px;
+		color: #FFFFFF;
+	}
+	.bg-info-right {
+		flex: 1;
+		height: 153px;
+		display: flex;
+		flex-direction: column;
+		margin-left: 10px;
+	}
+	.bg-title-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.bg-title {
+		flex: 1;
+		font-size: 16px;
+		font-weight: 500;
+	}
+	/* 追番钮（源 34×34 圆形 primaryContainer + favorite 心形主色） */
+	.bg-fav-btn {
+		width: 34px;
+		height: 34px;
+		border-radius: 17px;
+		margin-left: 8px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-fav-icon {
+		font-size: 19px;
+	}
+	.bg-stat-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+	}
+	.bg-stat-gap {
+		width: 6px;
+	}
+	.bg-stat-text {
+		font-size: 12px;
+	}
+	.bg-meta {
+		font-size: 12px;
+		margin-top: 4px;
+	}
+	.bg-desc-flex {
+		flex: 1;
+	}
+	.bg-desc {
+		font-size: 13px;
+		line-height: 19px;
+	}
+	/* 互动行（五等分，源 GridView.count crossAxisCount:5 childAspectRatio:1.25） */
+	.bg-actions {
+		height: 66px;
+		display: flex;
+		flex-direction: row;
+		margin-top: 6px;
+		margin-bottom: 8px;
+	}
+	.bg-act {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-act-icon {
+		font-size: 18px;
+	}
+	.bg-act-text {
+		font-size: 11px;
+		margin-top: 6px;
+	}
+	/* 选集面板（源 BangumiPanel） */
+	.bg-eps {
+		display: flex;
+		flex-direction: column;
+	}
+	.bg-eps-head {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 10px;
+	}
+	.bg-eps-title {
+		font-size: 14px;
+	}
+	.bg-eps-playing {
+		flex: 1;
+		font-size: 12px;
+		margin-left: 4px;
+	}
+	.bg-eps-status {
+		max-width: 140px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-left: 10px;
+	}
+	.bg-eps-status-text {
+		font-size: 13px;
+	}
+	/* 横向滚动（三要素：row + 容器宽确定 + 子项 shrink 0） */
+	.bg-eps-scroll {
+		width: 100%;
+		flex-direction: row;
+	}
+	.bg-eps-row {
+		flex-direction: row;
+		padding-right: 10px;
+	}
+	.bg-ep {
+		width: 150px;
+		height: 60px;
+		flex-shrink: 0;
+		border-radius: 6px;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		padding-left: 10px;
+		padding-right: 10px;
+		margin-right: 10px;
+	}
+	.bg-ep-line1 {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.bg-ep-playing-glyph {
+		font-size: 12px;
+		margin-right: 4px;
+	}
+	.bg-ep-no {
+		font-size: 13px;
+	}
+	.bg-ep-flex {
+		flex: 1;
+	}
+	.bg-ep-badge {
+		font-size: 12px;
+		margin-left: 4px;
+	}
+	.bg-ep-title {
+		font-size: 13px;
+		margin-top: 3px;
+	}
+	/* 发弹幕弹层 */
+	.bg-dm-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+	}
+	.bg-dm-mask-bg {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+	}
+	.bg-dm-sheet {
+		display: flex;
+		flex-direction: column;
+		border-top-left-radius: 14px;
+		border-top-right-radius: 14px;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 10px;
+	}
+	.bg-dm-sheet-head {
+		height: 30px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.bg-dm-sheet-title {
+		font-size: 14px;
+		font-weight: 500;
+	}
+	.bg-dm-sheet-tip {
+		flex: 1;
+		font-size: 11px;
+		margin-left: 8px;
+	}
+	.bg-dm-sheet-close {
+		height: 30px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+	}
+	.bg-dm-sheet-close-text {
+		font-size: 13px;
+	}
+	.bg-dm-sheet-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-top: 8px;
+		padding-bottom: 6px;
+	}
+	.bg-dm-input {
+		flex: 1;
+		height: 38px;
+		border-radius: 19px;
+		padding-left: 14px;
+		padding-right: 14px;
+		font-size: 13px;
+	}
+	.bg-dm-placeholder {
+		font-size: 13px;
+		color: #8A94A6;
+	}
+	.bg-dm-submit {
+		width: 64px;
+		height: 36px;
+		border-radius: 18px;
+		margin-left: 10px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-dm-submit-text {
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+	.bg-input-bar {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+	}
+	/* 二级评论面板 */
+	.bg-sheet-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+	}
+	.bg-sheet {
+		display: flex;
+		flex-direction: column;
+		border-top-left-radius: 14px;
+		border-top-right-radius: 14px;
+		overflow: hidden;
+	}
+	.bg-sheet-head {
+		display: flex;
+		flex-direction: column;
+	}
+	.bg-sheet-grip {
+		height: 20px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-sheet-grip-bar {
+		width: 34px;
+		height: 3px;
+		border-radius: 2px;
+	}
+	.bg-sheet-title-row {
+		height: 34px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 14px;
+		padding-right: 10px;
+	}
+	.bg-sheet-title {
+		font-size: 14px;
+		font-weight: 500;
+	}
+	.bg-sheet-tip {
+		flex: 1;
+		font-size: 11px;
+		margin-left: 8px;
+	}
+	.bg-sheet-close {
+		height: 30px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+	}
+	.bg-sheet-close-text {
+		font-size: 13px;
+	}
+	.bg-sheet-scroll {
+		flex: 1;
+	}
+	.bg-sheet-sep {
+		height: 6px;
+	}
+	.bg-sheet-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.bg-sheet-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-top: 30px;
+		padding-bottom: 30px;
+	}
+	.bg-sheet-state-text {
+		font-size: 12px;
+	}
+	.bg-sheet-state-retry {
+		font-size: 12px;
+		margin-top: 6px;
+	}
+	.bg-sheet-footer {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-sheet-footer-text {
+		font-size: 12px;
+	}
+	.bg-sheet-input {
+		display: flex;
+		flex-direction: column;
+	}
+	/* 简介弹层 */
+	.bg-intro-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+	}
+	.bg-intro-mask-bg {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+	}
+	.bg-intro-sheet {
+		display: flex;
+		flex-direction: column;
+		border-top-left-radius: 14px;
+		border-top-right-radius: 14px;
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 8px;
+	}
+	.bg-intro-grip {
+		height: 20px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-intro-grip-bar {
+		width: 34px;
+		height: 3px;
+		border-radius: 2px;
+		background-color: rgba(0, 0, 0, 0.2);
+	}
+	.bg-intro-scroll {
+		flex: 1;
+	}
+	.bg-intro-title {
+		font-size: 16px;
+		font-weight: 500;
+	}
+	.bg-intro-stat-row {
+		display: flex;
+		flex-direction: row;
+		margin-top: 4px;
+	}
+	.bg-intro-stat {
+		font-size: 12px;
+	}
+	.bg-intro-meta-row {
+		display: flex;
+		flex-direction: row;
+		margin-top: 4px;
+	}
+	.bg-intro-meta {
+		font-size: 12px;
+	}
+	.bg-intro-sec {
+		font-size: 14px;
+		font-weight: 500;
+		margin-top: 20px;
+	}
+	.bg-intro-text {
+		font-size: 13px;
+		line-height: 20px;
+		margin-top: 4px;
+	}
+	.bg-intro-bottom {
+		width: 100%;
+	}
+	/* 投币弹层 */
+	.bg-coin-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-coin-mask-bg {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+	}
+	.bg-coin-dialog {
+		width: 240px;
+		border-radius: 14px;
+		display: flex;
+		flex-direction: column;
+		padding-top: 16px;
+		padding-bottom: 8px;
+	}
+	.bg-coin-title {
+		font-size: 16px;
+		font-weight: 500;
+		text-align: center;
+	}
+	.bg-coin-opt {
+		height: 48px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bg-coin-opt-text {
+		font-size: 15px;
+	}
+</style>

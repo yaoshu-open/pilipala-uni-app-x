@@ -1,0 +1,175 @@
+<template>
+	<view class="mdy" :style="pageStyle">
+		<app-navbar :title="titleText"></app-navbar>
+
+		<view v-if="state == 'error'" class="mdy-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+		<view v-else-if="state == 'empty'" class="mdy-fill">
+			<list-state state="empty" empty-text="没有数据" @retry="reload"></list-state>
+		</view>
+		<scroll-view
+			v-else
+			class="mdy-scroll"
+			:lower-threshold="200"
+			@scrolltolower="onLoadMore"
+		>
+			<view v-if="state == 'loading'" class="mdy-list">
+				<view v-for="n in 4" :key="'sk-' + n.toString()">
+					<skeleton-dynamic-card></skeleton-dynamic-card>
+				</view>
+			</view>
+			<view v-else class="mdy-list">
+				<dynamic-panel
+					v-for="(item, index) in items"
+					:key="item.idStr.length > 0 ? item.idStr : index.toString()"
+					:item="item"
+				></dynamic-panel>
+				<view v-if="isLoading" class="mdy-footer">
+					<text class="mdy-footer-text" :style="secondaryTextStyle">加载中...</text>
+				</view>
+				<view class="mdy-bottom"></view>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import ListState from '../../components/list-state/list-state.uvue'
+import SkeletonDynamicCard from '../../components/skeleton/skeleton-dynamic-card.uvue'
+import DynamicPanel from '../../components/dynamics/dynamic-panel.uvue'
+import { fetchMemberDynamic } from '../../api/member.uts'
+import { DynamicItem } from '../../models/member.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 空间动态页（源头：`lib/pages/member_dynamics/view.dart` + controller.dart）。
+ *
+ * 基线（基线_P5_member_dynamics）为空白页：顶栏对齐基线（我的/Ta 的动态），
+ * 空态按设计补统一空态插画 +「没有数据」。
+ * 分页照源：offset 空串起步，返回空串置 '-1' 终止，has_more 双保险；
+ * 触底 200px + 1s 节流（源 EasyThrottle 1000ms）。
+ * 动态卡为完整实现（dynamic-panel，P6 接入；卡内点击跳详情/视频/用户主页由组件自治）。
+ */
+const mid = ref<number>(0)
+const items = ref<Array<DynamicItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const isLoading = ref<boolean>(false)
+/** '-1' = 没有更多（源 offset 终止符） */
+const offset = ref<string>('')
+let lastLoadAt: number = 0
+
+const isOwner = computed((): boolean => userState.isLogin && mid.value > 0 && userState.info.mid == mid.value)
+const titleText = computed((): string => isOwner.value ? '我的动态' : 'Ta的动态')
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+async function loadPage(startOffset: string, fresh: boolean) {
+	if (isLoading.value) {
+		return
+	}
+	if (startOffset == '-1') {
+		return
+	}
+	isLoading.value = true
+	if (fresh) {
+		state.value = 'loading'
+		errorText.value = ''
+	}
+	const res = await fetchMemberDynamic(mid.value, startOffset)
+	isLoading.value = false
+	if (!res.status) {
+		if (fresh) {
+			state.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	const next: Array<DynamicItem> = fresh ? [] : items.value.slice()
+	for (let i = 0; i < res.items.length; i++) {
+		next.push(res.items[i])
+	}
+	items.value = next
+	offset.value = res.offset.length > 0 ? res.offset : '-1'
+	if (fresh) {
+		state.value = next.length > 0 ? 'ready' : 'empty'
+	}
+}
+
+function onLoadMore() {
+	if (state.value != 'ready' || isLoading.value || offset.value == '-1') {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadAt < 1000) {
+		return
+	}
+	lastLoadAt = now
+	loadPage(offset.value, false)
+}
+
+function reload() {
+	items.value = []
+	offset.value = ''
+	loadPage('', true)
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	if (rawMid == null || (rawMid as string).length == 0) {
+		state.value = 'error'
+		errorText.value = '缺少用户参数（mid），请从用户主页进入'
+		return
+	}
+	const parsed = parseInt(rawMid as string)
+	mid.value = isNaN(parsed) ? 0 : parsed
+	if (mid.value <= 0) {
+		state.value = 'error'
+		errorText.value = '用户参数不合法，请从用户主页进入'
+		return
+	}
+	loadPage('', true)
+})
+</script>
+
+<style>
+	.mdy {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mdy-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mdy-scroll {
+		flex: 1;
+	}
+	.mdy-list {
+		display: flex;
+		flex-direction: column;
+		padding-top: 2px;
+	}
+	.mdy-footer {
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+		padding-top: 16px;
+	}
+	.mdy-footer-text {
+		font-size: 13px;
+	}
+	.mdy-bottom {
+		height: 30px;
+	}
+</style>

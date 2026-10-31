@@ -1,0 +1,1309 @@
+<template>
+	<view class="dd" :style="pageStyle">
+		<app-navbar title="动态详情"></app-navbar>
+
+		<!-- 主体：动态卡（action=comment 时不渲染，直达评论）+ 评论计数头 + 评论列表（单一结构） -->
+		<scroll-view class="dd-scroll" :lower-threshold="300" @scrolltolower="onLoadMore">
+			<view v-if="!directComment && detailState == 'loading'" class="dd-list">
+				<view v-for="n in 3" :key="'dsk-' + n.toString()">
+					<skeleton-dynamic-card></skeleton-dynamic-card>
+				</view>
+			</view>
+			<view v-else-if="!directComment && detailState == 'error'" class="dd-state">
+				<p-http-error :message="detailError" @retry="loadDetail"></p-http-error>
+			</view>
+			<dynamic-panel v-else-if="!directComment && item != null" :item="item" :source="'detail'" :floor="floor"></dynamic-panel>
+
+			<!-- 评论计数头（源 SliverPersistentHeader：N条回复 + 排序切换） -->
+			<view v-if="showReplyArea" class="dd-reply-head" :style="headStyle">
+				<text class="dd-reply-count" :style="titleTextStyle">{{ replyCountText }}</text>
+				<view class="dd-sort" @click="onToggleSort">
+					<text class="dd-sort-text" :style="primaryTextStyle">{{ sortLabel }}</text>
+					<text class="dd-sort-icon" :style="sortIconStyle">{{ sortGlyph }}</text>
+				</view>
+			</view>
+
+			<view v-if="showReplyArea" class="dd-reply-body">
+				<view v-if="replyState == 'loading'" class="dd-reply-skeleton">
+					<view v-for="n in 4" :key="'rsk-' + n.toString()" class="dd-rsk-row">
+						<skeleton-block width="30px" height="30px" radius="15px"></skeleton-block>
+						<view class="dd-rsk-body">
+							<skeleton-block width="40%" height="11px" radius="3px"></skeleton-block>
+							<view class="dd-rsk-gap"></view>
+							<skeleton-block width="92%" height="13px" radius="3px"></skeleton-block>
+						</view>
+					</view>
+				</view>
+				<view v-else-if="replyState == 'error'" class="dd-state">
+					<p-http-error :message="replyError" @retry="reloadReply"></p-http-error>
+				</view>
+				<view v-else-if="replyState == 'empty'" class="dd-reply-empty">
+					<text class="dd-reply-empty-title" :style="titleTextStyle">{{ replyClosed ? '评论区已关闭' : '还没有评论' }}</text>
+					<text class="dd-reply-empty-note" :style="secondaryTextStyle">{{ replyClosed ? '该动态的评论区已被关闭' : '快来发表第一条评论' }}</text>
+				</view>
+				<view v-else class="dd-reply-list">
+					<view v-for="reply in replies" :key="reply.rpid" class="dd-reply-item">
+						<view class="dd-ri-head">
+							<view class="dd-ri-avatar" @click="openMember(reply.member.mid)">
+								<network-img :src="reply.member.avatar" width="30px" height="30px" radius="15px"></network-img>
+							</view>
+							<view class="dd-ri-head-body">
+								<view class="dd-ri-name-row">
+									<text class="dd-ri-name" :style="nameStyle(reply)" :max-lines="1">{{ reply.member.uname }}</text>
+									<view v-if="reply.isUp" class="dd-ri-up" :style="upBadgeStyle">
+										<text class="dd-ri-up-text" :style="primaryTextStyle">UP</text>
+									</view>
+									<view v-if="reply.isTop" class="dd-ri-top" :style="topBadgeStyle">
+										<text class="dd-ri-top-text">置顶</text>
+									</view>
+								</view>
+								<text class="dd-ri-meta" :style="secondaryTextStyle" :max-lines="1">{{ metaText(reply) }}</text>
+							</view>
+						</view>
+						<view class="dd-ri-content" @click="onReplyRowTap(reply)">
+							<reply-rich-text
+								:content="reply.content"
+								:font-size="14"
+								:line-height="20"
+								:max-lines="3"
+								@open-user="openMember"
+								@open-link="onOpenLink"
+								@seek="onSeek"
+							></reply-rich-text>
+						</view>
+						<view class="dd-ri-actions">
+							<view class="dd-ri-act" @click="onLikeReply(reply)">
+								<text class="dd-ri-act-icon" :style="likeStyle(reply)">{{ likeGlyph }}</text>
+								<text class="dd-ri-act-text" :style="likeTextStyle(reply)">{{ likeText(reply) }}</text>
+							</view>
+							<view class="dd-ri-act" @click="onReplyTo(reply)">
+								<text class="dd-ri-act-text" :style="secondaryTextStyle">回复</text>
+							</view>
+						</view>
+						<!-- 二级预览：前 2 条 + 「共 N 条回复」 -->
+						<view v-if="reply.replies.length > 0 || reply.count > 0" class="dd-ri-sub" :style="subStyle">
+							<view v-for="sub in previewOf(reply)" :key="sub.rpid" class="dd-ri-sub-row" @click="openSheet(reply)">
+								<text class="dd-ri-sub-name" :style="primaryTextStyle">{{ sub.member.uname }}</text>
+								<view class="dd-ri-sub-body">
+									<reply-rich-text :content="sub.content" :font-size="12" :line-height="17" :max-lines="2"></reply-rich-text>
+								</view>
+							</view>
+							<view class="dd-ri-sub-more" @click="openSheet(reply)">
+								<text class="dd-ri-sub-more-text" :style="primaryTextStyle">{{ moreText(reply) }}</text>
+							</view>
+						</view>
+					</view>
+					<view v-if="replies.length > 0" class="dd-reply-footer">
+						<text class="dd-reply-footer-text" :style="secondaryTextStyle">{{ footerText }}</text>
+					</view>
+					<view class="dd-scroll-bottom"></view>
+				</view>
+			</view>
+		</scroll-view>
+
+		<!-- 底部输入条（未登录给登录引导按钮，不做假输入框） -->
+		<view class="dd-input" :style="inputBarStyle">
+			<view v-if="emoteOpen" class="dd-emote" :style="emoteBoxStyle">
+				<emote-panel business="reply" @choose="onEmoteChoose"></emote-panel>
+			</view>
+			<view v-if="replyTarget != null" class="dd-input-target">
+				<text class="dd-input-target-text" :style="secondaryTextStyle" :max-lines="1">回复 @{{ replyTargetName }}</text>
+				<text class="dd-input-cancel" :style="secondaryTextStyle" @click="onCancelReply">取消</text>
+			</view>
+			<view v-if="!isLogin" class="dd-input-login" :style="loginBtnStyle" @click="goLogin">
+				<text class="dd-input-login-text" :style="primaryTextStyle">登录后参与评论</text>
+			</view>
+			<view v-else class="dd-input-row">
+				<input
+					class="dd-input-field"
+					:style="inputTextStyle"
+					:value="inputText"
+					:maxlength="1000"
+					placeholder="发个友善的评论"
+					placeholder-class="dd-placeholder"
+					confirm-type="send"
+					@input="onInput"
+					@confirm="onSend"
+				/>
+				<view class="dd-input-action" @click="onToggleEmote">
+					<text class="dd-input-action-text" :style="secondaryTextStyle">{{ emoteOpen ? '键盘' : '表情' }}</text>
+				</view>
+				<view class="dd-input-send" :style="sendStyle" @click="onSend">
+					<text class="dd-input-send-text" :style="sendTextStyle">{{ sending ? '发送中' : '发送' }}</text>
+				</view>
+			</view>
+		</view>
+
+		<!-- 楼中楼面板（源 VideoReplyReplyPanel 的页内浮层形态；返回键由页面 onBackPress 接管） -->
+		<view v-if="sheetVisible" class="dd-sheet-mask" @click="closeSheet">
+			<view class="dd-sheet" :style="sheetStyle" @click.stop="noop">
+				<view class="dd-sheet-bar"></view>
+				<view class="dd-sheet-head">
+					<text class="dd-sheet-title" :style="titleTextStyle">评论详情</text>
+					<view class="dd-sheet-close" @click="closeSheet">
+						<text class="dd-sheet-close-text" :style="secondaryTextStyle">✕</text>
+					</view>
+				</view>
+				<scroll-view class="dd-sheet-scroll" :lower-threshold="300" @scrolltolower="onSheetLoadMore">
+					<view v-if="sheetRoot != null" class="dd-reply-item" :style="sheetRootStyle">
+						<view class="dd-ri-head">
+							<view class="dd-ri-avatar" @click="openMember(sheetRoot.member.mid)">
+								<network-img :src="sheetRoot.member.avatar" width="30px" height="30px" radius="15px"></network-img>
+							</view>
+							<view class="dd-ri-head-body">
+								<view class="dd-ri-name-row">
+									<text class="dd-ri-name" :style="nameStyle(sheetRoot)" :max-lines="1">{{ sheetRoot.member.uname }}</text>
+									<view v-if="sheetRoot.isUp" class="dd-ri-up" :style="upBadgeStyle">
+										<text class="dd-ri-up-text" :style="primaryTextStyle">UP</text>
+									</view>
+								</view>
+								<text class="dd-ri-meta" :style="secondaryTextStyle" :max-lines="1">{{ metaText(sheetRoot) }}</text>
+							</view>
+						</view>
+						<view class="dd-ri-content">
+							<reply-rich-text :content="sheetRoot.content" :font-size="14" :line-height="20"></reply-rich-text>
+						</view>
+						<view class="dd-ri-actions">
+							<view class="dd-ri-act" @click="onLikeSheetRoot">
+								<text class="dd-ri-act-icon" :style="likeStyle(sheetRoot)">{{ likeGlyph }}</text>
+								<text class="dd-ri-act-text" :style="likeTextStyle(sheetRoot)">{{ likeText(sheetRoot) }}</text>
+							</view>
+						</view>
+					</view>
+					<view v-if="sheetState == 'loading'" class="dd-reply-skeleton">
+						<view v-for="n in 4" :key="'ssk-' + n.toString()" class="dd-rsk-row">
+							<skeleton-block width="26px" height="26px" radius="13px"></skeleton-block>
+							<view class="dd-rsk-body">
+								<skeleton-block width="36%" height="11px" radius="3px"></skeleton-block>
+								<view class="dd-rsk-gap"></view>
+								<skeleton-block width="88%" height="13px" radius="3px"></skeleton-block>
+							</view>
+						</view>
+					</view>
+					<view v-else-if="sheetState == 'error'" class="dd-state">
+						<p-http-error :message="sheetError" @retry="reloadSheet"></p-http-error>
+					</view>
+					<view v-else-if="sheetState == 'empty'" class="dd-sheet-empty">
+						<text class="dd-sheet-empty-text" :style="secondaryTextStyle">还没有回复</text>
+					</view>
+					<view v-else class="dd-reply-list">
+						<view v-for="reply in sheetList" :key="reply.rpid" class="dd-reply-item">
+							<view class="dd-ri-head">
+								<view class="dd-ri-avatar" @click="openMember(reply.member.mid)">
+									<network-img :src="reply.member.avatar" width="26px" height="26px" radius="13px"></network-img>
+								</view>
+								<view class="dd-ri-head-body">
+									<view class="dd-ri-name-row">
+										<text class="dd-ri-name" :style="nameStyle(reply)" :max-lines="1">{{ reply.member.uname }}</text>
+										<view v-if="reply.isUp" class="dd-ri-up" :style="upBadgeStyle">
+											<text class="dd-ri-up-text" :style="primaryTextStyle">UP</text>
+										</view>
+									</view>
+									<text class="dd-ri-meta" :style="secondaryTextStyle" :max-lines="1">{{ metaText(reply) }}</text>
+								</view>
+							</view>
+							<view class="dd-ri-content">
+								<reply-rich-text :content="reply.content" :font-size="13" :line-height="19"></reply-rich-text>
+							</view>
+							<view class="dd-ri-actions">
+								<view class="dd-ri-act" @click="onLikeSheetReply(reply)">
+									<text class="dd-ri-act-icon" :style="likeStyle(reply)">{{ likeGlyph }}</text>
+									<text class="dd-ri-act-text" :style="likeTextStyle(reply)">{{ likeText(reply) }}</text>
+								</view>
+								<view class="dd-ri-act" @click="onSheetReplyTo(reply)">
+									<text class="dd-ri-act-text" :style="secondaryTextStyle">回复</text>
+								</view>
+							</view>
+						</view>
+						<view v-if="sheetList.length > 0" class="dd-reply-footer">
+							<text class="dd-reply-footer-text" :style="secondaryTextStyle">{{ sheetFooterText }}</text>
+						</view>
+					</view>
+					<view class="dd-sheet-bottom"></view>
+				</scroll-view>
+				<!-- 楼中楼输入行 -->
+				<view class="dd-sheet-input" :style="sheetInputStyle">
+					<view v-if="sheetReplyTarget != null" class="dd-input-target">
+						<text class="dd-input-target-text" :style="secondaryTextStyle" :max-lines="1">回复 @{{ sheetReplyName }}</text>
+						<text class="dd-input-cancel" :style="secondaryTextStyle" @click="onCancelSheetReply">取消</text>
+					</view>
+					<view v-if="!isLogin" class="dd-input-login" :style="loginBtnStyle" @click="goLogin">
+						<text class="dd-input-login-text" :style="primaryTextStyle">登录后参与评论</text>
+					</view>
+					<view v-else class="dd-input-row">
+						<input
+							class="dd-input-field"
+							:style="inputTextStyle"
+							:value="sheetText"
+							:maxlength="1000"
+							placeholder="发个友善的评论"
+							placeholder-class="dd-placeholder"
+							confirm-type="send"
+							@input="onSheetInput"
+							@confirm="onSheetSend"
+						/>
+						<view class="dd-input-send" :style="sheetSendStyle" @click="onSheetSend">
+							<text class="dd-input-send-text" :style="sendTextStyle">{{ sheetSending ? '发送中' : '发送' }}</text>
+						</view>
+					</view>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import SkeletonDynamicCard from '../../components/skeleton/skeleton-dynamic-card.uvue'
+import DynamicPanel from '../../components/dynamics/dynamic-panel.uvue'
+import ReplyRichText from '../../components/reply/reply-rich-text.uvue'
+import EmotePanel from '../../components/reply/emote-panel.uvue'
+import { fetchDynamicDetail, fetchArticleViewInfo } from '../../api/dynamics.uts'
+import { fetchReplyListByStr, fetchReplyReplyListByStr, addReplyByStr, likeReplyByStr, REPLY_CLOSED_CODE } from '../../api/reply.uts'
+import { DynamicItem } from '../../models/member.uts'
+import { ReplyItem } from '../../models/reply.uts'
+import { userState } from '../../stores/user.uts'
+import { navigateTo, RT } from '../../utils/routes.uts'
+import { openRichLink } from '../../utils/link.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+import {
+	textPrimary, textSecondary, cardBackground, pageBackground, themeColor, currentThemeIndex, withAlpha, onPrimaryText, isDarkMode
+} from '../../utils/theme.uts'
+
+/**
+ * 动态详情页（源头：`lib/pages/dynamics/detail/{view,controller}.dart`）。
+ *
+ * 目标端路由仅可传字符串，按 id 调 /x/polymer/web-dynamic/v1/detail 重取（不依赖上一页对象）。
+ * 评论 oid 链（源 init 同款）：floor=1 → basic.comment_id_str；floor=2 → major 为
+ * MAJOR_TYPE_OPUS 时取 opus jumpUrl 末段换 /x/article/viewinfo 的 comment_id，否则 draw.id。
+ * comment_type 0 视为 11。
+ *
+ * 评论全链 type=11 且 oid 走字符串（19 位超 number 精度）：列表/楼中楼/发评论/点赞用
+ * api/reply.uts 的 ByStr 变体——不复用 reply-item/reply-input 组件（其内置 oid/评论类型
+ * 为视频场景，无法注入 11，会交付「点赞必失败」坏路径）；行/输入条页内自写，
+ * 待后续统一组件 type/oidStr prop 后可回收（登记）。
+ *
+ * 浮层返回接管：楼中楼面板与表情弹层展开时，页面级 onBackPress 先关浮层再放行返回。
+ */
+const DYNAMIC_REPLY_TYPE = 11
+
+const dynamicId = ref<string>('')
+const floor = ref<number>(1)
+const directComment = ref<boolean>(false)
+
+const item = ref<DynamicItem | null>(null)
+const detailState = ref<string>('loading')
+const detailError = ref<string>('')
+const oidStr = ref<string>('')
+const commentType = ref<number>(DYNAMIC_REPLY_TYPE)
+
+const replies = ref<Array<ReplyItem>>([])
+const replyState = ref<string>('loading')
+const replyError = ref<string>('')
+const replyCode = ref<number>(0)
+const replyTotal = ref<number>(0)
+const replyPage = ref<number>(0)
+const noMore = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const sort = ref<number>(0)
+let lastLoadAt: number = 0
+
+const replyTarget = ref<ReplyItem | null>(null)
+const inputText = ref<string>('')
+const sending = ref<boolean>(false)
+const emoteOpen = ref<boolean>(false)
+let lastSendAt: number = 0
+
+const sheetVisible = ref<boolean>(false)
+const sheetRoot = ref<ReplyItem | null>(null)
+const sheetList = ref<Array<ReplyItem>>([])
+const sheetState = ref<string>('loading')
+const sheetError = ref<string>('')
+const sheetPage = ref<number>(0)
+const sheetNoMore = ref<boolean>(false)
+const sheetReplyTarget = ref<ReplyItem | null>(null)
+const sheetText = ref<string>('')
+const sheetSending = ref<boolean>(false)
+let lastSheetLoadAt: number = 0
+
+const primary = themeColor(currentThemeIndex())
+const sortGlyph = glyphOf('expand-more')
+const likeGlyph = glyphOf('thumb-up')
+
+const isLogin = computed((): boolean => userState.isLogin)
+/** 评论区显隐：detail 就绪，或 action=comment 直达评论（动态卡不渲染） */
+const showReplyArea = computed((): boolean => detailState.value == 'ready' || directComment.value)
+const replyClosed = computed((): boolean => replyCode.value == REPLY_CLOSED_CODE)
+const sortLabel = computed((): string => sort.value == 1 ? '最热' : '最新')
+const replyCountText = computed((): string => replyTotal.value > 0 ? replyTotal.value.toString() + '条回复' : '评论')
+
+const footerText = computed((): string => {
+	if (replies.value.length == 0) {
+		return ''
+	}
+	if (noMore.value) {
+		return '没有更多了'
+	}
+	return loadingMore.value ? '加载中…' : '上拉加载更多'
+})
+const sheetFooterText = computed((): string => sheetNoMore.value ? '没有更多了' : '上拉加载更多')
+const replyTargetName = computed((): string => {
+	const target = replyTarget.value
+	return target == null ? '' : target.member.uname
+})
+const sheetReplyName = computed((): string => {
+	const target = sheetReplyTarget.value
+	return target == null ? '' : target.member.uname
+})
+const canSend = computed((): boolean => inputText.value.trim().length > 0 && !sending.value)
+const canSheetSend = computed((): boolean => sheetText.value.trim().length > 0 && !sheetSending.value)
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const headStyle = computed((): string => 'background-color:' + cardBackground() + ';border-top-width:1px;border-top-style:solid;border-top-color:' + withAlpha(textSecondary(), 0.1) + ';')
+const titleTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const sortIconStyle = computed((): string => iconStyle('expand-more', 16, primary))
+const subStyle = computed((): string => {
+	const base = isDarkMode() ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'
+	return 'background-color:' + base + ';'
+})
+const sheetRootStyle = computed((): string => 'background-color:' + withAlpha(primary, 0.04) + ';')
+const upBadgeStyle = computed((): string => 'border-width:1px;border-style:solid;border-color:' + withAlpha(primary, 0.6) + ';')
+const topBadgeStyle = computed((): string => 'background-color:' + primary + ';')
+const loginBtnStyle = computed((): string => 'border-width:1px;border-style:solid;border-color:' + withAlpha(primary, 0.5) + ';')
+
+const inputBarStyle = computed((): string => {
+	const bottom = safeAreaBottom()
+	return 'background-color:' + cardBackground() + ';padding-bottom:' + (bottom + 8).toString() + 'px;'
+})
+const emoteBoxStyle = computed((): string => {
+	const bottom = safeAreaBottom()
+	return 'height:220px;padding-bottom:' + bottom.toString() + 'px;'
+})
+const sheetStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const sheetInputStyle = computed((): string => {
+	const bottom = safeAreaBottom()
+	return 'padding-bottom:' + (bottom + 6).toString() + 'px;'
+})
+const inputTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const sendStyle = computed((): string => 'background-color:' + (canSend.value ? primary : withAlpha(primary, 0.28)) + ';')
+const sheetSendStyle = computed((): string => 'background-color:' + (canSheetSend.value ? primary : withAlpha(primary, 0.28)) + ';')
+const sendTextStyle = computed((): string => 'color:' + onPrimaryText() + ';')
+
+function nameStyle(reply: ReplyItem): string {
+	return reply.member.vipStatus > 0 ? 'color:#FB64A3;' : 'color:' + textSecondary() + ';'
+}
+
+function metaText(reply: ReplyItem): string {
+	let text = dateFormat(reply.ctime, 'list')
+	const control = reply.replyControl
+	if (control != null && control.location.length > 0) {
+		text = text + ' · ' + control.location
+	}
+	return text
+}
+
+function likeText(reply: ReplyItem): string {
+	if (reply.like <= 0) {
+		return '赞'
+	}
+	if (reply.like >= 10000) {
+		return (reply.like / 10000).toFixed(1) + '万'
+	}
+	return reply.like.toString()
+}
+
+function likeStyle(reply: ReplyItem): string {
+	return iconStyle('thumb-up', 14, reply.action == 1 ? primary : textSecondary())
+}
+
+function likeTextStyle(reply: ReplyItem): string {
+	return 'color:' + (reply.action == 1 ? primary : textSecondary()) + ';'
+}
+
+function previewOf(reply: ReplyItem): Array<ReplyItem> {
+	return reply.replies.length > 2 ? reply.replies.slice(0, 2) : reply.replies
+}
+
+function subIndexEnd(reply: ReplyItem): number {
+	return reply.replies.length > 2 ? 2 : reply.replies.length
+}
+
+function moreText(reply: ReplyItem): string {
+	const total = reply.count > 0 ? reply.count : reply.replies.length
+	const shown = subIndexEnd(reply)
+	if (shown >= total && total <= 2) {
+		return '查看回复'
+	}
+	return '共 ' + total.toString() + ' 条回复'
+}
+
+// ---------------------------------------------------------------- 动态详情与 oid 链
+
+async function loadDetail() {
+	detailState.value = 'loading'
+	detailError.value = ''
+	const res = await fetchDynamicDetail(dynamicId.value)
+	if (!res.status || res.item == null) {
+		detailState.value = 'error'
+		detailError.value = res.message.length > 0 ? res.message : '请求异常'
+		// 直达评论形态下评论区无独立骨架，把失败透传给评论区错误态
+		if (directComment.value) {
+			replyState.value = 'error'
+			replyError.value = detailError.value
+		}
+		return
+	}
+	item.value = res.item
+	const current = res.item
+	// 源：comment_type 为 0 时按动态评论（11）处理
+	commentType.value = current.basic.commentType == 0 ? DYNAMIC_REPLY_TYPE : current.basic.commentType
+	await resolveOid(current)
+	detailState.value = 'ready'
+	if (oidStr.value.length > 0) {
+		loadReply(1, true)
+	} else {
+		replyState.value = 'error'
+		replyError.value = '评论信息获取失败'
+	}
+}
+
+/** 评论 oid 链：floor=1 → comment_id_str；floor=2 → OPUS 走 viewinfo、DRAW 走 draw.id（源 init 同款） */
+async function resolveOid(current: DynamicItem) {
+	if (floor.value == 1) {
+		oidStr.value = current.basic.commentIdStr
+		return
+	}
+	const major = current.modules.dynamic.major
+	if (major == null) {
+		oidStr.value = current.basic.commentIdStr
+		return
+	}
+	if (major.type == 'MAJOR_TYPE_OPUS' && major.opus != null) {
+		const jumpUrl = major.opus.jumpUrl
+		// 源：jumpUrl 末段即 opusId，再换 comment_id
+		const opusId = jumpUrl.length > 0 ? jumpUrl.split('/').last() : ''
+		if (opusId.length > 0) {
+			const info = await fetchArticleViewInfo(opusId)
+			if (info.status) {
+				oidStr.value = info.commentId.toString()
+				return
+			}
+		}
+		// viewinfo 失败：回落 comment_id_str（转发源动态自身也可评论）
+		oidStr.value = current.basic.commentIdStr
+		return
+	}
+	if (major.draw != null && major.draw.id > 0) {
+		oidStr.value = major.draw.id.toString()
+		return
+	}
+	oidStr.value = current.basic.commentIdStr
+}
+
+// ---------------------------------------------------------------- 一级评论
+
+async function loadReply(pn: number, reset: boolean) {
+	if (loadingMore.value) {
+		return
+	}
+	loadingMore.value = true
+	if (reset) {
+		replyState.value = 'loading'
+		replyError.value = ''
+	}
+	const res = await fetchReplyListByStr(oidStr.value, pn, sort.value, commentType.value)
+	loadingMore.value = false
+	replyCode.value = res.code
+	if (!res.status || res.data == null) {
+		if (reset) {
+			replies.value = []
+			replyState.value = 'error'
+			replyError.value = res.message.length > 0 ? res.message : '请求异常'
+		} else {
+			uni.showToast({ title: res.message.length > 0 ? res.message : '请求异常', icon: 'none' })
+		}
+		return
+	}
+	const data = res.data
+	replyTotal.value = data.page.acount
+	const incoming: Array<ReplyItem> = []
+	if (reset) {
+		// 置顶：upper.top + top_replies 去重插头（源 controller 同款）
+		const top = data.upperTop
+		if (top != null && top.rpid.length > 0) {
+			incoming.push(top)
+		}
+		for (let i = 0; i < data.topReplies.length; i++) {
+			if (!hasRpid(incoming, data.topReplies[i].rpid)) {
+				incoming.push(data.topReplies[i])
+			}
+		}
+	}
+	for (let i = 0; i < data.replies.length; i++) {
+		const reply = data.replies[i]
+		if (!hasRpid(incoming, reply.rpid) && !hasRpid(replies.value, reply.rpid)) {
+			incoming.push(reply)
+		}
+	}
+	if (reset) {
+		replies.value = incoming
+		replyPage.value = 1
+		noMore.value = data.replies.length < 18
+		replyState.value = replies.value.length > 0 ? 'ready' : 'empty'
+		return
+	}
+	if (incoming.length == 0) {
+		noMore.value = true
+		return
+	}
+	const next = replies.value.slice()
+	for (let i = 0; i < incoming.length; i++) {
+		next.push(incoming[i])
+	}
+	replies.value = next
+	replyPage.value = pn
+	noMore.value = data.replies.length < 18
+}
+
+function hasRpid(list: Array<ReplyItem>, rpid: string): boolean {
+	for (let i = 0; i < list.length; i++) {
+		if (list[i].rpid == rpid) {
+			return true
+		}
+	}
+	return false
+}
+
+function reloadReply() {
+	loadReply(1, true)
+}
+
+function onToggleSort() {
+	sort.value = sort.value == 0 ? 1 : 0
+	reloadReply()
+}
+
+function onLoadMore() {
+	if (replyState.value != 'ready' || noMore.value || loadingMore.value) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadAt < 1000) {
+		return
+	}
+	lastLoadAt = now
+	loadReply(replyPage.value + 1, false)
+}
+
+/** 一级评论行点击 = 回复该评论（源为整行开楼中楼；点赞已独立成钮，整行回复不冲突） */
+function onReplyRowTap(reply: ReplyItem) {
+	if (!isLogin.value) {
+		goLogin()
+		return
+	}
+	replyTarget.value = reply
+}
+
+function onReplyTo(reply: ReplyItem) {
+	if (!isLogin.value) {
+		goLogin()
+		return
+	}
+	replyTarget.value = reply
+}
+
+function onCancelReply() {
+	replyTarget.value = null
+}
+
+// ---------------------------------------------------------------- 点赞评论（type=11）
+
+async function onLikeReply(reply: ReplyItem) {
+	if (!isLogin.value) {
+		goLogin()
+		return
+	}
+	const nextAction = reply.action == 0 ? 1 : 0
+	const prevAction = reply.action
+	const prevLike = reply.like
+	reply.action = nextAction
+	reply.like = nextAction == 1 ? reply.like + 1 : (reply.like > 0 ? reply.like - 1 : 0)
+	const res = await likeReplyByStr(oidStr.value, reply.rpid, nextAction, commentType.value)
+	if (!res.status) {
+		reply.action = prevAction
+		reply.like = prevLike
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	uni.showToast({ title: nextAction == 1 ? '点赞成功' : '已取消赞', icon: 'none' })
+}
+
+async function onLikeSheetReply(reply: ReplyItem) {
+	await onLikeReply(reply)
+}
+
+async function onLikeSheetRoot() {
+	const root = sheetRoot.value
+	if (root == null) {
+		return
+	}
+	await onLikeReply(root)
+}
+
+// ---------------------------------------------------------------- 发评论（type=11）
+
+function onInput(event: UniInputEvent) {
+	inputText.value = event.detail.value
+}
+
+function onToggleEmote() {
+	emoteOpen.value = !emoteOpen.value
+	if (emoteOpen.value) {
+		uni.hideKeyboard()
+	}
+}
+
+function onEmoteChoose(token: string) {
+	if (token.length == 0) {
+		return
+	}
+	inputText.value = inputText.value + token
+}
+
+async function onSend() {
+	if (!isLogin.value || sending.value) {
+		return
+	}
+	const message = inputText.value.trim()
+	if (message.length == 0) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastSendAt < 200) {
+		return
+	}
+	lastSendAt = now
+	sending.value = true
+	const target = replyTarget.value
+	const root = target == null ? '' : target.rpid
+	const parent = target == null ? '' : target.rpid
+	const res = await addReplyByStr(oidStr.value, root, parent, message, commentType.value)
+	sending.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message.length > 0 ? res.message : '评论失败', icon: 'none' })
+		return
+	}
+	inputText.value = ''
+	emoteOpen.value = false
+	replyTarget.value = null
+	uni.showToast({ title: res.successToast.length > 0 ? res.successToast : '评论成功', icon: 'none' })
+	const added = res.item
+	if (added != null) {
+		if (target == null) {
+			const next: Array<ReplyItem> = [added]
+			for (let i = 0; i < replies.value.length; i++) {
+				next.push(replies.value[i])
+			}
+			replies.value = next
+			replyTotal.value = replyTotal.value + 1
+			if (replyState.value != 'ready') {
+				replyState.value = 'ready'
+			}
+		} else {
+			// 回复一级评论：进楼中楼预览（root 的 replies/count）
+			target.replies.push(added)
+			target.count = target.count + 1
+		}
+	}
+}
+
+// ---------------------------------------------------------------- 楼中楼
+
+function openSheet(root: ReplyItem) {
+	sheetRoot.value = root
+	sheetList.value = []
+	sheetReplyTarget.value = null
+	sheetError.value = ''
+	sheetState.value = 'loading'
+	sheetPage.value = 0
+	sheetNoMore.value = false
+	sheetVisible.value = true
+	loadSheetPage(1)
+}
+
+function closeSheet() {
+	sheetVisible.value = false
+	sheetRoot.value = null
+	sheetList.value = []
+	sheetReplyTarget.value = null
+	sheetText.value = ''
+}
+
+function noop() {}
+
+async function loadSheetPage(pn: number) {
+	const root = sheetRoot.value
+	if (root == null || oidStr.value.length == 0) {
+		return
+	}
+	if (pn == 1) {
+		sheetState.value = 'loading'
+		sheetError.value = ''
+	}
+	const res = await fetchReplyReplyListByStr(oidStr.value, root.rpid, pn, commentType.value)
+	if (!res.status || res.data == null) {
+		if (pn == 1) {
+			sheetState.value = 'error'
+			sheetError.value = res.message.length > 0 ? res.message : '请求异常'
+		} else {
+			uni.showToast({ title: res.message.length > 0 ? res.message : '请求异常', icon: 'none' })
+		}
+		return
+	}
+	const data = res.data
+	const next: Array<ReplyItem> = pn == 1 ? [] : sheetList.value.slice()
+	for (let i = 0; i < data.replies.length; i++) {
+		next.push(data.replies[i])
+	}
+	sheetList.value = next
+	sheetPage.value = pn
+	sheetNoMore.value = data.replies.length < 18
+	if (next.length == 0 && pn == 1) {
+		sheetState.value = 'empty'
+	} else {
+		sheetState.value = 'ready'
+	}
+}
+
+function reloadSheet() {
+	loadSheetPage(1)
+}
+
+function onSheetLoadMore() {
+	if (sheetState.value != 'ready' || sheetNoMore.value) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastSheetLoadAt < 200) {
+		return
+	}
+	lastSheetLoadAt = now
+	loadSheetPage(sheetPage.value + 1)
+}
+
+function onSheetReplyTo(reply: ReplyItem) {
+	if (!isLogin.value) {
+		goLogin()
+		return
+	}
+	sheetReplyTarget.value = reply
+}
+
+function onCancelSheetReply() {
+	sheetReplyTarget.value = null
+}
+
+function onSheetInput(event: UniInputEvent) {
+	sheetText.value = event.detail.value
+}
+
+async function onSheetSend() {
+	if (!isLogin.value || sheetSending.value) {
+		return
+	}
+	const message = sheetText.value.trim()
+	if (message.length == 0) {
+		return
+	}
+	const root = sheetRoot.value
+	if (root == null) {
+		return
+	}
+	sheetSending.value = true
+	const target = sheetReplyTarget.value
+	const parent = target == null ? root.rpid : target.rpid
+	const res = await addReplyByStr(oidStr.value, root.rpid, parent, message, commentType.value)
+	sheetSending.value = false
+	if (!res.status) {
+		uni.showToast({ title: res.message.length > 0 ? res.message : '评论失败', icon: 'none' })
+		return
+	}
+	sheetText.value = ''
+	sheetReplyTarget.value = null
+	uni.showToast({ title: res.successToast.length > 0 ? res.successToast : '评论成功', icon: 'none' })
+	const added = res.item
+	if (added != null) {
+		const next: Array<ReplyItem> = [added]
+		for (let i = 0; i < sheetList.value.length; i++) {
+			next.push(sheetList.value[i])
+		}
+		sheetList.value = next
+		if (sheetState.value != 'ready') {
+			sheetState.value = 'ready'
+		}
+		// 根楼回复数同步（一级列表预览随之更新）
+		root.count = root.count + 1
+	}
+}
+
+// ---------------------------------------------------------------- 跳转与返回
+
+function openMember(mid: string) {
+	if (mid.length == 0) {
+		return
+	}
+	navigateTo(RT.member, 'mid=' + mid)
+}
+
+/** 正文 link 切片（链接 / BV 号 / 话题）：统一走 utils/link.uts 的真实落点 */
+function onOpenLink(text: string) {
+	openRichLink(text)
+}
+
+function onSeek(text: string, seconds: number) {
+	uni.showToast({ title: '跳到 ' + text + '：动态评论暂不支持进度跳转', icon: 'none' })
+}
+
+function goLogin() {
+	navigateTo(RT.login)
+}
+
+/** 浮层返回接管：楼中楼/表情弹层展开时先关浮层（页面级钩子，浮层侧滑退出 App 为静默坑） */
+onBackPress(() => {
+	if (sheetVisible.value) {
+		closeSheet()
+		return true
+	}
+	if (emoteOpen.value) {
+		emoteOpen.value = false
+		return true
+	}
+	return false
+})
+
+onLoad((options) => {
+	if (options == null) {
+		return
+	}
+	const rawId = options['id']
+	if (rawId == null || (rawId as string).length == 0) {
+		detailState.value = 'error'
+		detailError.value = '缺少动态 id，请从动态列表进入'
+		replyState.value = 'error'
+		replyError.value = detailError.value
+		return
+	}
+	dynamicId.value = rawId as string
+	const rawFloor = options['floor']
+	if (rawFloor != null) {
+		const parsed = parseInt(rawFloor as string)
+		floor.value = isNaN(parsed) ? 1 : parsed
+	}
+	directComment.value = options['action'] == 'comment'
+	// detail 态与评论区均由 loadDetail 驱动（直达评论形态：动态卡不渲染，评论区骨架先展）
+	loadDetail()
+})
+</script>
+
+<style>
+	.dd {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.dd-scroll {
+		flex: 1;
+	}
+	.dd-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.dd-state {
+		display: flex;
+		flex-direction: column;
+	}
+	.dd-direct {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.dd-direct-scroll {
+		flex: 1;
+	}
+	.dd-reply-head {
+		height: 45px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 6px;
+	}
+	.dd-reply-count {
+		flex: 1;
+		font-size: 13px;
+	}
+	.dd-sort {
+		height: 35px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 8px;
+		padding-right: 6px;
+	}
+	.dd-sort-text {
+		font-size: 13px;
+	}
+	.dd-sort-icon {
+		font-family: MaterialIcons;
+		margin-left: 2px;
+	}
+	.dd-reply-body {
+		display: flex;
+		flex-direction: column;
+	}
+	.dd-reply-skeleton {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 10px;
+	}
+	.dd-rsk-row {
+		display: flex;
+		flex-direction: row;
+		margin-bottom: 16px;
+	}
+	.dd-rsk-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+	}
+	.dd-rsk-gap {
+		height: 6px;
+	}
+	.dd-reply-empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-top: 50px;
+		padding-bottom: 50px;
+	}
+	.dd-reply-empty-title {
+		font-size: 14px;
+	}
+	.dd-reply-empty-note {
+		font-size: 12px;
+		margin-top: 8px;
+	}
+	.dd-reply-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.dd-reply-item {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 8px;
+		padding-top: 14px;
+		padding-bottom: 10px;
+		border-bottom-width: 1px;
+		border-bottom-style: solid;
+		border-bottom-color: rgba(128, 128, 128, 0.12);
+	}
+	.dd-ri-head {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+	}
+	.dd-ri-avatar {
+		width: 30px;
+		height: 30px;
+	}
+	.dd-ri-head-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+	}
+	.dd-ri-name-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.dd-ri-name {
+		font-size: 12px;
+	}
+	.dd-ri-up {
+		margin-left: 6px;
+		padding-left: 4px;
+		padding-right: 4px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+		border-radius: 4px;
+	}
+	.dd-ri-up-text {
+		font-size: 10px;
+	}
+	.dd-ri-top {
+		margin-left: 6px;
+		padding-left: 4px;
+		padding-right: 4px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+		border-radius: 4px;
+	}
+	.dd-ri-top-text {
+		font-size: 10px;
+		color: #FFFFFF;
+	}
+	.dd-ri-meta {
+		font-size: 11px;
+		margin-top: 2px;
+	}
+	.dd-ri-content {
+		padding-left: 40px;
+		padding-right: 4px;
+	}
+	.dd-ri-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 40px;
+		padding-top: 6px;
+	}
+	.dd-ri-act {
+		height: 30px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-right: 16px;
+	}
+	.dd-ri-act-icon {
+		font-family: MaterialIcons;
+		font-size: 14px;
+	}
+	.dd-ri-act-text {
+		font-size: 11px;
+		margin-left: 4px;
+	}
+	.dd-ri-sub {
+		display: flex;
+		flex-direction: column;
+		border-radius: 6px;
+		margin-left: 40px;
+		margin-top: 6px;
+		padding: 8px;
+	}
+	.dd-ri-sub-row {
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+	}
+	.dd-ri-sub-name {
+		font-size: 12px;
+		margin-right: 6px;
+	}
+	.dd-ri-sub-body {
+		flex: 1;
+	}
+	.dd-ri-sub-more {
+		height: 26px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.dd-ri-sub-more-text {
+		font-size: 12px;
+	}
+	.dd-reply-footer {
+		height: 48px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.dd-reply-footer-text {
+		font-size: 12px;
+	}
+	.dd-scroll-bottom {
+		height: 20px;
+	}
+	.dd-input {
+		display: flex;
+		flex-direction: column;
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(128, 128, 128, 0.18);
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 8px;
+	}
+	.dd-emote {
+		display: flex;
+		flex-direction: column;
+		border-radius: 10px;
+		margin-bottom: 8px;
+		overflow: hidden;
+	}
+	.dd-input-target {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-bottom: 6px;
+	}
+	.dd-input-target-text {
+		flex: 1;
+		font-size: 12px;
+	}
+	.dd-input-cancel {
+		font-size: 12px;
+		margin-left: 10px;
+	}
+	.dd-input-login {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		border-radius: 22px;
+		margin-bottom: 8px;
+	}
+	.dd-input-login-text {
+		font-size: 14px;
+	}
+	.dd-input-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-bottom: 8px;
+	}
+	.dd-input-field {
+		flex: 1;
+		height: 36px;
+		border-radius: 18px;
+		font-size: 14px;
+		padding-left: 12px;
+		padding-right: 12px;
+		background-color: rgba(128, 128, 128, 0.12);
+	}
+	.dd-placeholder {
+		color: #9BA1AC;
+		font-size: 14px;
+	}
+	.dd-input-action {
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.dd-input-action-text {
+		font-size: 13px;
+	}
+	.dd-input-send {
+		height: 32px;
+		border-radius: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.dd-input-send-text {
+		font-size: 13px;
+		font-weight: 500;
+		color: #FFFFFF;
+	}
+	.dd-sheet-mask {
+		position: fixed;
+		left: 0px;
+		top: 0px;
+		right: 0px;
+		bottom: 0px;
+		background-color: rgba(0, 0, 0, 0.4);
+	}
+	.dd-sheet {
+		position: absolute;
+		left: 0px;
+		right: 0px;
+		bottom: 0px;
+		height: 75%;
+		border-top-left-radius: 12px;
+		border-top-right-radius: 12px;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+	.dd-sheet-bar {
+		height: 4px;
+		width: 32px;
+		border-radius: 2px;
+		background-color: rgba(128, 128, 128, 0.3);
+		margin-top: 8px;
+		margin-bottom: 4px;
+		align-self: center;
+	}
+	.dd-sheet-head {
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 6px;
+	}
+	.dd-sheet-title {
+		flex: 1;
+		font-size: 15px;
+		font-weight: 500;
+	}
+	.dd-sheet-close {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.dd-sheet-close-text {
+		font-size: 16px;
+	}
+	.dd-sheet-scroll {
+		flex: 1;
+	}
+	.dd-sheet-empty {
+		height: 120px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.dd-sheet-empty-text {
+		font-size: 13px;
+	}
+	.dd-sheet-bottom {
+		height: 10px;
+	}
+	.dd-sheet-input {
+		display: flex;
+		flex-direction: column;
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(128, 128, 128, 0.18);
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 6px;
+	}
+</style>

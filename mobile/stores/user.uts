@@ -1,0 +1,44 @@
+import { reactive } from 'vue'
+
+/**
+ * 用户信息（字段与源 `models/user/info.dart` 的 nav 响应对齐，只保留业务用到的子集）。
+ * 命中源字段名，禁止改名：后续页面按源逻辑读同一批 key。
+ */
+export class UserInfo {
+	isLogin: boolean = false
+	mid: number = 0
+	uname: string = ''
+	face: string = ''
+	money: number = 0
+	moral: number = 0
+	vipStatus: number = 0
+	vipType: number = 0
+	vipDueDate: number = 0
+	level: number = 0
+}
+
+/** 未读数：消息四类（reply/at/like/sys_msg）与动态入口计数 */
+export class UnreadState {
+	msgReply: number = 0
+	msgAt: number = 0
+	msgLike: number = 0
+	msgSystem: number = 0
+	dynamic: number = 0
+}
+
+export type UserState = {
+	isLogin: boolean
+	info: UserInfo
+	unread: UnreadState
+}
+
+/**
+ * 跨页共享的用户态单例。
+ * 模块级对象，不随页面销毁重置（App 生命周期内唯一）；写入方只有 `composables/useLogin.uts`，
+ * 其他模块只读消费。
+ */
+export const userState = reactive({
+	isLogin: false,
+	info: new UserInfo(),
+	unread: new UnreadState()
+} as UserState)

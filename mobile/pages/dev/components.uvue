@@ -1,0 +1,125 @@
+<template>
+	<view class="page">
+		<app-navbar title="基座组件" :show-back="true">
+			<template #right>
+				<text class="nav-action" @click="onNavAction">搜索</text>
+			</template>
+		</app-navbar>
+		<scroll-view class="page-body" direction="vertical">
+			<view class="section">
+				<text class="section-title">骨架屏 · 评论（行数 / 头像占位 / 行宽比例 / 微光节奏）</text>
+				<skeleton-video-reply></skeleton-video-reply>
+			</view>
+			<view class="section">
+				<text class="section-title">骨架屏 · 竖向视频卡（两列）</text>
+				<view class="grid">
+					<view class="grid-col">
+						<skeleton-video-card-v imgHeight="110px"></skeleton-video-card-v>
+					</view>
+					<view class="grid-col">
+						<skeleton-video-card-v imgHeight="110px"></skeleton-video-card-v>
+					</view>
+				</view>
+			</view>
+			<view class="section">
+				<text class="section-title">骨架屏 · 横向视频卡（封面 16:10 / 信息条 / 底部双条）</text>
+				<skeleton-video-card-h></skeleton-video-card-h>
+			</view>
+			<view class="section">
+				<text class="section-title">骨架屏 · 动态卡（头部 / 正文五行 / 操作行 / 8px 分隔）</text>
+				<skeleton-dynamic-card></skeleton-dynamic-card>
+			</view>
+			<view class="section">
+				<text class="section-title">骨架屏 · 番剧横卡（封面 111×148 / 标题 / 三条 / 胶囊）</text>
+				<skeleton-media-bangumi></skeleton-media-bangumi>
+			</view>
+			<view class="section">
+				<text class="section-title">图片</text>
+				<network-img src="https://httpbin.org/image/png" width="160rpx" height="160rpx" radius="16rpx"></network-img>
+				<text class="section-note">httpbin 图片（验证组件链路）</text>
+				<network-img src="https://i0.hdslb.com/bfs/face/member/noface.jpg" width="160rpx" height="160rpx" radius="16rpx"></network-img>
+				<text class="section-note">B 站 CDN 图片（验证直连加载）</text>
+			</view>
+			<view class="section">
+				<text class="section-title">加载态</text>
+				<list-state state="loading"></list-state>
+			</view>
+			<view class="section">
+				<text class="section-title">空态</text>
+				<list-state state="empty" empty-text="这里还没有内容"></list-state>
+			</view>
+			<view class="section">
+				<text class="section-title">错误态</text>
+				<list-state state="error"></list-state>
+			</view>
+			<view class="section">
+				<text class="section-title">导航栏点击计数（验证返回按钮可点）</text>
+				<text class="section-note">右侧动作点击次数：{{ actionCount }}</text>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref } from 'vue'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import ListState from '../../components/list-state/list-state.uvue'
+import SkeletonVideoReply from '../../components/skeleton/skeleton-video-reply.uvue'
+import SkeletonVideoCardV from '../../components/skeleton/skeleton-video-card-v.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import SkeletonDynamicCard from '../../components/skeleton/skeleton-dynamic-card.uvue'
+import SkeletonMediaBangumi from '../../components/skeleton/skeleton-media-bangumi.uvue'
+
+const actionCount = ref<number>(0)
+
+function onNavAction() {
+	actionCount.value = actionCount.value + 1
+	console.log('[COMP] navbar action clicked count=' + actionCount.value.toString())
+}
+</script>
+
+<style>
+	.page {
+		flex: 1;
+		background-color: #F6F7F8;
+	}
+	.page-body {
+		flex: 1;
+		padding-left: 24rpx;
+		padding-right: 24rpx;
+	}
+	.nav-action {
+		font-size: 15px;
+		color: #18191C;
+		padding-left: 8px;
+		padding-right: 8px;
+	}
+	.section {
+		margin-top: 24rpx;
+		padding: 24rpx;
+		background-color: #FFFFFF;
+		border-radius: 16rpx;
+		display: flex;
+		flex-direction: column;
+	}
+	.section-title {
+		font-size: 26rpx;
+		color: #8A94A6;
+		margin-bottom: 16rpx;
+	}
+	.section-note {
+		font-size: 22rpx;
+		color: #A7ADB8;
+		margin-top: 8rpx;
+		margin-bottom: 12rpx;
+	}
+	.grid {
+		display: flex;
+		flex-direction: row;
+	}
+	.grid-col {
+		flex: 1;
+		padding-right: 8px;
+	}
+</style>

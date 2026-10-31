@@ -1,0 +1,281 @@
+<template>
+	<view class="lg" :style="pageStyle">
+		<app-navbar title="日志">
+			<template #right>
+				<view class="lg-menu" @click="openMenu">
+					<text class="lg-menu-icon" :style="menuIconStyle">{{ moreGlyph }}</text>
+				</view>
+			</template>
+		</app-navbar>
+
+		<!-- 有日志：逐条（时间行 + 复制 + 正文卡片 + 分割线），基线同源 logs 页 ListView 条目 -->
+		<scroll-view v-if="logs.length > 0" class="lg-scroll" direction="vertical">
+			<view class="lg-list">
+				<view v-for="(entry, index) in logs" :key="index.toString()" class="lg-item">
+					<view class="lg-head">
+						<text class="lg-time" :style="timeStyle">{{ timeText(entry.time) }}</text>
+						<view class="lg-copy" @click="copyEntry(entry)">
+							<text class="lg-copy-icon" :style="copyIconStyle">{{ copyGlyph }}</text>
+							<text class="lg-copy-text" :style="copyTextStyle">复制</text>
+						</view>
+						<view class="lg-head-fill"></view>
+						<text class="lg-level" :style="levelStyle(entry.level)">{{ entry.level }}</text>
+					</view>
+					<view class="lg-card" :style="cardStyle">
+						<text class="lg-body" :style="bodyStyle(entry.level)" :user-select="true">{{ bodyText(entry) }}</text>
+					</view>
+					<view class="lg-divider" :style="dividerStyle"></view>
+				</view>
+			</view>
+			<view class="lg-foot" :style="footStyle"></view>
+		</scroll-view>
+
+		<!-- 空态（源 NoData 组件的等价：文案 + 无插画） -->
+		<view v-else class="lg-empty">
+			<text class="lg-empty-text" :style="emptyStyle">暂无日志</text>
+			<text class="lg-empty-sub" :style="emptySubStyle">运行中的错误与关键流程会记录在这里</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onShow, onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import { pageBackground, cardBackground, textPrimary, textSecondary, errorText, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { getLogs, clearLogs, exportLogText, formatLogEntry, LogEntry } from '../../utils/logger.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+
+/**
+ * 日志页（源头：lib/pages/setting/pages/logs.dart）。
+ *
+ *  - 结构对齐源：导航栏「日志」+ 右上菜单（复制日志 / 错误反馈 / 清空日志）+ 逐条日志
+ *    （时间行 + 复制按钮 + 正文卡片 + 分割线）+ 空态；
+ *  - 数据来源：`utils/logger.uts` 环形缓冲（源为 catcher 日志文件；本端无 catcher，
+ *    日志由全局错误钩子与各模块 logXxx 写入，持久化在 uni storage，见该文件头）；
+ *  - 「错误反馈」：源用系统浏览器打开 GitHub issues。uni-app x 无「系统浏览器打开」API
+ *    （`plus.runtime.openURL` 在蒸汽端不可用），改走内置 webview 页打开同一地址——同地址、
+ *    可读可复制，差异登记为平台约束；
+ *  - 「复制日志」/单条复制：`uni.setClipboardData` + toast（源 SnackBar 等价）。
+ */
+
+const logs = ref<Array<LogEntry>>([])
+
+const moreGlyph = glyphOf('more-vert')
+const copyGlyph = glyphOf('content-copy')
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const menuIconStyle = iconStyle('more-vert', 22, textPrimary())
+const copyIconStyle = iconStyle('content-copy', 14, textSecondary())
+const timeStyle = computed((): string => 'color:' + textPrimary() + ';')
+const copyTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const cardStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const dividerStyle = computed((): string => 'background-color:' + withAlpha(textSecondary(), 0.18) + ';')
+const emptyStyle = computed((): string => 'color:' + textSecondary() + ';')
+const emptySubStyle = computed((): string => 'color:' + withAlpha(textSecondary(), 0.8) + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+
+function levelColor(level: string): string {
+	if (level == 'error') {
+		return errorText()
+	}
+	if (level == 'warn') {
+		return '#E0A030'
+	}
+	if (level == 'debug') {
+		return withAlpha(textSecondary(), 0.9)
+	}
+	return textPrimary()
+}
+
+function levelStyle(level: string): string {
+	return 'color:' + levelColor(level) + ';'
+}
+
+function bodyStyle(level: string): string {
+	return 'color:' + (level == 'error' ? errorText() : textPrimary()) + ';'
+}
+
+/** 时间只取「时:分:秒」，完整日期在同条复制文本里（源条目顶部也只展示日期时间一段） */
+function timeText(ms: number): string {
+	const d = new Date(ms)
+	const pad = (value: number): string => value < 10 ? '0' + value.toString() : value.toString()
+	return d.getFullYear().toString() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+		' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
+}
+
+function reload() {
+	logs.value = getLogs()
+}
+
+/** 正文带模块标签（源头 catcher 正文自带 DEVICE/APP INFO 段，这里用 [tag] 前缀标来源） */
+function bodyText(entry: LogEntry): string {
+	return entry.tag.length > 0 ? '[' + entry.tag + '] ' + entry.message : entry.message
+}
+
+function copyEntry(entry: LogEntry) {
+	uni.setClipboardData({
+		data: formatLogEntry(entry),
+		success: (_res) => {
+			uni.showToast({ title: '已复制该条日志', icon: 'none' })
+		}
+	})
+}
+
+function copyAll() {
+	const text = exportLogText()
+	if (text.length == 0) {
+		uni.showToast({ title: '暂无日志', icon: 'none' })
+		return
+	}
+	uni.setClipboardData({
+		data: text,
+		success: (_res) => {
+			uni.showToast({ title: '复制成功', icon: 'none' })
+		}
+	})
+}
+
+/** 错误反馈：内置 webview 打开源 issues 地址（平台无系统浏览器打开 API，差异已登记） */
+function feedback() {
+	uni.navigateTo({
+		url: '/pages/webview/webview?url=' + encodeURIComponent('https://github.com/guozhigq/pilipala/issues') +
+			'&title=' + encodeURIComponent('错误反馈')
+	})
+}
+
+function clearAllLogs() {
+	clearLogs()
+	reload()
+	uni.showToast({ title: '已清空', icon: 'none' })
+}
+
+function openMenu() {
+	const items: string[] = ['复制日志', '错误反馈', '清空日志']
+	uni.showActionSheet({
+		itemList: items,
+		success: (res) => {
+			const label = items[res.tapIndex]
+			if (label == '复制日志') {
+				copyAll()
+			} else if (label == '错误反馈') {
+				feedback()
+			} else if (label == '清空日志') {
+				clearAllLogs()
+			}
+		}
+	})
+}
+
+onShow((_e) => {
+	reload()
+})
+
+// 页面无浮层，返回键交回系统导航栈
+onBackPress(() => {
+	return false
+})
+</script>
+
+<style>
+	.lg {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.lg-scroll {
+		flex: 1;
+	}
+	.lg-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.lg-item {
+		display: flex;
+		flex-direction: column;
+	}
+	.lg-head {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 8px;
+		padding-right: 12px;
+		padding-top: 4px;
+		padding-bottom: 2px;
+	}
+	.lg-time {
+		font-size: 13px;
+		font-weight: 500;
+		padding-left: 4px;
+	}
+	.lg-head-fill {
+		flex: 1;
+	}
+	.lg-level {
+		font-size: 11px;
+	}
+	.lg-copy {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 8px;
+		padding-right: 8px;
+		padding-top: 6px;
+		padding-bottom: 6px;
+	}
+	.lg-copy-icon {
+		font-family: MaterialIcons;
+	}
+	.lg-copy-text {
+		font-size: 12px;
+		margin-left: 4px;
+	}
+	.lg-card {
+		margin-left: 12px;
+		margin-right: 12px;
+		border-radius: 10px;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.lg-body {
+		font-size: 12px;
+		line-height: 18px;
+	}
+	.lg-divider {
+		height: 1px;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 8px;
+	}
+	.lg-empty {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.lg-empty-text {
+		font-size: 14px;
+	}
+	.lg-empty-sub {
+		font-size: 12px;
+		margin-top: 6px;
+	}
+	.lg-foot {
+		height: 1px;
+	}
+	.lg-menu {
+		width: 44px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.lg-menu-icon {
+		font-family: MaterialIcons;
+	}
+</style>

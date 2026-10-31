@@ -1,0 +1,96 @@
+<template>
+	<view class="nrt" :style="rootStyle">
+		<template v-for="(seg, index) in segments" :key="'seg-' + index.toString()">
+			<text
+				v-if="seg.type == 'at'"
+				class="nrt-at"
+				:style="atStyle"
+				@click.stop="onAtTap(seg)"
+			>{{ seg.text }}</text>
+			<text v-else class="nrt-text" :style="textStyle">{{ seg.text }}</text>
+		</template>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { NoticeUser, NoticeSegment, splitNoticeAt } from '../../models/message.uts'
+import { textPrimary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 通知正文切片渲染（源头：`lib/pages/message/reply/view.dart` 的 buildContent——源用
+ * `Text.rich` + `TapGestureRecognizer` 把 @人渲染成主色可点片段）。
+ *
+ * 为什么不是 rich-text：rich-text 不支持片段级点击，用它渲染等于假装能点。
+ * 因此模型层把正文切成 text / at 两类切片（models/message.uts#splitNoticeAt），这里逐片出 text：
+ * at 片挂点击跳 member（页面消费 open-user），text 片纯展示。
+ *
+ * 截断：切片布局没有行数概念，统一用 max-height = lineHeight * maxLines + overflow:hidden 裁剪
+ * （与 components/reply/reply-rich-text 同口径）。
+ */
+const props = defineProps({
+	content: { type: String, default: '' },
+	atDetails: {
+		type: Array,
+		default() {
+			return [] as Array<NoticeUser>
+		}
+	},
+	fontSize: { type: Number, default: 14 },
+	lineHeight: { type: Number, default: 20 },
+	/** 0 表示不截断 */
+	maxLines: { type: Number, default: 0 },
+	/** 空串表示取 textPrimary（暗黑模式联动） */
+	color: { type: String, default: '' }
+})
+
+const emit = defineEmits(['open-user'])
+
+const primary = themeColor(currentThemeIndex())
+
+const segments = computed((): Array<NoticeSegment> => {
+	return splitNoticeAt(props.content, props.atDetails as Array<NoticeUser>)
+})
+
+const rootStyle = computed((): string => {
+	if (props.maxLines <= 0) {
+		return ''
+	}
+	return 'max-height:' + (props.lineHeight * props.maxLines).toString() + 'px;overflow:hidden;'
+})
+
+const textStyle = computed((): string => {
+	const value = props.color.length > 0 ? props.color : textPrimary()
+	return 'font-size:' + props.fontSize.toString() + 'px;line-height:' + props.lineHeight.toString() +
+		'px;color:' + value + ';'
+})
+
+const atStyle = computed((): string => {
+	return 'font-size:' + props.fontSize.toString() + 'px;line-height:' + props.lineHeight.toString() +
+		'px;color:' + primary + ';'
+})
+
+function onAtTap(seg: NoticeSegment) {
+	if (seg.mid.length == 0) {
+		return
+	}
+	emit('open-user', seg.mid)
+}
+</script>
+
+<style>
+	.nrt {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+	.nrt-text {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.nrt-at {
+		font-size: 14px;
+		line-height: 20px;
+	}
+</style>

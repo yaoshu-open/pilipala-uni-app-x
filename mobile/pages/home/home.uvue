@@ -1,0 +1,364 @@
+<template>
+	<view class="home">
+		<!-- 状态栏留白：独立占位容器（不与固定高行叠加 padding，防 border-box 命中区错位） -->
+		<view class="home-top-gap" :style="topGapStyle"></view>
+		<view class="home-header" :style="headerStyle">
+			<view class="home-search" :style="searchStyle" @click="openSearch">
+				<p-icon name="search-outlined" :size="24" :color="primaryColor"></p-icon>
+				<text class="home-search-hint" :style="secondaryStyle" :max-lines="1">{{ searchHint }}</text>
+			</view>
+			<view v-if="isLogin" class="home-bell" @click="openWhisper">
+				<p-icon name="notifications-none" :size="24" :color="primaryColor"></p-icon>
+			</view>
+			<view class="home-avatar" @click="openMine">
+				<network-img v-if="isLogin && face.length > 0" :src="face" width="34px" height="34px" radius="17px"></network-img>
+				<view v-else class="home-avatar-default">
+					<p-icon name="person" :size="22" :color="primaryColor"></p-icon>
+				</view>
+			</view>
+		</view>
+		<scroll-view class="home-channels" direction="horizontal" :show-scrollbar="false">
+			<view class="home-channels-row">
+				<view
+					v-for="(chip, index) in channels"
+					:key="chip.key"
+					class="home-chip"
+					:style="chipStyle(chip.key)"
+					@click="onChannel(chip.key)"
+				>
+					<text class="home-chip-text" :style="chipTextStyle(chip.key)">{{ chip.label }}</text>
+				</view>
+			</view>
+		</scroll-view>
+		<view class="home-content">
+			<view class="home-channel-page" v-show="activeChannel == 'rcmd'">
+				<rcmd-page></rcmd-page>
+			</view>
+			<view class="home-channel-page" v-show="activeChannel == 'hot'">
+				<hot-page></hot-page>
+			</view>
+			<view class="home-channel-page" v-show="activeChannel == 'live'">
+				<live-page :embed="true"></live-page>
+			</view>
+			<view class="home-channel-page" v-show="activeChannel == 'bangumi'">
+				<bangumi-page></bangumi-page>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch, onMounted } from 'vue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import RcmdPage from '../rcmd/rcmd.uvue'
+import HotPage from '../hot/hot.uvue'
+import LivePage from '../live/live.uvue'
+import BangumiPage from '../bangumi/bangumi.uvue'
+import { fetchDefaultSearch } from '../../api/video.uts'
+import { userState } from '../../stores/user.uts'
+import { ensureLoginState } from '../../composables/useLogin.uts'
+import { getBool, getStringArray, SK } from '../../utils/storage.uts'
+import { themeColor, currentThemeIndex, textSecondary } from '../../utils/theme.uts'
+import { navigateTo, RT } from '../../utils/routes.uts'
+import { statusBarHeight } from '../../utils/safeArea.uts'
+import { homeTopSeq, homeRefreshSeq, rcmdTopSeq, rcmdRefreshSeq, hotTopSeq, hotRefreshSeq, liveTopSeq, liveRefreshSeq, bangumiTopSeq, bangumiRefreshSeq, tapTwice, collapseSignal } from '../../stores/tabSignal.uts'
+
+/**
+ * 首页宿主（源头：lib/pages/home/view.dart）。
+ *
+ * 顶部：搜索胶囊（默认搜索词，WBI 接口）→ 登录态通知入口 → 头像（已登录为头像图）。
+ * 频道：直播 / 推荐 / 热门 / 番剧 四个胶囊 chip，顺序与显隐读 tabbarSort，
+ * 初始选中推荐（源 initialIndex 取 rcmd 位置，无 rcmd 时取第一项）；四频道常驻保活。
+ * 隐藏搜索栏（hideSearchBar）本期只读开关，不做滚动隐显（P10 设置域接入）。
+ */
+
+class Channel {
+	key: string = ''
+	label: string = ''
+}
+
+const ALL_CHANNELS: Array<Channel> = ((): Array<Channel> => {
+	const list: Array<Channel> = []
+	const conf: Array<Array<string>> = [
+		['live', '直播'],
+		['rcmd', '推荐'],
+		['hot', '热门'],
+		['bangumi', '番剧']
+	]
+	for (let i = 0; i < conf.length; i++) {
+		const item = new Channel()
+		item.key = conf[i][0]
+		item.label = conf[i][1]
+		list.push(item)
+	}
+	return list
+})()
+
+const searchHint = ref<string>('搜索')
+const searchEnabled = ref<boolean>(getBool(SK.enableSearchWord, true))
+/**
+ * 首页顶栏收起（SK.hideSearchBar）：语义是「列表滑动时收起顶栏」，不是「永久隐藏」。
+ * 收起状态由内容区滚动方向驱动（stores/tabSignal.collapseSignal，rcmd 的 list-view 写入）。
+ */
+const hideSearchBar = ref<boolean>(getBool(SK.hideSearchBar, true))
+const activeChannel = ref<string>('rcmd')
+const primaryColor = themeColor(currentThemeIndex())
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const isLogin = computed((): boolean => userState.isLogin)
+const face = computed((): string => userState.info.face)
+
+const headerStyle = computed((): string => {
+	// 源 view.dart：top + 6 呼吸 + 内容区 46。留白已拆到 home-top-gap 占位容器，
+	// 本行固定高 46、无 padding-top——「固定高 + 内边距」组合在 App 端会错算触摸命中区（真机实测）。
+	// 只有「开启收起 + 内容下滑」时才收成 0 高（hideSearchBar 不再是永久隐藏开关）。
+	const collapsed = hideSearchBar.value && collapseSignal.value == 1
+	return collapsed ? 'height:0px;' : 'height:46px;'
+})
+const topGapStyle = computed((): string => 'height:' + (statusBarHeight() + 6).toString() + 'px;')
+const searchStyle = computed((): string => 'background-color:rgba(0,0,0,0.05);')
+
+const channels = computed((): Array<Channel> => {
+	const sort = getStringArray(SK.tabbarSort, ['live', 'rcmd', 'hot', 'bangumi'])
+	const list: Array<Channel> = []
+	for (let i = 0; i < sort.length; i++) {
+		for (let j = 0; j < ALL_CHANNELS.length; j++) {
+			if (ALL_CHANNELS[j].key == sort[i]) {
+				list.push(ALL_CHANNELS[j])
+			}
+		}
+	}
+	if (list.length == 0) {
+		for (let k = 0; k < ALL_CHANNELS.length; k++) {
+			list.push(ALL_CHANNELS[k])
+		}
+	}
+	return list
+})
+
+function chipStyle(key: string): string {
+	if (activeChannel.value == key) {
+		return 'background-color:' + primaryColor + ';'
+	}
+	return 'background-color:rgba(0,0,0,0.05);'
+}
+
+function chipTextStyle(key: string): string {
+	const color = activeChannel.value == key ? '#FFFFFF' : textSecondary()
+	return 'color:' + color + ';'
+}
+
+function onChannel(key: string) {
+	if (activeChannel.value == key) {
+		const refresh = tapTwice('home:' + key)
+		if (key == 'rcmd') {
+			if (refresh) {
+				rcmdRefreshSeq.value = rcmdRefreshSeq.value + 1
+			} else {
+				rcmdTopSeq.value = rcmdTopSeq.value + 1
+			}
+		}
+		if (key == 'hot') {
+			if (refresh) {
+				hotRefreshSeq.value = hotRefreshSeq.value + 1
+			} else {
+				hotTopSeq.value = hotTopSeq.value + 1
+			}
+		}
+		if (key == 'live') {
+			if (refresh) {
+				liveRefreshSeq.value = liveRefreshSeq.value + 1
+			} else {
+				liveTopSeq.value = liveTopSeq.value + 1
+			}
+		}
+		if (key == 'bangumi') {
+			if (refresh) {
+				bangumiRefreshSeq.value = bangumiRefreshSeq.value + 1
+			} else {
+				bangumiTopSeq.value = bangumiTopSeq.value + 1
+			}
+		}
+		return
+	}
+	activeChannel.value = key
+}
+
+function openSearch() {
+	navigateTo(RT.search)
+}
+
+function openWhisper() {
+	// 消息中心（P8）：四宫格通知入口 + 私信会话列表（设计_消息域 §二 #1）
+	navigateTo(RT.whisper)
+}
+
+function openMine() {
+	navigateTo('/pages/mine/mine')
+}
+
+/** 主 tab 点击「首页」时转发给当前频道 */
+watch(homeTopSeq, (value: number) => {
+	if (value == 0) {
+		return
+	}
+	if (activeChannel.value == 'rcmd') {
+		rcmdTopSeq.value = rcmdTopSeq.value + 1
+	}
+	if (activeChannel.value == 'hot') {
+		hotTopSeq.value = hotTopSeq.value + 1
+	}
+	if (activeChannel.value == 'live') {
+		liveTopSeq.value = liveTopSeq.value + 1
+	}
+	if (activeChannel.value == 'bangumi') {
+		bangumiTopSeq.value = bangumiTopSeq.value + 1
+	}
+})
+
+watch(homeRefreshSeq, (value: number) => {
+	if (value == 0) {
+		return
+	}
+	if (activeChannel.value == 'rcmd') {
+		rcmdRefreshSeq.value = rcmdRefreshSeq.value + 1
+	}
+	if (activeChannel.value == 'hot') {
+		hotRefreshSeq.value = hotRefreshSeq.value + 1
+	}
+	if (activeChannel.value == 'live') {
+		liveRefreshSeq.value = liveRefreshSeq.value + 1
+	}
+	if (activeChannel.value == 'bangumi') {
+		bangumiRefreshSeq.value = bangumiRefreshSeq.value + 1
+	}
+})
+
+onMounted(async () => {
+	// 冷启动登录态恢复：顶栏铃铛入口按 isLogin 显隐，内存态未恢复时首页会缺入口
+	ensureLoginState()
+	// 初始频道：tabbarSort 含 rcmd 时选推荐，否则第一项
+	const list = channels.value
+	let index = 0
+	for (let i = 0; i < list.length; i++) {
+		if (list[i].key == 'rcmd') {
+			index = i
+		}
+	}
+	activeChannel.value = list.length > 0 ? list[index].key : 'rcmd'
+	if (searchEnabled.value) {
+		const word = await fetchDefaultSearch()
+		if (word.length > 0) {
+			searchHint.value = word
+		}
+	}
+})
+</script>
+
+<style>
+	.home {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.home-header {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 14px;
+		padding-right: 14px;
+	}
+	.home-top-gap {
+		display: flex;
+		flex-direction: column;
+	}
+	.home-search {
+		flex: 1;
+		height: 44px;
+		border-radius: 25px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 14px;
+		padding-right: 14px;
+	}
+	.home-search-hint {
+		flex: 1;
+		font-size: 14px;
+		margin-left: 10px;
+	}
+	.home-bell {
+		width: 40px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.home-avatar {
+		width: 38px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+		margin-left: 6px;
+	}
+	.home-avatar-default {
+		width: 38px;
+		height: 38px;
+		border-radius: 19px;
+		background-color: rgba(0,0,0,0.05);
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.home-channels {
+		height: 44px;
+		margin-top: 8px;
+	}
+	.home-channels-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 14px;
+		padding-right: 14px;
+	}
+	.home-chip {
+		height: 32px;
+		border-radius: 6px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 12px;
+		padding-right: 12px;
+		margin-right: 10px;
+		flex-shrink: 0;
+	}
+	.home-chip-text {
+		font-size: 13px;
+	}
+	.home-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.home-channel-page {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.home-channel-placeholder {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.home-channel-placeholder-text {
+		font-size: 14px;
+	}
+</style>

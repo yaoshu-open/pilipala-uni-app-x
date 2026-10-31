@@ -1,0 +1,24 @@
+/**
+ * 直播域图标码点。
+ *
+ * 来源：本机 Flutter SDK 3.3.10 `packages/flutter/lib/src/material/icons.dart`
+ * （`D:\Program Files\Android\flutter_windows_3.3.10-stable\flutter\...`，与工程字体 static/fonts/MaterialIcons-Regular.otf 同源）。
+ * 与 `utils/icons.uts`（视频详情域）分表维护：图标码点只能查 SDK 源文件，禁止臆造
+ * （P5/P6/P7/P8 各轮都踩过「按图案猜码点」的坑）。
+ */
+export function liveGlyphOf(name: string): string {
+	if (name == 'refresh-outlined') { return '\uf2f7' }
+	if (name == 'fullscreen') { return '\ue2cb' }
+	if (name == 'fullscreen-exit') { return '\ue2cc' }
+	if (name == 'subtitles-outlined') { return '\uf3fd' }
+	if (name == 'subtitles-off-outlined') { return '\uf3fc' }
+	if (name == 'send') { return '\ue571' }
+	if (name == 'keyboard-arrow-down') { return '\ue353' }
+	return ''
+}
+
+/** MaterialIcons 图标样式（App 端字体已由 App.uvue 全局注册） */
+export function liveIconStyle(name: string, size: number, color: string): string {
+	const px = size.toString()
+	return 'font-family:MaterialIcons;font-size:' + px + 'px;line-height:' + px + 'px;color:' + color + ';'
+}

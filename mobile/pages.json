@@ -1,0 +1,450 @@
+{
+	"pages": [
+		{
+			"path": "pages/main/main",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "PiliPala"
+			}
+		},
+		{
+			"path": "pages/placeholder/placeholder",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "功能占位"
+			}
+		},
+		{
+			"path": "pages/dev/spike",
+			"style": {
+				"navigationBarTitleText": "基座探测"
+			}
+		},
+		{
+			"path": "pages/dev/components",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "基座组件"
+			}
+		},
+		{
+			"path": "pages/dev/api",
+			"style": {
+				"navigationBarTitleText": "接口联调"
+			}
+		},
+		{
+			"path": "pages/dev/webview",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "WebView Cookie 验证"
+			}
+		},
+		{
+			"path": "pages/dev/p3",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "P3 首页域验证"
+			}
+		},
+		{
+			"path": "pages/dev/p8",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "P8 组件验证"
+			}
+		},
+		{
+			"path": "pages/dev/p9",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "P9 组件验证"
+			}
+		},
+		{
+			"path": "pages/dev/cookie",
+			"style": {
+				"navigationBarTitleText": "凭据探测"
+			}
+		},
+		{
+			"path": "pages/dev/write",
+			"style": {
+				"navigationBarTitleText": "写接口验证"
+			}
+		},
+		{
+			"path": "pages/login/login",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "登录"
+			}
+		},
+		{
+			"path": "pages/webview/webview",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "登录bilibili"
+			}
+		},
+		{
+			"path": "pages/video/video",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "视频详情"
+			}
+		},
+		{
+			"path": "pages/video/fullscreen",
+			"style": {
+				"navigationStyle": "custom",
+				"pageOrientation": "landscape",
+				"disableSwipeBack": true,
+				"navigationBarTitleText": "全屏播放"
+			}
+		},
+		{
+			"path": "pages/mine/mine",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "我的"
+			}
+		},
+		{
+			"path": "pages/member/member",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "用户主页"
+			}
+		},
+		{
+			"path": "pages/member-archive/member-archive",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "投稿"
+			}
+		},
+		{
+			"path": "pages/member-article/member-article",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "图文专栏"
+			}
+		},
+		{
+			"path": "pages/member-dynamics/member-dynamics",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "空间动态"
+			}
+		},
+		{
+			"path": "pages/member-search/member-search",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "搜索"
+			}
+		},
+		{
+			"path": "pages/member-seasons/member-seasons",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "合集详情"
+			}
+		},
+		{
+			"path": "pages/fav/fav",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "收藏夹"
+			}
+		},
+		{
+			"path": "pages/fav-detail/fav-detail",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "收藏夹详情"
+			}
+		},
+		{
+			"path": "pages/fav-edit/fav-edit",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "收藏夹编辑"
+			}
+		},
+		{
+			"path": "pages/fav-search/fav-search",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "收藏搜索"
+			}
+		},
+		{
+			"path": "pages/history/history",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "观看历史"
+			}
+		},
+		{
+			"path": "pages/history-search/history-search",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "历史搜索"
+			}
+		},
+		{
+			"path": "pages/later/later",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "稍后再看"
+			}
+		},
+		{
+			"path": "pages/follow/follow",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "关注"
+			}
+		},
+		{
+			"path": "pages/fan/fan",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "粉丝"
+			}
+		},
+		{
+			"path": "pages/follow-search/follow-search",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "关注搜索"
+			}
+		},
+		{
+			"path": "pages/subscription/subscription",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "我的订阅"
+			}
+		},
+		{
+			"path": "pages/subscription-detail/subscription-detail",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "订阅详情"
+			}
+		},
+		{
+			"path": "pages/blacklist/blacklist",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "黑名单"
+			}
+		},
+		{
+			"path": "pages/dynamics-detail/dynamics-detail",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "动态详情"
+			}
+		},
+		{
+			"path": "pages/search/search",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "搜索"
+			}
+		},
+		{
+			"path": "pages/search-result/search-result",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "搜索结果"
+			}
+		},
+		{
+			"path": "pages/message/message",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "消息"
+			}
+		},
+		{
+			"path": "pages/whisper-detail/whisper-detail",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "私信"
+			}
+		},
+		{
+			"path": "pages/message-reply/message-reply",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "回复我的"
+			}
+		},
+		{
+			"path": "pages/message-like/message-like",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "收到的赞"
+			}
+		},
+		{
+			"path": "pages/message-system/message-system",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "系统通知"
+			}
+		},
+		{
+			"path": "pages/live-room/live-room",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "直播间",
+				"backgroundColor": "#000000"
+			}
+		},
+		{
+			"path": "pages/setting/setting",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "设置"
+			}
+		},
+		{
+			"path": "pages/setting/privacy-setting",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "隐私设置"
+			}
+		},
+		{
+			"path": "pages/setting/recommend-setting",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "推荐设置"
+			}
+		},
+		{
+			"path": "pages/setting/play-setting",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "播放设置"
+			}
+		},
+		{
+			"path": "pages/setting/style-setting",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "外观设置"
+			}
+		},
+		{
+			"path": "pages/setting/extra-setting",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "其他设置"
+			}
+		},
+		{
+			"path": "pages/setting/play-speed-set",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "倍速设置"
+			}
+		},
+		{
+			"path": "pages/setting/play-gesture-set",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "手势设置"
+			}
+		},
+		{
+			"path": "pages/setting/color-select",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "应用主题"
+			}
+		},
+		{
+			"path": "pages/setting/font-size-select",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "字体大小"
+			}
+		},
+		{
+			"path": "pages/setting/home-tabbar-set",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "首页 tabbar"
+			}
+		},
+		{
+			"path": "pages/setting/navigation-bar-set",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "底部导航栏"
+			}
+		},
+		{
+			"path": "pages/setting/logs",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "日志"
+			}
+		},
+		{
+			"path": "pages/bangumi/bangumi",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "番剧"
+			}
+		},
+		{
+			"path": "pages/bangumi-intro/bangumi-intro",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "番剧详情"
+			}
+		},
+		{
+			"path": "pages/opus/opus",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "图文"
+			}
+		},
+		{
+			"path": "pages/read/read",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "专栏"
+			}
+		},
+		{
+			"path": "pages/html/html",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "内容详情"
+			}
+		},
+		{
+			"path": "pages/about/about",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "关于"
+			}
+		}
+	],
+	"globalStyle": {
+		"navigationBarTextStyle": "black",
+		"navigationBarTitleText": "PiliPala",
+		"navigationBarBackgroundColor": "#FFFFFF",
+		"backgroundColor": "#F6F7F8"
+	}
+}

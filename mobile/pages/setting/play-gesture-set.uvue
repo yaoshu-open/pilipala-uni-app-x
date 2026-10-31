@@ -1,0 +1,108 @@
+<template>
+	<view class="gs" :style="pageStyle">
+		<app-navbar title="手势设置"></app-navbar>
+
+		<scroll-view class="gs-scroll" direction="vertical">
+			<view class="gs-list">
+				<setting-cell title="全屏手势" sub-title="通过手势快速进入全屏" mode="value" :value="gestureLabel" @tap="openGesture"></setting-cell>
+				<setting-cell title="双击快退/快进" sub-title="左侧双击快退，右侧双击快进" mode="switch" :on="quickDouble" @toggle="onQuickDouble"></setting-cell>
+			</view>
+			<view class="gs-foot" :style="footStyle"></view>
+		</scroll-view>
+
+		<setting-select-sheet
+			:visible="sheetVisible"
+			title="全屏手势"
+			:options="sheetOptions"
+			@select="onSheetSelect"
+			@close="closeSheet"
+		></setting-select-sheet>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import SettingCell from '../../components/setting/setting-cell.uvue'
+import SettingSelectSheet, { SelectOption } from '../../components/setting/setting-select-sheet.uvue'
+import { pageBackground } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { SK, getBool, getNumber, setBool, setNumber } from '../../utils/storage.uts'
+
+/**
+ * 手势设置（源头：lib/pages/setting/pages/play_gesture_set.dart）。
+ *
+ * fullScreenGestureMode：源枚举 index 存储（fromBottomtoTop 为 values.last=1 默认；
+ * 新端同值：0=从上往下滑进入全屏 / 1=从下往上滑进入全屏）。
+ * enableQuickDouble 默认 true。
+ * 消费方为 P4 全屏页手势层（接线点见 P10 报告：fullscreen.uvue 纵向中间区上下滑分支）。
+ */
+
+/** 源默认：FullScreenGestureMode.values.last.index = 1（从下往上滑） */
+const DEFAULT_GESTURE: number = 1
+
+const gestureMode = ref<number>(getNumber(SK.fullScreenGestureMode, DEFAULT_GESTURE))
+const quickDouble = ref<boolean>(getBool(SK.enableQuickDouble, true))
+
+const sheetVisible = ref<boolean>(false)
+const sheetOptions = ref<Array<SelectOption>>([
+	{ value: '0', label: '从上往下滑进入全屏', checked: gestureMode.value == 0 } as SelectOption,
+	{ value: '1', label: '从下往上滑进入全屏', checked: gestureMode.value == 1 } as SelectOption
+])
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+
+const gestureLabel = computed((): string => gestureMode.value == 0 ? '从上往下滑进入全屏' : '从下往上滑进入全屏')
+
+function openGesture() {
+	// 重算 checked（当前值可能已变）
+	sheetOptions.value = [
+		{ value: '0', label: '从上往下滑进入全屏', checked: gestureMode.value == 0 } as SelectOption,
+		{ value: '1', label: '从下往上滑进入全屏', checked: gestureMode.value == 1 } as SelectOption
+	]
+	sheetVisible.value = true
+}
+
+function closeSheet() {
+	sheetVisible.value = false
+}
+
+function onSheetSelect(value: string) {
+	gestureMode.value = parseInt(value)
+	setNumber(SK.fullScreenGestureMode, gestureMode.value)
+}
+
+function onQuickDouble(value: boolean) {
+	setBool(SK.enableQuickDouble, value)
+	quickDouble.value = value
+}
+
+onBackPress(() => {
+	if (sheetVisible.value) {
+		closeSheet()
+		return true
+	}
+	return false
+})
+</script>
+
+<style>
+	.gs {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.gs-scroll {
+		flex: 1;
+	}
+	.gs-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.gs-foot {
+		height: 1px;
+	}
+</style>

@@ -1,0 +1,479 @@
+<template>
+	<view class="ms" :style="pageStyle">
+		<app-navbar title="消息" :title-size="22"></app-navbar>
+
+		<!-- 四宫格常驻（源 grid 在 FutureBuilder 之外，未登录/错误时依然渲染） -->
+		<scroll-view
+			class="ms-scroll"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:lower-threshold="200"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+		>
+			<!-- 四宫格：回复我的 / @我的 / 收到的赞 / 系统通知（图标 21 主色 + 未读角标） -->
+			<view class="ms-grid" :style="gridStyle">
+				<view
+					v-for="(entry, index) in entries"
+					:key="'entry-' + index.toString()"
+					class="ms-grid-item"
+					@click="onEntryTap(index)"
+				>
+					<view class="ms-grid-icon-wrap">
+						<p-icon :name="entry.icon" :size="21" :color="primary"></p-icon>
+						<view v-if="entry.count > 0" class="ms-grid-badge">
+							<text class="ms-grid-badge-text">{{ entryBadgeText(entry.count) }}</text>
+						</view>
+					</view>
+					<text class="ms-grid-label" :style="labelStyle">{{ entry.title }}</text>
+				</view>
+			</view>
+
+			<!-- 会话区：骨架 15 行（源同款） -->
+			<!-- 骨架：常驻渲染 + display 切换（见 reply 页同段注释） -->
+			<view :style="state == 'loading' ? '' : 'display:none;'">
+				<view v-for="n in 15" :key="'sk-' + n.toString()" class="ms-sk-row">
+					<skeleton-block width="45px" height="45px" radius="22.5px"></skeleton-block>
+					<view class="ms-sk-lines">
+						<skeleton-block width="40%" height="14px" radius="4px"></skeleton-block>
+						<view class="ms-sk-gap"></view>
+						<skeleton-block width="70%" height="12px" radius="4px"></skeleton-block>
+					</view>
+				</view>
+			</view>
+
+			<!-- 错误态（含未登录 -101：重试按钮行为=去登录）——源为四宫格下方的 Center(Text(msg))，
+				这里用工程统一错误组件（同含文案+重试 + 插画，属设计 §七 统一口径） -->
+			<view v-if="state == 'error'" class="ms-error">
+				<p-http-error :message="errorText" @retry="onErrorAction"></p-http-error>
+			</view>
+
+			<!-- 会话列表（空列表不渲染空态，源同款：四宫格下方留白） -->
+			<view v-if="state == 'ready' && sessions.length > 0" class="ms-list">
+				<view v-for="(item, index) in sessions" :key="item.talkerId.toString()">
+					<session-item :item="item" @tap="onSessionTap(index)"></session-item>
+					<view v-if="index < sessions.length - 1" class="ms-divider"></view>
+				</view>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import { onLoad, onShow, onUnload } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import SessionItem from '../../components/message/session-item.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import { fetchSessionList } from '../../api/message.uts'
+import { SessionItem as SessionModel, AccountCard, LastMsg } from '../../models/message.uts'
+import { fetchUnread, refreshLoginState, ensureLoginState } from '../../composables/useLogin.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground, textPrimary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 消息中心（源头：`lib/pages/whisper/{view,controller}.dart`——四宫格 + 私信会话列表同页承载）。
+ *
+ *  - 四宫格：图标 21 主色 + 外圈 padding 10 + 右上角标（>99 显示 99+）；点击进对应页并把该项
+ *    计数本地清零（不动 userState.unread——源 noticesList 同款语义）；「@我的」源即空壳，
+ *    点击拦截 toast「功能开发中」（源 view.dart:121 同款）。
+ *  - 会话列表：end_ts 分页（末条 sessionTs），触底 200 加载下一页；条目点击清零未读并携
+ *    talkerId/name/face/mid 跳私信详情。
+ *  - 下拉刷新：重拉未读数 + 会话列表（源 onRefresh 同款）。
+ *  - 跨页回写：私信详情发送成功/关闭会话经 uni.$emit 事件实时更新本页（源 Get.find 同步）。
+ *  - 未登录：错误态「账号未登录」，重试按钮跳登录页，返回后自动重试（工程 P4/P5 同款链路）。
+ *
+ * 图标（源 whisper/controller.dart noticesList 的 Icons 常量，经 p-icon 同名映射到 MaterialIcons 字体）：
+ * message_outlined / alternate_email / thumb_up_outlined / notifications_none_outlined。
+ */
+class GridEntry {
+	title: string = ''
+	icon: string = ''
+	count: number = 0
+}
+
+/** 屏宽（逻辑像素）：宫格高度 =（屏宽 - 左右各 20）/ 4，源 SizedBox(height: constraints.maxWidth / 4) */
+const windowWidth: number = ((): number => {
+	try {
+		return uni.getWindowInfo().windowWidth
+	} catch (e) {
+		return 375
+	}
+})()
+
+const primary = themeColor(currentThemeIndex())
+
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const errorCode = ref<number>(0)
+const sessions = ref<Array<SessionModel>>([])
+const refreshing = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const finished = ref<boolean>(false)
+
+/** 四宫格本地计数（源 noticesList：点击进页本地清零；初始值取 userState.unread 同源数据） */
+const entries = ref<Array<GridEntry>>([
+	makeEntry('回复我的', 'message-outlined', 0),
+	makeEntry('@我的', 'alternate-email', 0),
+	makeEntry('收到的赞', 'thumb-up-outlined', 0),
+	makeEntry('系统通知', 'notifications-none-outlined', 0)
+])
+
+function makeEntry(title: string, icon: string, count: number): GridEntry {
+	const entry = new GridEntry()
+	entry.title = title
+	entry.icon = icon
+	entry.count = count
+	return entry
+}
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const gridStyle = computed((): string => 'height:' + ((windowWidth - 40) / 4).toString() + 'px;')
+const labelStyle = computed((): string => 'color:' + textPrimary() + ';')
+
+function entryBadgeText(count: number): string {
+	return count > 99 ? '99+' : count.toString()
+}
+
+/** 未读数同步到四宫格（fetchUnread 已写 userState.unread，这里按同源数据刷新本地计数） */
+function syncEntryCounts() {
+	entries.value[0].count = userState.unread.msgReply
+	entries.value[1].count = userState.unread.msgAt
+	entries.value[2].count = userState.unread.msgLike
+	entries.value[3].count = userState.unread.msgSystem
+	const copied: Array<GridEntry> = []
+	for (let i = 0; i < entries.value.length; i++) {
+		copied.push(entries.value[i])
+	}
+	entries.value = copied
+}
+
+// ---------------------------------------------------------------- 数据加载
+
+async function loadFirst(retried: boolean = false) {
+	const res = await fetchSessionList(null)
+	if (!res.status) {
+		// -101：cookie 有效但内存登录态尚未恢复（冷启动 nav 未返回）→ 静默校正后重试一次
+		if (res.code == -101 && !retried) {
+			const ok = await refreshLoginState()
+			if (ok) {
+				return await loadFirst(true)
+			}
+		}
+		state.value = 'error'
+		errorCode.value = res.code
+		errorText.value = res.message
+		return
+	}
+	sessions.value = res.items
+	finished.value = res.items.length == 0 || res.hasMore == 0
+	state.value = 'ready'
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value || refreshing.value || finished.value) {
+		return
+	}
+	if (sessions.value.length == 0) {
+		return
+	}
+	loadingMore.value = true
+	const last = sessions.value[sessions.value.length - 1]
+	const res = await fetchSessionList(last.sessionTs)
+	if (res.status) {
+		for (let i = 0; i < res.items.length; i++) {
+			sessions.value.push(res.items[i])
+		}
+		if (res.items.length == 0 || res.hasMore == 0) {
+			finished.value = true
+		}
+	}
+	loadingMore.value = false
+}
+
+async function onRefresh() {
+	if (state.value == 'loading') {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	// 源 onRefresh：unread() + querySessionList('onRefresh') 并行
+	fetchUnread().then(() => {
+		syncEntryCounts()
+	})
+	const res = await fetchSessionList(null)
+	if (res.status) {
+		sessions.value = res.items
+		finished.value = res.items.length == 0 || res.hasMore == 0
+		state.value = 'ready'
+	}
+	refreshing.value = false
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+function onErrorAction() {
+	if (errorCode.value == -101) {
+		uni.navigateTo({ url: '/pages/login/login' })
+	} else {
+		state.value = 'loading'
+		loadFirst()
+	}
+}
+
+// ---------------------------------------------------------------- 交互
+
+/**
+ * 四宫格点击：@我的源即空壳页，入口拦截 toast「功能开发中」；
+ * 其余进对应消息页并本地清零该项计数（目标页路由注册由集成批次统一接线）。
+ */
+function onEntryTap(index: number) {
+	const entry = entries.value[index]
+	if (index == 1) {
+		uni.showToast({ title: '功能开发中', icon: 'none' })
+		return
+	}
+	if (entry.count > 0) {
+		entry.count = 0
+		const copied: Array<GridEntry> = []
+		for (let i = 0; i < entries.value.length; i++) {
+			copied.push(entries.value[i])
+		}
+		entries.value = copied
+	}
+	if (index == 0) {
+		uni.navigateTo({ url: '/pages/message-reply/message-reply' })
+	} else if (index == 2) {
+		uni.navigateTo({ url: '/pages/message-like/message-like' })
+	} else if (index == 3) {
+		uni.navigateTo({ url: '/pages/message-system/message-system' })
+	}
+}
+
+/** 会话条目点击：本地清零未读 + 携参数跳私信详情（源 SessionItem.onTap） */
+function onSessionTap(index: number) {
+	const item = sessions.value[index]
+	item.unreadCount = 0
+	const account = item.accountInfo
+	const accountCard = account == null ? null : (account as AccountCard)
+	const mid = accountCard == null ? 0 : accountCard.mid
+	const name = accountCard == null ? '' : accountCard.name
+	const face = accountCard == null ? '' : accountCard.face
+	const query = 'talkerId=' + item.talkerId.toString() +
+		'&mid=' + mid.toString() +
+		'&name=' + encodeURIComponent(name) +
+		'&face=' + encodeURIComponent(face)
+	uni.navigateTo({ url: '/pages/whisper-detail/whisper-detail?' + query })
+}
+
+// ---------------------------------------------------------------- 跨页回写（详情页事件）
+
+/** 发送成功：末条预览上移置顶（源 refreshLastMsg） */
+function onRefreshLast(data: any) {
+	const payload = data as UTSJSONObject
+	const talkerId = payload.getNumber('talkerId')
+	const content = payload.getString('content')
+	if (talkerId == null || content == null) {
+		return
+	}
+	const target: Array<SessionModel> = []
+	let hit: SessionModel | null = null
+	for (let i = 0; i < sessions.value.length; i++) {
+		if (sessions.value[i].talkerId == (talkerId as number)) {
+			hit = sessions.value[i]
+		} else {
+			target.push(sessions.value[i])
+		}
+	}
+	if (hit != null) {
+		const item = hit as SessionModel
+		const last = item.lastMsg
+		if (last != null) {
+			const lastMsg = last as LastMsg
+			// 末条 content.content 更新为新文本（预览链取 content.content）
+			if (lastMsg.content != null) {
+				(lastMsg.content as UTSJSONObject).set('content', content as string)
+			} else {
+				const fresh: UTSJSONObject = {}
+				fresh.set('content', content as string)
+				lastMsg.content = fresh
+			}
+			lastMsg.msgType = 1
+		}
+		target.unshift(item)
+		sessions.value = target
+	}
+}
+
+/** 关闭会话：移除本地条目（源 removeSessionMsg） */
+function onRemoveSession(data: any) {
+	const payload = data as UTSJSONObject
+	const talkerId = payload.getNumber('talkerId')
+	if (talkerId == null) {
+		return
+	}
+	const kept: Array<SessionModel> = []
+	for (let i = 0; i < sessions.value.length; i++) {
+		if (sessions.value[i].talkerId != (talkerId as number)) {
+			kept.push(sessions.value[i])
+		}
+	}
+	sessions.value = kept
+}
+
+// ---------------------------------------------------------------- 生命周期
+
+onLoad(() => {
+	syncEntryCounts()
+	uni.$on('whisper:refresh-last', onRefreshLast)
+	uni.$on('whisper:remove-session', onRemoveSession)
+	loadFirst()
+	// 冷启动首屏主动恢复登录态，到位后补拉未读数（四宫格角标与底栏角标同源）
+	ensureLoginState().then((ok: boolean) => {
+		if (ok) {
+			fetchUnread().then(() => {
+				syncEntryCounts()
+			})
+		}
+	})
+})
+
+onShow(() => {
+	// 未读数与底栏角标同源刷新（幂等轻量）；登录返回后的自动重试
+	fetchUnread().then(() => {
+		syncEntryCounts()
+	})
+	if (state.value == 'error' && errorCode.value == -101) {
+		state.value = 'loading'
+		loadFirst()
+	}
+})
+
+/** 登录态由 App 层静默校正到位后（冷启动 nav 晚于首屏），补拉未读数与会话列表 */
+watch((): boolean => userState.isLogin, (value: boolean) => {
+	if (!value) {
+		return
+	}
+	fetchUnread().then(() => {
+		syncEntryCounts()
+	})
+	if (state.value == 'error') {
+		state.value = 'loading'
+		loadFirst()
+	}
+})
+
+onUnload(() => {
+	uni.$off('whisper:refresh-last', onRefreshLast)
+	uni.$off('whisper:remove-session', onRemoveSession)
+})
+</script>
+
+<style>
+	.ms {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* 源 HttpError = SizedBox(height: 400) 紧贴导航栏下方（不在整屏居中）；p-http-error 为 flex:1 居中，
+	 * 故此处给固定 400 高容器还原源位次 */
+	.ms-error {
+		height: 400px;
+		display: flex;
+		flex-direction: column;
+	}
+	.ms-scroll {
+		flex: 1;
+	}
+	/* 四宫格：每项宽=屏宽/4（等分），图标上/标题下 */
+	/* 四宫格：左右各 20，高度 =（屏宽-40）/4（源 SizedBox height = constraints.maxWidth/4） */
+	.ms-grid {
+		display: flex;
+		flex-direction: row;
+		padding-left: 20px;
+		padding-right: 20px;
+		/* 宫格与列表之间的间距：源码无显式间距，基线实测 43px/3.5 ≈ 12dp（首条分割线位次对齐用） */
+		margin-bottom: 12px;
+	}
+	/* 单元内容纵向居中（源 Column mainAxisAlignment: center） */
+	.ms-grid-item {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.ms-grid-icon-wrap {
+		position: relative;
+		padding-top: 10px;
+		padding-bottom: 10px;
+		padding-left: 10px;
+		padding-right: 10px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	/* 宫格角标：图标右上溢出（源 Badge） */
+	.ms-grid-badge {
+		position: absolute;
+		right: 2px;
+		top: 2px;
+		min-width: 16px;
+		height: 16px;
+		border-radius: 8px;
+		background-color: #FA5151;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 4px;
+		padding-right: 4px;
+	}
+	.ms-grid-badge-text {
+		font-size: 10px;
+		color: #FFFFFF;
+	}
+	.ms-grid-label {
+		font-size: 14px;
+		margin-top: 4px;
+	}
+	/* 骨架行（头像 45 圆 + 双行条，源 ListTile 骨架形态） */
+	.ms-sk-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.ms-sk-lines {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 11px;
+	}
+	.ms-sk-gap {
+		height: 8px;
+	}
+	.ms-list {
+		display: flex;
+		flex-direction: column;
+	}
+	/* 分割线：源 Divider(height: 6, indent: 72, endIndent: 20, color: grey 0.1)
+	 * height 6 是「占位高度」，细线只 1px 且贴占位块上沿（基线实测线在 band 顶部，非居中） */
+	.ms-divider {
+		height: 6px;
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(128, 128, 128, 0.1);
+		margin-left: 72px;
+		margin-right: 20px;
+	}
+
+</style>

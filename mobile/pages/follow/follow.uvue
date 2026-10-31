@@ -1,0 +1,534 @@
+<template>
+	<view class="fl" :style="pageStyle">
+		<!-- 顶栏：← + 「我的/xx 的关注」+ 🔍 + ⋮（基线 P5_follow） -->
+		<app-navbar :title="titleText">
+			<template #right>
+				<view class="fl-nav-btn" @click="openSearch">
+					<p-icon name="search-outlined" :size="22" :color="iconColor"></p-icon>
+				</view>
+				<view class="fl-nav-btn" @click="openMenu">
+					<p-icon name="more-vert" :size="22" :color="iconColor"></p-icon>
+				</view>
+			</template>
+		</app-navbar>
+
+		<!-- 本人形态：分组 Tab（选中主色字 + 主色下划线；基线为用户的金色主题，通用端取主题色） -->
+		<view v-if="mode == 'tabs'" class="fl-tabs" :style="tabsStyle">
+			<scroll-view class="fl-tabs-scroll" direction="horizontal" :show-scrollbar="false">
+				<view class="fl-tabs-row">
+					<view v-for="(tag, index) in tabs" :key="tag.tagid" class="fl-tab" @click="onTab(index)">
+						<view class="fl-tab-inner" :style="tabUnderlineStyle(index)">
+							<text class="fl-tab-text" :style="tabTextStyle(index)">{{ tag.name }}</text>
+						</view>
+					</view>
+				</view>
+			</scroll-view>
+		</view>
+
+		<!-- 加载态：用户行骨架 -->
+		<view v-if="initialState == 'loading'" class="fl-skeleton">
+			<view v-for="n in 8" :key="'sk-' + n.toString()" class="fl-sk-row">
+				<skeleton-block width="45px" height="45px" radius="22.5px"></skeleton-block>
+				<view class="fl-sk-lines">
+					<skeleton-block width="40%" height="14px" radius="4px"></skeleton-block>
+					<view class="fl-sk-gap"></view>
+					<skeleton-block width="70%" height="12px" radius="4px"></skeleton-block>
+				</view>
+			</view>
+		</view>
+
+		<view v-else-if="initialState == 'error'" class="fl-fill">
+			<!-- 初始化失败：真实错误态 + 重试 -->
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+
+		<view v-else-if="mode == 'tabs'" class="fl-fill">
+			<!-- 本人形态（分组 tab）：每组独立列表实例，懒加载（首次切入请求）+ v-show 保活 -->
+			<view v-for="(pane, index) in panes" :key="tabs[index].tagid" v-show="activeTab == index" class="fl-fill">
+				<view v-if="pane.state == 'loading'" class="fl-skeleton">
+					<view v-for="n in 6" :key="'psk-' + index.toString() + '-' + n.toString()" class="fl-sk-row">
+						<skeleton-block width="45px" height="45px" radius="22.5px"></skeleton-block>
+						<view class="fl-sk-lines">
+							<skeleton-block width="40%" height="14px" radius="4px"></skeleton-block>
+							<view class="fl-sk-gap"></view>
+							<skeleton-block width="70%" height="12px" radius="4px"></skeleton-block>
+						</view>
+					</view>
+				</view>
+				<view v-else-if="pane.state == 'error'" class="fl-fill">
+					<p-http-error :message="pane.errorText" @retry="loadPane(index, true)"></p-http-error>
+				</view>
+				<list-view v-else-if="pane.items.length > 0" class="fl-list" :lower-threshold="200" @scrolltolower="onLoadMore(index)">
+					<list-item v-for="user in pane.items" :key="user.mid" :type="1">
+						<user-row
+							:face="user.face"
+							:uname="user.uname"
+							:subtitle="user.sign"
+							:live="user.liveStatus == 1"
+							:verify-text="user.verifyType >= 0 ? user.verifyDesc : ''"
+							action-text="已关注"
+							action-tone="plain"
+							@tap="openMember(user.mid)"
+							@action="confirmUnfollow(user, index)"
+							@tap-live="onLiveBadge"
+						></user-row>
+					</list-item>
+					<list-item :key="'footer-' + index.toString()" :type="2">
+						<view class="fl-footer">
+							<text class="fl-footer-text" :style="footerStyle">{{ pane.footerText }}</text>
+						</view>
+					</list-item>
+				</list-view>
+				<view v-else class="fl-fill">
+					<empty-illus text="没有数据"></empty-illus>
+				</view>
+			</view>
+		</view>
+
+		<list-view v-else-if="plainItems.length > 0" class="fl-list" :lower-threshold="200" @scrolltolower="onLoadMorePlain">
+			<!-- 他人形态 / 分组接口失败回退：单列表（followings） -->
+			<list-item v-for="user in plainItems" :key="user.mid" :type="1">
+				<user-row
+					:face="user.face"
+					:uname="user.uname"
+					:subtitle="user.sign"
+					:live="user.liveStatus == 1"
+					:verify-text="user.verifyType >= 0 ? user.verifyDesc : ''"
+					@tap="openMember(user.mid)"
+					@tap-live="onLiveBadge"
+				></user-row>
+			</list-item>
+			<list-item :key="'footer-plain'" :type="2">
+				<view class="fl-footer">
+					<text class="fl-footer-text" :style="footerStyle">{{ plainFooterText }}</text>
+				</view>
+			</list-item>
+		</list-view>
+		<view v-else-if="initialState == 'ready'" class="fl-fill">
+			<empty-illus text="没有数据"></empty-illus>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import UserRow from '../../components/relation/user-row.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchFollowings, fetchFollowTags, fetchFollowGroup, unfollowUser } from '../../api/relation.uts'
+import { FollowItem, RelationTag } from '../../models/relation.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground, cardBackground, textPrimary, textSecondary, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 关注页（源头：lib/pages/follow/{view,controller}.dart + widgets/{follow_list,follow_item,owner_follow_list}.dart）。
+ *
+ * 双形态：本人 = 分组 Tab（/x/relation/tags）+ 每组独立列表（/x/relation/tag，懒加载 + v-show 保活，
+ * 等价源 TabBarView + AutomaticKeepAliveClientMixin）；他人 = 单列表（/x/relation/followings）。
+ * 分组接口失败 → 回退单列表（设计 §六 口径）。
+ *
+ * 「已关注」按钮：源为分组设置弹层（分组设置入口本期不开放，登记差异）→ 新端承载取关写操作：
+ * 二次确认（源 §八）→ unfollowUser(act=2) → 成功本地移除 + toast；凭据缺失 → 接口层明确失败文案。
+ */
+const PAGE_SIZE: number = 20
+
+class FollowPane {
+	tag: RelationTag = new RelationTag()
+	items: Array<FollowItem> = []
+	page: number = 1
+	loading: boolean = false
+	loaded: boolean = false
+	noMore: boolean = false
+	state: string = 'loading'
+	errorText: string = ''
+	footerText: string = '加载中...'
+}
+
+const mid = ref<number>(0)
+const nameParam = ref<string>('')
+const isOwner = ref<boolean>(false)
+/** tabs = 本人分组形态；plain = 他人或分组失败回退 */
+const mode = ref<string>('plain')
+const initialState = ref<string>('loading')
+const errorText = ref<string>('')
+const tabs = ref<Array<RelationTag>>([])
+const panes = ref<Array<FollowPane>>([])
+const activeTab = ref<number>(0)
+const plainItems = ref<Array<FollowItem>>([])
+const plainPage = ref<number>(1)
+const plainTotal = ref<number>(0)
+const plainLoading = ref<boolean>(false)
+const plainNoMore = ref<boolean>(false)
+const plainFooterText = ref<string>('加载中...')
+
+/** 我的域固定金色（基线 P5_follow 选中 tab 字色/下划线实测 #7A6017 族） */
+const GOLD_ACCENT: string = '#7A6017'
+const iconColor = textPrimary()
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const tabsStyle = computed((): string => 'background-color:' + cardBackground() + ';border-bottom-color:' + withAlpha(textSecondary(), 0.2) + ';')
+const footerStyle = computed((): string => 'color:' + textSecondary() + ';padding-bottom:' + (safeAreaBottom() + 16).toString() + 'px;')
+const titleText = computed((): string => isOwner.value ? '我的关注' : (nameParam.value.length > 0 ? nameParam.value + '的关注' : 'Ta 的关注'))
+
+// ---------------------------------------------------------------- 初始化
+
+async function reload() {
+	initialState.value = 'loading'
+	errorText.value = ''
+	if (isOwner.value) {
+		const tagRes = await fetchFollowTags()
+		if (!tagRes.status || tagRes.items.length == 0) {
+			// 分组接口失败 → 回退单列表（源 FutureBuilder status=false 时渲染空，新端按设计回退）
+			mode.value = 'plain'
+			await loadPlain(true)
+			return
+		}
+		mode.value = 'tabs'
+		tabs.value = tagRes.items
+		const paneList: Array<FollowPane> = []
+		for (let i = 0; i < tagRes.items.length; i++) {
+			const pane = new FollowPane()
+			pane.tag = tagRes.items[i]
+			paneList.push(pane)
+		}
+		panes.value = paneList
+		activeTab.value = 0
+		initialState.value = 'ready'
+		await loadPane(0, true)
+		return
+	}
+	mode.value = 'plain'
+	await loadPlain(true)
+}
+
+async function loadPlain(first: boolean) {
+	if (plainLoading.value) {
+		return
+	}
+	if (first) {
+		plainPage.value = 1
+		plainNoMore.value = false
+		plainFooterText.value = '加载中...'
+		if (initialState.value != 'ready') {
+			initialState.value = 'loading'
+		}
+	}
+	plainLoading.value = true
+	const res = await fetchFollowings(mid.value, plainPage.value, PAGE_SIZE)
+	plainLoading.value = false
+	if (!res.status) {
+		if (first && initialState.value != 'ready') {
+			initialState.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	if (first) {
+		plainItems.value = res.items
+		plainTotal.value = res.total
+	} else {
+		for (let i = 0; i < res.items.length; i++) {
+			plainItems.value.push(res.items[i])
+		}
+	}
+	plainPage.value = plainPage.value + 1
+	if ((plainPage.value == 2 && plainTotal.value < PAGE_SIZE) || res.items.length == 0) {
+		plainNoMore.value = true
+		plainFooterText.value = '没有更多了'
+	}
+	if (initialState.value != 'ready') {
+		initialState.value = 'ready'
+	}
+}
+
+function onLoadMorePlain() {
+	if (plainNoMore.value || plainLoading.value || initialState.value != 'ready') {
+		return
+	}
+	loadPlain(false)
+}
+
+// ---------------------------------------------------------------- 分组 tab
+
+async function loadPane(index: number, first: boolean) {
+	if (index < 0 || index >= panes.value.length) {
+		return
+	}
+	const pane = panes.value[index]
+	if (pane.loading) {
+		return
+	}
+	if (first) {
+		pane.page = 1
+		pane.noMore = false
+		pane.footerText = '加载中...'
+		pane.state = pane.loaded ? pane.state : 'loading'
+		pane.errorText = ''
+	}
+	pane.loading = true
+	const res = await fetchFollowGroup(mid.value, pane.tag.tagid, pane.page, PAGE_SIZE)
+	pane.loading = false
+	if (!res.status) {
+		if (!pane.loaded) {
+			pane.state = 'error'
+			pane.errorText = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	if (first) {
+		pane.items = res.items
+	} else {
+		for (let i = 0; i < res.items.length; i++) {
+			pane.items.push(res.items[i])
+		}
+	}
+	pane.page = pane.page + 1
+	if (res.items.length == 0) {
+		pane.noMore = true
+		pane.footerText = '没有更多了'
+	} else if (first && res.items.length < PAGE_SIZE) {
+		// 首页未满页即无更多（源 total<ps 早停同判定）；基线 P5_follow 列表下方无脚注文字
+		pane.noMore = true
+		pane.footerText = ''
+	}
+	pane.loaded = true
+	pane.state = pane.items.length > 0 ? 'ready' : 'empty'
+}
+
+function onLoadMore(index: number) {
+	if (index < 0 || index >= panes.value.length) {
+		return
+	}
+	const pane = panes.value[index]
+	if (pane.noMore || pane.loading || pane.state != 'ready') {
+		return
+	}
+	loadPane(index, false)
+}
+
+function onTab(index: number) {
+	if (activeTab.value == index) {
+		return
+	}
+	activeTab.value = index
+	if (index < 0 || index >= panes.value.length) {
+		return
+	}
+	const pane = panes.value[index]
+	if (!pane.loaded && pane.state == 'loading') {
+		loadPane(index, true)
+	}
+}
+
+/** 选中态下划线：内层容器 border-bottom 与文字等宽（同 video.uvue Tab 栏口径） */
+/** 选中态配色（基线 P5_follow）：固定暗金 #7A6017（我的域金色语言），不随主题色 */
+function tabUnderlineStyle(index: number): string {
+	return 'border-bottom-color:' + (activeTab.value == index ? GOLD_ACCENT : 'rgba(0,0,0,0)') + ';'
+}
+
+function tabTextStyle(index: number): string {
+	return 'color:' + (activeTab.value == index ? GOLD_ACCENT : textSecondary()) + ';'
+}
+
+// ---------------------------------------------------------------- 交互
+
+function openMember(targetMid: number) {
+	if (targetMid <= 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/member/member?mid=' + targetMid.toString() })
+}
+
+/** 直播角标点击：直播域 P9 接入前占位提示（设计 §一 跨批依赖） */
+function onLiveBadge() {
+	uni.showToast({ title: '直播域接入后开放', icon: 'none' })
+}
+
+/** ⋮ 菜单：黑名单管理（源 PopupMenu 唯一项；ActionSheet 无图标，登记视觉等价） */
+function openMenu() {
+	uni.showActionSheet({
+		itemList: ['黑名单管理'],
+		success: (res) => {
+			if (res.tapIndex == 0) {
+				uni.navigateTo({ url: '/pages/blacklist/blacklist' })
+			}
+		}
+	})
+}
+
+function openSearch() {
+	uni.navigateTo({ url: '/pages/follow-search/follow-search?mid=' + mid.value.toString() })
+}
+
+/** 「已关注」→ 取关（二次确认，源 §八 确认弹层） */
+function confirmUnfollow(user: FollowItem, index: number) {
+	uni.showModal({
+		title: '提示',
+		content: '确定取消关注 ' + user.uname + ' 吗？',
+		cancelText: '点错了',
+		confirmText: '取消关注',
+		success: (res) => {
+			if (res.confirm == true) {
+				doUnfollow(user, index)
+			}
+		}
+	})
+}
+
+async function doUnfollow(user: FollowItem, index: number) {
+	const res = await unfollowUser(user.mid)
+	if (!res.status) {
+		// 凭据缺失/接口失败：真实失败 toast，列表状态不变（不假成功）
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	if (mode.value == 'tabs') {
+		if (index >= 0 && index < panes.value.length) {
+			const pane = panes.value[index]
+			const next: Array<FollowItem> = []
+			for (let i = 0; i < pane.items.length; i++) {
+				if (pane.items[i].mid != user.mid) {
+					next.push(pane.items[i])
+				}
+			}
+			pane.items = next
+			if (pane.items.length == 0) {
+				pane.state = 'empty'
+			}
+		}
+	} else {
+		const next: Array<FollowItem> = []
+		for (let i = 0; i < plainItems.value.length; i++) {
+			if (plainItems.value[i].mid != user.mid) {
+				next.push(plainItems.value[i])
+			}
+		}
+		plainItems.value = next
+	}
+	uni.showToast({ title: '已取消关注', icon: 'none' })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	const myMid = userState.info.mid
+	if (rawMid != null && (rawMid as string).length > 0) {
+		const parsed = parseInt(rawMid as string)
+		mid.value = isNaN(parsed) ? myMid : parsed
+	} else {
+		mid.value = myMid
+	}
+	const rawName = options != null ? options['name'] : null
+	nameParam.value = rawName == null ? '' : decodeURIComponent(rawName as string)
+	isOwner.value = mid.value == myMid && myMid > 0
+	if (!isOwner.value && nameParam.value.length == 0) {
+		nameParam.value = 'Ta'
+	}
+	reload()
+})
+</script>
+
+<style>
+	.fl {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fl-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fl-nav-btn {
+		width: 40px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	/* 分组 Tab 栏：高 46（源 Material TabBar 默认高度），下缘 1px 分割线由 tabsStyle 给色 */
+	.fl-tabs {
+		height: 46px;
+		display: flex;
+		flex-direction: row;
+		border-bottom-width: 1px;
+		border-bottom-style: solid;
+	}
+	.fl-tabs-scroll {
+		flex: 1;
+		height: 46px;
+	}
+	.fl-tabs-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.fl-tab {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		height: 46px;
+		flex-shrink: 0;
+	}
+	.fl-tab-inner {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-left: 14px;
+		padding-right: 14px;
+		height: 43px;
+		justify-content: center;
+		border-bottom-width: 3px;
+		border-bottom-style: solid;
+	}
+	.fl-tab-text {
+		font-size: 15px;
+		line-height: 21px;
+	}
+	.fl-list {
+		flex: 1;
+	}
+	.fl-skeleton {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-top: 8px;
+	}
+	.fl-sk-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-left: 16px;
+		margin-right: 16px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.fl-sk-lines {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 12px;
+	}
+	.fl-sk-gap {
+		height: 8px;
+	}
+	.fl-footer {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		height: 60px;
+	}
+	.fl-footer-text {
+		font-size: 13px;
+	}
+</style>

@@ -1,0 +1,408 @@
+<template>
+	<view class="sy" :style="pageStyle">
+		<app-navbar title="外观设置"></app-navbar>
+
+		<scroll-view class="sy-scroll" direction="vertical">
+			<view class="sy-list">
+				<setting-cell title="震动反馈" sub-title="请确定手机设置中已开启震动反馈" mode="switch" :on="feedBack" :switch-key="SK.feedBackEnable" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="MD3样式底栏" sub-title="符合Material You设计规范的底栏" mode="switch" :on="myBar" :switch-key="SK.enableMYBar" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="首页顶栏收起" sub-title="首页列表滑动时，收起顶栏" mode="switch" :on="hideSearch" @toggle="onHideSearch"></setting-cell>
+				<setting-cell title="首页底栏收起" sub-title="首页列表滑动时，收起底栏" mode="switch" :on="hideTab" :switch-key="SK.hideTabBar" @toggle="onSwitch"></setting-cell>
+				<setting-cell title="首页顶部背景渐变" sub-title="设置后重启生效" mode="switch" :on="gradientBg" @toggle="onGradient"></setting-cell>
+				<setting-cell title="自定义列数" :sub-title="'当前列数 ' + customRows.toString() + ' 列'" mode="value" :value="customRows.toString() + ' 列'" @tap="openRows"></setting-cell>
+				<setting-cell title="图片质量" sub-title="选择合适的图片清晰度，上限100%" mode="value" :value="picQa.toString() + '%'" @tap="openPicQa"></setting-cell>
+				<setting-cell title="Toast不透明度" sub-title="自定义Toast不透明度" mode="value" :value="toastOpText" @tap="openToastOp"></setting-cell>
+				<setting-cell title="主题模式" :sub-title="'当前模式：' + themeModeLabel" mode="value" :value="themeModeLabel" @tap="openThemeMode"></setting-cell>
+				<setting-cell title="动态未读标记" :sub-title="'当前标记样式：' + badgeLabel" mode="value" :value="badgeLabel" @tap="openBadge"></setting-cell>
+				<setting-cell title="应用主题" :sub-title="'当前主题：指定颜色'" mode="arrow" @tap="goColor"></setting-cell>
+				<setting-cell title="默认启动页" :sub-title="'当前启动页：' + homePageLabel" mode="value" :value="homePageLabel" @tap="openHomePage"></setting-cell>
+				<setting-cell title="字体大小" mode="arrow" @tap="goFont"></setting-cell>
+				<setting-cell title="首页tabbar" mode="arrow" @tap="goTabbarSet"></setting-cell>
+				<setting-cell title="底部导航栏设置" mode="arrow" @tap="goNavBarSet"></setting-cell>
+			</view>
+			<view class="sy-foot" :style="footStyle"></view>
+		</scroll-view>
+
+		<setting-select-sheet
+			:visible="sheetVisible"
+			:title="sheetTitle"
+			:options="sheetOptions"
+			@select="onSheetSelect"
+			@close="closeSheet"
+		></setting-select-sheet>
+
+		<!-- 滑条弹层（源 AlertDialog+Slider：图片质量 10~100 步进 10 / Toast 不透明度 0.1~1.0 步进 0.1） -->
+		<setting-slide-sheet
+			:visible="slideVisible"
+			:title="slideTitle"
+			:value="slideValue"
+			:min="slideMin"
+			:max="slideMax"
+			:step="slideStep"
+			:suffix="slideSuffix"
+			@confirm="onSlideConfirm"
+			@close="closeSlide"
+		></setting-slide-sheet>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import SettingCell from '../../components/setting/setting-cell.uvue'
+import SettingSelectSheet, { SelectOption } from '../../components/setting/setting-select-sheet.uvue'
+import SettingSlideSheet from '../../components/setting/setting-slide-sheet.uvue'
+import { pageBackground, cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, currentThemeMode, setThemeMode, THEME_MODE_LIGHT, THEME_MODE_DARK, THEME_MODE_SYSTEM } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { SK, getBool, getNumber, setBool, setNumber } from '../../utils/storage.uts'
+
+/**
+ * 外观设置（源头：lib/pages/setting/style_setting.dart，逐项对齐）。
+ *
+ *  - 主题模式：写 SK.themeMode（theme.uts currentThemeMode/setThemeMode 同键，与 mine 页
+ *    月亮按钮同源）；切换后本页样式重算（读取 dark 建立响应依赖），全 App 其余页面
+ *    重进时即时生效（theme.uts token 读值口径）。
+ *  - 应用主题：跳 19 色色板子页（「动态取色」G3 不迁移——入口只呈现「指定颜色」形态）。
+ *  - 图片质量：源为 Slider 弹层 10~100（divisions 9）；App 端 slider 未验证，
+ *    等价实现为 ±10 步进按钮（档位与源 divisions 9 完全一致：10/20/…/100）。
+ *  - Toast 不透明度：源 SlideDialog 0~1 十档；取 0.1 步进的选择弹层（档位一致）。
+ *  - 默认启动页：源 defaultNavigationBars 标签（首页/排行榜/动态/媒体库），写键
+ *    toast「设置成功，重启生效」（消费方为 main 启动逻辑，P10 报告登记接线点）。
+ *  - 屏幕帧率（G4）、操作菜单设置（源已注释）：入口不渲染。
+ */
+
+const feedBack = ref<boolean>(getBool(SK.feedBackEnable, false))
+const myBar = ref<boolean>(getBool(SK.enableMYBar, true))
+const hideSearch = ref<boolean>(getBool(SK.hideSearchBar, true))
+const hideTab = ref<boolean>(getBool(SK.hideTabBar, true))
+const gradientBg = ref<boolean>(getBool(SK.enableGradientBg, true))
+const customRows = ref<number>(getNumber(SK.customRows, 2))
+const picQa = ref<number>(getNumber(SK.defaultPicQa, 10))
+const toastOp = ref<number>(getNumber(SK.defaultToastOp, 1.0))
+const badgeMode = ref<number>(getNumber(SK.dynamicBadgeMode, 2))
+const homePage = ref<number>(getNumber(SK.defaultHomePage, 0))
+const dark = ref<boolean>(((): boolean => {
+	const mode = getNumber(SK.themeMode, THEME_MODE_SYSTEM)
+	return mode == THEME_MODE_DARK
+})())
+
+const sheetVisible = ref<boolean>(false)
+const sheetTitle = ref<string>('')
+const sheetKind = ref<string>('')
+const sheetOptions = ref<Array<SelectOption>>([])
+// 滑条弹层（图片质量 / Toast 不透明度共用，源头分别是 AlertDialog+Slider 与 SlideDialog）
+const slideVisible = ref<boolean>(false)
+const slideKind = ref<string>('')
+const slideTitle = ref<string>('')
+const slideValue = ref<number>(0)
+const slideMin = ref<number>(10)
+const slideMax = ref<number>(100)
+const slideStep = ref<number>(10)
+const slideSuffix = ref<string>('%')
+
+const primary: string = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+
+
+const themeModeLabel = computed((): string => {
+	// 走 currentThemeMode()（读 themeTick）而不是直接读 storage：切完主题这一行要当拍变文案
+	const mode = currentThemeMode()
+	if (mode == THEME_MODE_LIGHT) {
+		return '浅色'
+	}
+	if (mode == THEME_MODE_DARK) {
+		return '深色'
+	}
+	return '跟随系统'
+})
+const badgeLabel = computed((): string => {
+	if (badgeMode.value == 0) {
+		return '隐藏'
+	}
+	if (badgeMode.value == 1) {
+		return '红点'
+	}
+	return '数字'
+})
+const homePageLabel = computed((): string => {
+	const labels = ['首页', '排行榜', '动态', '媒体库']
+	if (homePage.value >= 0 && homePage.value < labels.length) {
+		return labels[homePage.value]
+	}
+	return labels[0]
+})
+const toastOpText = computed((): string => {
+	const pct = Math.round(toastOp.value * 100)
+	return pct.toString() + '%'
+})
+
+function numOptions(values: number[], labelOf: (v: number) => string, current: number): Array<SelectOption> {
+	const list: Array<SelectOption> = []
+	for (let i = 0; i < values.length; i++) {
+		list.push({ value: values[i].toString(), label: labelOf(values[i]), checked: current == values[i] } as SelectOption)
+	}
+	return list
+}
+
+function openSheet(kind: string, title: string, options: Array<SelectOption>) {
+	sheetKind.value = kind
+	sheetTitle.value = title
+	sheetOptions.value = options
+	sheetVisible.value = true
+}
+
+function openRows() {
+	openSheet('rows', '自定义列数', numOptions([1, 2, 3, 4, 5], (v: number): string => v.toString() + ' 列', customRows.value))
+}
+
+function openThemeMode() {
+	openSheet('themeMode', '主题模式', numOptions([THEME_MODE_LIGHT, THEME_MODE_DARK, THEME_MODE_SYSTEM], (v: number): string => {
+		if (v == THEME_MODE_LIGHT) {
+			return '浅色'
+		}
+		if (v == THEME_MODE_DARK) {
+			return '深色'
+		}
+		return '跟随系统'
+	}, getNumber(SK.themeMode, THEME_MODE_SYSTEM)))
+}
+
+function openBadge() {
+	openSheet('badge', '动态未读标记', numOptions([0, 1, 2], (v: number): string => {
+		if (v == 0) {
+			return '隐藏'
+		}
+		if (v == 1) {
+			return '红点'
+		}
+		return '数字'
+	}, badgeMode.value))
+}
+
+function openHomePage() {
+	openSheet('homePage', '首页启动页', numOptions([0, 1, 2, 3], (v: number): string => {
+		const labels = ['首页', '排行榜', '动态', '媒体库']
+		return labels[v]
+	}, homePage.value))
+}
+
+/** Toast 不透明度：源 SlideDialog（0~1，divisions 10）→ 滑条 0.1~1.0 步进 0.1 */
+function openToastOp() {
+	slideKind.value = 'toastOp'
+	slideTitle.value = 'Toast不透明度'
+	slideValue.value = toastOp.value
+	slideMin.value = 0.1
+	slideMax.value = 1.0
+	slideStep.value = 0.1
+	slideSuffix.value = ''
+	slideVisible.value = true
+}
+
+function closeSheet() {
+	sheetVisible.value = false
+}
+
+function onSheetSelect(value: string) {
+	if (sheetKind.value == 'rows') {
+		customRows.value = parseInt(value)
+		setNumber(SK.customRows, customRows.value)
+	} else if (sheetKind.value == 'themeMode') {
+		const mode = parseInt(value)
+		setThemeMode(mode)
+		dark.value = mode == THEME_MODE_DARK
+	} else if (sheetKind.value == 'badge') {
+		badgeMode.value = parseInt(value)
+		setNumber(SK.dynamicBadgeMode, badgeMode.value)
+		uni.showToast({ title: '设置成功', icon: 'none' })
+	} else if (sheetKind.value == 'homePage') {
+		homePage.value = parseInt(value)
+		setNumber(SK.defaultHomePage, homePage.value)
+		uni.showToast({ title: '设置成功，重启生效', icon: 'none' })
+	}
+}
+
+/** 开关分发：setting-cell 抛 (value, switchKey)，与 play/recommend 两页同一签名 */
+function onSwitch(value: boolean, key: string) {
+	setBool(key, value)
+	if (key == SK.feedBackEnable) {
+		feedBack.value = value
+	} else if (key == SK.enableMYBar) {
+		myBar.value = value
+	} else if (key == SK.hideTabBar) {
+		hideTab.value = value
+	} else if (key == SK.enableGradientBg) {
+		gradientBg.value = value
+	}
+	// 源 needReboot 项（顶栏/底栏收起、渐变）toast 提示重启生效
+	if (key == SK.hideTabBar || key == SK.enableGradientBg) {
+		uni.showToast({ title: '重启生效', icon: 'none' })
+	}
+}
+
+/** 首页顶栏收起：P3 home.uvue 消费该键（onShow 重读）；写后 toast 提示 */
+function onHideSearch(value: boolean) {
+	setBool(SK.hideSearchBar, value)
+	hideSearch.value = value
+	uni.showToast({ title: '重启生效', icon: 'none' })
+}
+
+/** 渐变背景：P3 main.uvue 消费该键 */
+function onGradient(value: boolean) {
+	setBool(SK.enableGradientBg, value)
+	gradientBg.value = value
+}
+
+// ---------------------------------------------------------------- 滑条弹层（图片质量 / Toast 不透明度）
+
+function openPicQa() {
+	slideKind.value = 'picQa'
+	slideTitle.value = '图片质量'
+	slideValue.value = picQa.value
+	slideMin.value = 10
+	slideMax.value = 100
+	slideStep.value = 10
+	slideSuffix.value = '%'
+	slideVisible.value = true
+}
+
+function closeSlide() {
+	slideVisible.value = false
+}
+
+function onSlideConfirm(value: number) {
+	if (slideKind.value == 'picQa') {
+		picQa.value = Math.round(value)
+		setNumber(SK.defaultPicQa, picQa.value)
+		uni.showToast({ title: '设置成功', icon: 'none' })
+	} else if (slideKind.value == 'toastOp') {
+		toastOp.value = Math.round(value * 10) / 10
+		setNumber(SK.defaultToastOp, toastOp.value)
+		uni.showToast({ title: '设置成功', icon: 'none' })
+	}
+}
+
+// ---------------------------------------------------------------- 子页跳转
+
+function goColor() {
+	uni.navigateTo({ url: '/pages/setting/color-select' })
+}
+
+function goFont() {
+	uni.navigateTo({ url: '/pages/setting/font-size-select' })
+}
+
+function goTabbarSet() {
+	uni.navigateTo({ url: '/pages/setting/home-tabbar-set' })
+}
+
+function goNavBarSet() {
+	uni.navigateTo({ url: '/pages/setting/navigation-bar-set' })
+}
+
+// 浮层返回接管（页面级钩子：两个弹层都要关）
+onBackPress(() => {
+	if (sheetVisible.value) {
+		closeSheet()
+		return true
+	}
+	if (slideVisible.value) {
+		closeSlide()
+		return true
+	}
+	return false
+})
+</script>
+
+<style>
+	.sy {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.sy-scroll {
+		flex: 1;
+	}
+	.sy-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.sy-foot {
+		height: 1px;
+	}
+	.sy-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.sy-dialog {
+		width: 300px;
+		border-radius: 14px;
+		padding-left: 20px;
+		padding-right: 20px;
+		padding-top: 20px;
+		padding-bottom: 10px;
+		display: flex;
+		flex-direction: column;
+	}
+	.sy-dialog-title {
+		font-size: 17px;
+		font-weight: bold;
+	}
+	.sy-slider-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		margin-top: 20px;
+		margin-bottom: 10px;
+	}
+	.sy-slider-minus,
+	.sy-slider-plus {
+		width: 44px;
+		height: 44px;
+		border-radius: 22px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		background-color: rgba(0, 0, 0, 0.05);
+	}
+	.sy-slider-step {
+		font-size: 22px;
+	}
+	.sy-slider-value {
+		font-size: 20px;
+		font-weight: bold;
+	}
+	.sy-dialog-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: flex-end;
+	}
+	.sy-dialog-btn {
+		min-height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 14px;
+	}
+	.sy-dialog-cancel {
+		font-size: 14px;
+	}
+	.sy-dialog-ok {
+		font-size: 14px;
+		font-weight: bold;
+	}
+</style>

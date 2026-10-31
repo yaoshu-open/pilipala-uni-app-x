@@ -1,0 +1,84 @@
+<template>
+	<!-- 信息区：标题 + 元数据（源头 `introduction/view.dart` VideoInfo 的标题与统计两段） -->
+	<view class="vi">
+		<text class="vi-title" :style="titleStyle" :max-lines="2">{{ title }}</text>
+		<view class="vi-stats">
+			<p-stat icon="play-circle-outlined" :text="viewText" size="medium" :color="secondaryColor"></p-stat>
+			<view class="vi-gap"></view>
+			<p-stat icon="subtitles-outlined" :text="danmuText" size="medium" :color="secondaryColor"></p-stat>
+			<view class="vi-gap"></view>
+			<text class="vi-stat-text" :style="secondaryStyle">{{ pubdateText }}</text>
+			<text v-if="onlineText.length > 0" class="vi-stat-text vi-stat-online" :style="secondaryStyle">
+				· {{ onlineText }}人在看
+			</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import PStat from '../p-stat/p-stat.uvue'
+import { numFormat, dateFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 详情信息区：标题 + 元数据行。
+ *
+ * 源取值（`introduction/view.dart`）：
+ *  - 外层 SliverPadding：左右 12、上 16（本组件左右/上内边距与之对齐）；
+ *  - 标题 18 / 粗体 / 折叠 2 行（源 ExpandablePanel collapsed 为 2 行，展开 10 行；
+ *    行高源未显式指定，按 Flutter 默认 1.2×18≈22）；
+ *  - 统计行 padding 上下 7/6，播放量与弹幕数之间 10、时间 12 次要色、在N人看 12 次要色。
+ *
+ * UP 行不在此组件内（1:1 基线顺序为「标题 → 元数据 → 互动栏 → UP 行」），见 `up-row.uvue`；
+ * 已关注态由页面统一持有，故本组件不再关心关注逻辑。
+ */
+const props = defineProps({
+	title: { type: String, default: '' },
+	viewCount: { type: Number, default: 0 },
+	danmuCount: { type: Number, default: 0 },
+	pubdate: { type: Number, default: 0 },
+	/** 同时在看人数（空串表示不展示） */
+	onlineText: { type: String, default: '' }
+})
+
+const secondaryColor = textSecondary()
+
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const viewText = computed((): string => numFormat(props.viewCount))
+const danmuText = computed((): string => numFormat(props.danmuCount))
+const pubdateText = computed((): string => dateFormat(props.pubdate, 'detail'))
+</script>
+
+<style>
+	.vi {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 16px;
+	}
+	.vi-title {
+		font-size: 18px;
+		line-height: 22px;
+		font-weight: bold;
+	}
+	.vi-stats {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-top: 7px;
+		padding-bottom: 6px;
+	}
+	.vi-gap {
+		width: 10px;
+	}
+	.vi-stat-text {
+		font-size: 12px;
+	}
+	.vi-stat-online {
+		margin-left: 10px;
+	}
+</style>

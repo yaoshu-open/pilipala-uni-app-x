@@ -1,0 +1,48 @@
+import { ref } from 'vue'
+
+/**
+ * tab / 频道点击信号。
+ *
+ * 背景：源工程由父页面直接调用子 Controller 的 animateToTop / onRefresh；
+ * 目标端页面与内容是组件关系，组件方法导出（$callMethod）在组合式下的行为未实测，
+ * 故改用共享信号：被点击方递增序号，内容组件 watch 序号执行回顶或刷新。
+ * 一次点击只递增一个信号（回顶与刷新互斥）。
+ */
+export const homeTopSeq = ref<number>(0)
+export const homeRefreshSeq = ref<number>(0)
+export const rcmdTopSeq = ref<number>(0)
+export const rcmdRefreshSeq = ref<number>(0)
+export const hotTopSeq = ref<number>(0)
+export const hotRefreshSeq = ref<number>(0)
+export const rankTopSeq = ref<number>(0)
+export const rankRefreshSeq = ref<number>(0)
+export const dynTopSeq = ref<number>(0)
+export const dynRefreshSeq = ref<number>(0)
+export const liveTopSeq = ref<number>(0)
+export const liveRefreshSeq = ref<number>(0)
+export const bangumiTopSeq = ref<number>(0)
+export const bangumiRefreshSeq = ref<number>(0)
+
+/**
+ * 内容区滚动收起信号（P10 设置域消费：hideSearchBar / hideTabBar）。
+ * 1 = 手指下滑浏览（收起顶栏/底栏）；0 = 回滑或到顶（展开）。
+ * 由频道内容组件（当前 rcmd，主频道）在 list-view 的 @scroll 里按位移方向更新。
+ */
+export const collapseSignal = ref<number>(0)
+
+let lastName: string = ''
+let lastTime: number = 0
+
+/**
+ * 单击当前项 → 回顶；500ms 内再次点击 → 刷新（源 setIndex / onTap 同款规则）。
+ * 返回 true 表示本次为刷新。
+ */
+export function tapTwice(key: string): boolean {
+	const now = Date.now()
+	const refresh = key == lastName && (now - lastTime) < 500
+	lastTime = now
+	if (!refresh) {
+		lastName = key
+	}
+	return refresh
+}

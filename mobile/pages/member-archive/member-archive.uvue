@@ -1,0 +1,301 @@
+<template>
+	<view class="mar" :style="pageStyle">
+		<!-- 顶栏：标题含当前排序；右侧更多=排序菜单（源 PopupMenuButton 的 ActionSheet 等价） -->
+		<app-navbar :title="titleText">
+			<template #right>
+				<view class="mar-more" @click="onOrderMenu">
+					<p-icon name="more-vert" :size="24" :color="iconColor"></p-icon>
+				</view>
+			</template>
+		</app-navbar>
+
+		<view v-if="state == 'error'" class="mar-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+		<!-- 空态：源 NoData = 插画 +「没有数据」400 顶盒（无重试按钮） -->
+		<view v-else-if="state == 'empty'" class="mar-fill">
+			<empty-illus text="没有数据"></empty-illus>
+		</view>
+		<scroll-view
+			v-else
+			class="mar-scroll"
+			:lower-threshold="200"
+			@scrolltolower="onLoadMore"
+		>
+			<view v-if="state == 'loading'" class="mar-list">
+				<view v-for="n in 10" :key="'sk-' + n.toString()">
+					<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+				</view>
+			</view>
+			<view v-else class="mar-list">
+				<p-video-card-h
+					v-for="item in items"
+					:key="item.bvid.length > 0 ? item.bvid : item.aid.toString()"
+					:pic="item.pic"
+					:title="item.title"
+					:duration="durationSeconds(item.length)"
+					:view-count="item.play"
+					:danmu-count="item.videoReview"
+					:pubdate="item.created"
+					:show-owner="false"
+					:corner-badge="item.isChargingSrc ? '充电专属' : ''"
+					:show-pubdate="true"
+					:card-height="cardHeight"
+					@tap="openDetail(item)"
+				></p-video-card-h>
+			<view class="mar-footer">
+				<text class="mar-footer-text" :style="secondaryTextStyle">{{ footerText }}</text>
+			</view>
+		</view>
+		<!-- 播放全部悬浮胶囊（基线 1.0.27 增量；fav-detail/later 同款金语言） -->
+		<view v-if="items.length > 0 && state == 'ready'" class="mar-fab-row" :style="fabRowStyle">
+			<view class="mar-fab" :style="fabStyle" @click="onPlayAll">
+				<p-icon name="playlist-play" :size="20" :color="fabContentColor"></p-icon>
+				<text class="mar-fab-text" :style="fabTextStyle">播放全部</text>
+			</view>
+		</view>
+	</scroll-view>
+</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PVideoCardH from '../../components/p-video-card-h/p-video-card-h.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import { fetchMemberArchive } from '../../api/member.uts'
+import { VListItem } from '../../models/member.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground, textPrimary, textSecondary } from '../../utils/theme.uts'
+import { durationToSeconds } from '../../utils/format.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 投稿列表页（源头：`lib/pages/member_archive/view.dart` + controller.dart）。
+ *
+ * 顶栏「我的/Ta 的投稿 - 当前排序」+ 右侧排序菜单（最新发布/最多播放/最多收藏/充电专属）；
+ * 横向视频卡：无 UP 行（showOwner=false 不残留空隙）、显示发布时间、充电专属角标
+ * （p-video-card-h cornerBadge 封面右上角标位，源 VideoCardH showCharge 同位）。
+ * 分页：pn 从 1 递增、触底 200px 加载、count 比对终止（源同款）。
+ */
+const ORDER_TYPES: string[] = ['pubdate', 'click', 'stow', 'charge']
+const ORDER_LABELS: string[] = ['最新发布', '最多播放', '最多收藏', '充电专属']
+
+const mid = ref<number>(0)
+const items = ref<Array<VListItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const orderIndex = ref<number>(0)
+const page = ref<number>(1)
+const count = ref<number>(0)
+const isLoading = ref<boolean>(false)
+/** 触底节流（源 EasyThrottle 500ms） */
+let lastLoadAt: number = 0
+
+/** 播放全部 FAB（基线实测：鹅黄底 #F7D999 + 黑字，later/fav-detail 同款） */
+const FAB_BG: string = '#F7D999'
+const fabContentColor: string = '#18191C'
+const fabStyle: string = 'background-color:' + FAB_BG + ';'
+const fabTextStyle: string = 'color:' + fabContentColor + ';'
+const fabRowStyle = computed((): string => {
+	return 'bottom:' + (safeAreaBottom() + 16).toString() + 'px;'
+})
+
+function onPlayAll() {
+	if (items.value.length == 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + items.value[0].bvid })
+}
+
+const isOwner = computed((): boolean => userState.isLogin && mid.value > 0 && userState.info.mid == mid.value)
+
+const titleText = computed((): string => {
+	const prefix = isOwner.value ? '我的投稿' : 'Ta的投稿'
+	return prefix + ' - ' + ORDER_LABELS[orderIndex.value]
+})
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const iconColor = textPrimary()
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return Math.max(88, Math.round(((info.windowWidth - 24 - 48) / 2) / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+const footerText = computed((): string => {
+	if (isLoading.value) {
+		return '加载中...'
+	}
+	if (items.value.length >= count.value && count.value > 0) {
+		return '没有更多了'
+	}
+	return ''
+})
+
+function durationSeconds(text: string): number {
+	return durationToSeconds(text)
+}
+
+async function loadPage(pn: number) {
+	if (isLoading.value) {
+		return
+	}
+	isLoading.value = true
+	if (pn == 1) {
+		state.value = 'loading'
+		errorText.value = ''
+	}
+	const res = await fetchMemberArchive(mid.value, pn, ORDER_TYPES[orderIndex.value], '')
+	isLoading.value = false
+	if (!res.status) {
+		if (pn == 1) {
+			state.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	const next: Array<VListItem> = pn == 1 ? [] : items.value.slice()
+	for (let i = 0; i < res.items.length; i++) {
+		next.push(res.items[i])
+	}
+	items.value = next
+	count.value = res.count
+	page.value = pn + 1
+	if (pn == 1) {
+		state.value = next.length > 0 ? 'ready' : 'empty'
+	}
+}
+
+function onLoadMore() {
+	if (state.value != 'ready' || isLoading.value) {
+		return
+	}
+	if (count.value > 0 && items.value.length >= count.value) {
+		return
+	}
+	const now = Date.now()
+	if (now - lastLoadAt < 500) {
+		return
+	}
+	lastLoadAt = now
+	loadPage(page.value)
+}
+
+function onOrderMenu() {
+	uni.showActionSheet({
+		itemList: ORDER_LABELS,
+		success: (res) => {
+			if (res.tapIndex != orderIndex.value) {
+				orderIndex.value = res.tapIndex
+				items.value = []
+				count.value = 0
+				page.value = 1
+				loadPage(1)
+			}
+		}
+	})
+}
+
+function reload() {
+	items.value = []
+	count.value = 0
+	page.value = 1
+	loadPage(1)
+}
+
+function openDetail(item: VListItem) {
+	if (item.bvid.length == 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + item.bvid })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	if (rawMid == null || (rawMid as string).length == 0) {
+		state.value = 'error'
+		errorText.value = '缺少用户参数（mid），请从用户主页进入'
+		return
+	}
+	const parsed = parseInt(rawMid as string)
+	mid.value = isNaN(parsed) ? 0 : parsed
+	if (mid.value <= 0) {
+		state.value = 'error'
+		errorText.value = '用户参数不合法，请从用户主页进入'
+		return
+	}
+	loadPage(1)
+})
+</script>
+
+<style>
+	.mar {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mar-more {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mar-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mar-scroll {
+		flex: 1;
+	}
+	.mar-list {
+		display: flex;
+		flex-direction: column;
+		padding-top: 2px;
+	}
+	.mar-footer {
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+		padding-top: 16px;
+		padding-bottom: 24px;
+	}
+	.mar-fab-row {
+		position: fixed;
+		right: 16px;
+		display: flex;
+		flex-direction: row;
+		justify-content: flex-end;
+	}
+	.mar-fab {
+		height: 44px;
+		padding-left: 18px;
+		padding-right: 18px;
+		border-radius: 22px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mar-fab-text {
+		font-size: 14px;
+		margin-left: 6px;
+	}
+	.mar-footer-text {
+		font-size: 13px;
+	}
+</style>

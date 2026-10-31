@@ -1,0 +1,952 @@
+<template>
+	<view class="dp" :style="rootStyle">
+		<view @click="onCardTap">
+			<!-- 作者行（源 author_panel）：40 头像 + 昵称（vip 粉）+ pubTime/pubAction + 更多钮（仅 AV） -->
+			<view class="dp-author">
+				<view class="dp-avatar" @click.stop="onAuthorTap">
+					<network-img :src="author.face" width="40px" height="40px" radius="20px"></network-img>
+				</view>
+				<view class="dp-author-body">
+					<text class="dp-name" :style="nameStyle" :max-lines="1">{{ author.name }}</text>
+					<text class="dp-pub" :style="pubStyle" :max-lines="1">{{ pubText }}</text>
+				</view>
+				<view v-if="showMore" class="dp-more" @click.stop="onLaterTap">
+					<text class="dp-more-icon" :style="moreIconStyle">⋮</text>
+				</view>
+			</view>
+
+			<!-- 正文（源 content_panel）：话题 + 富文本段（feed 3 行折叠 / detail 全展）+ opus 图集 -->
+			<view v-if="hasBody" class="dp-content">
+				<text v-if="topicName.length > 0" class="dp-topic" :style="primaryTextStyle">#{{ topicName }}</text>
+				<view v-if="segments.length > 0" class="dp-richtext" :style="descClipStyle">
+					<template v-for="(seg, index) in segments" :key="index">
+						<image
+							v-if="seg.type == 'RICH_TEXT_NODE_TYPE_EMOJI'"
+							class="dp-emote"
+							:src="seg.emoteUrl"
+							:style="emoteStyle(seg.emoteSize)"
+							mode="aspectFit"
+						></image>
+						<text v-else-if="seg.type == 'RICH_TEXT_NODE_TYPE_BV'" class="dp-seg-link" :style="primaryTextStyle" @click.stop="onSegBvTap(seg)">{{ seg.text }} </text>
+						<text v-else-if="isLinkSeg(seg.type)" class="dp-seg-link" :style="primaryTextStyle">{{ segText(seg) }}</text>
+						<text v-else class="dp-seg-text" :style="segTextStyle">{{ segText(seg) }}</text>
+					</template>
+				</view>
+				<!-- 图文集（major.opus.pics）：1 图半宽按比 / 多图九宫格（cross = len<3 ? 2 : 3） -->
+				<view v-if="opusPics.length == 1" class="dp-pics" @click.stop="onPreview(opusPics, 0)">
+					<network-img
+						:src="opusPics[0].src"
+						:width="singlePicWidthText"
+						:height="singlePicHeightText"
+						radius="6px"
+					></network-img>
+					<view v-if="singlePicIsLong" class="dp-pic-long">
+						<p-badge text="长图" type="gray" size="small" :font-size="11"></p-badge>
+					</view>
+				</view>
+				<view v-else-if="opusPics.length > 1" class="dp-pics-grid">
+					<view
+						v-for="(pic, index) in opusPics"
+						:key="'pic-' + index.toString()"
+						class="dp-pics-cell"
+						:style="cellStyle"
+						@click.stop="onPreview(opusPics, index)"
+					>
+						<network-img :src="pic.src" width="100%" height="100%" radius="4px"></network-img>
+					</view>
+				</view>
+			</view>
+
+			<!-- major 分支（源 forward_panel.forWard）：DRAW 图集 / AV·UGC·PGC 视频卡 / FORWARD 引用块 / LIVE_RCMD 直播卡 / NONE 失效 -->
+			<!-- ① 带图动态：draw 图集（1 图按比 / 多图三方格）+ 附加卡 -->
+			<view v-if="item.type == 'DYNAMIC_TYPE_DRAW'" class="dp-major">
+				<view v-if="drawPics.length == 1" class="dp-pics" @click.stop="onPreview(drawPics, 0)">
+					<network-img
+						:src="drawPics[0].src"
+						:width="drawSingleWidthText"
+						:height="drawSingleHeightText"
+						radius="6px"
+					></network-img>
+					<view v-if="drawSingleIsLong" class="dp-pic-long">
+						<p-badge text="长图" type="gray" size="small" :font-size="11"></p-badge>
+					</view>
+				</view>
+				<view v-else-if="drawPics.length > 1" class="dp-pics-grid">
+					<view
+						v-for="(pic, index) in drawPics"
+						:key="'draw-' + index.toString()"
+						class="dp-pics-cell"
+						:style="cellStyle"
+						@click.stop="onPreview(drawPics, index)"
+					>
+						<network-img :src="pic.src" width="100%" height="100%" radius="4px"></network-img>
+					</view>
+				</view>
+				<view v-if="additionalUgc != null" class="dp-add" :style="addBgStyle" @click.stop="onAddUgcTap">
+					<network-img :src="additionalUgc.cover" width="120px" height="75px" radius="4px"></network-img>
+					<view class="dp-add-body">
+						<text class="dp-add-title" :style="titleTextStyle" :max-lines="2">{{ additionalUgc.title }}</text>
+						<text class="dp-add-desc" :style="pubStyle" :max-lines="1">{{ additionalUgc.descSecond }}</text>
+					</view>
+				</view>
+			</view>
+
+			<!-- ② 投稿视频 / 合集 / 番剧：大封面卡 -->
+			<view v-else-if="archiveOfItem != null" class="dp-major">
+				<view class="dp-video" :style="videoRadiusStyle" @click.stop="onVideoTap(archiveOfItem)">
+					<network-img :src="archiveOfItem.cover" width="100%" :height="coverHeightText" :radius="videoRadiusText"></network-img>
+					<view v-if="archiveOfItem.badgeText.length > 0" class="dp-video-badge">
+						<p-badge :text="archiveOfItem.badgeText" type="primary" size="small" :font-size="11"></p-badge>
+					</view>
+					<view class="dp-video-bottom" :style="videoBottomStyle">
+						<text class="dp-video-stat">{{ videoStatText(archiveOfItem) }}</text>
+					</view>
+				</view>
+				<view class="dp-video-title-row">
+					<text class="dp-video-title" :style="titleTextStyle" :max-lines="1">{{ archiveOfItem.title }}</text>
+				</view>
+				<view v-if="additionalUgc != null" class="dp-add" :style="addBgStyle" @click.stop="onAddUgcTap">
+					<network-img :src="additionalUgc.cover" width="120px" height="75px" radius="4px"></network-img>
+					<view class="dp-add-body">
+						<text class="dp-add-title" :style="titleTextStyle" :max-lines="2">{{ additionalUgc.title }}</text>
+						<text class="dp-add-desc" :style="pubStyle" :max-lines="1">{{ additionalUgc.descSecond }}</text>
+					</view>
+				</view>
+			</view>
+
+			<!-- ③ 转发：灰底引用块，内嵌 orig 的 floor2 渲染 -->
+			<view v-else-if="item.type == 'DYNAMIC_TYPE_FORWARD' && orig != null" class="dp-forward" :style="forwardBgStyle" @click.stop="onOrigTap">
+				<view class="dp-fwd-author">
+					<text class="dp-fwd-name" :style="primaryTextStyle" @click.stop="onFwdAuthorTap">@{{ orig.modules.author.name }}</text>
+					<text class="dp-fwd-time" :style="pubStyle">{{ origPubText }}</text>
+				</view>
+				<view v-if="origSegments.length > 0" class="dp-richtext" :style="fwdClipStyle">
+					<template v-for="(seg, index) in origSegments" :key="'f' + index.toString()">
+						<image
+							v-if="seg.type == 'RICH_TEXT_NODE_TYPE_EMOJI'"
+							class="dp-emote"
+							:src="seg.emoteUrl"
+							:style="emoteStyle(seg.emoteSize)"
+							mode="aspectFit"
+						></image>
+						<text v-else-if="isLinkSeg(seg.type)" class="dp-seg-link" :style="primaryTextStyle">{{ segText(seg) }}</text>
+						<text v-else class="dp-seg-text" :style="segTextStyle">{{ segText(seg) }}</text>
+					</template>
+				</view>
+				<!-- orig 内容分支：视频小卡（圆角 6）/ 图集 / 直播小卡 / 图文图集 / 纯文字无内容 / 再嵌转发给提示行 -->
+				<view v-if="origArchive != null" class="dp-video" :style="smallVideoStyle" @click.stop="onVideoTap(origArchive)">
+					<network-img :src="origArchive.cover" width="100%" :height="coverHeightText" radius="6px"></network-img>
+					<view class="dp-video-bottom" :style="videoBottomStyle">
+						<text class="dp-video-stat">{{ videoStatText(origArchive) }}</text>
+					</view>
+				</view>
+				<view v-if="orig.type == 'DYNAMIC_TYPE_LIVE_RCMD' && origLiveRcmd != null" class="dp-video" :style="smallVideoStyle" @click.stop="onLiveRcmdTap">
+					<network-img :src="origLiveRcmd.cover" width="100%" :height="coverHeightText" radius="6px"></network-img>
+					<view class="dp-video-badge">
+						<p-badge :text="origLiveRcmd.liveStatus == 1 ? '直播中' : '直播结束'" type="primary" size="small" :font-size="11"></p-badge>
+					</view>
+					<view class="dp-video-bottom" :style="videoBottomStyle">
+						<text class="dp-video-stat">{{ origLiveRcmd.areaName }}</text>
+					</view>
+				</view>
+				<view v-if="orig.type == 'DYNAMIC_TYPE_FORWARD'" class="dp-fwd-nested">
+					<text class="dp-fwd-nested-text" :style="pubStyle">转发动态</text>
+				</view>
+			</view>
+
+			<!-- ④ 直播推荐卡 -->
+			<view v-else-if="item.type == 'DYNAMIC_TYPE_LIVE_RCMD' && liveRcmd != null" class="dp-major">
+				<view class="dp-video" :style="videoRadiusStyle" @click.stop="onLiveRcmdTap">
+					<network-img :src="liveRcmd.cover" width="100%" :height="coverHeightText" :radius="videoRadiusText"></network-img>
+					<view v-if="liveRcmd.watchedShowText.length > 0" class="dp-live-watched">
+						<p-badge :text="liveRcmd.watchedShowText" type="gray" size="small" :font-size="11"></p-badge>
+					</view>
+					<view class="dp-video-badge">
+						<p-badge :text="liveRcmd.liveStatus == 1 ? '直播中' : '直播结束'" type="primary" size="small" :font-size="11"></p-badge>
+					</view>
+					<view class="dp-video-bottom" :style="videoBottomStyle">
+						<text class="dp-video-stat">{{ liveRcmd.areaName }}</text>
+					</view>
+				</view>
+				<view class="dp-video-title-row">
+					<text class="dp-video-title" :style="titleTextStyle" :max-lines="1">{{ liveRcmd.title }}</text>
+				</view>
+			</view>
+
+			<!-- ⑤ 失效动态 -->
+			<view v-else-if="item.type == 'DYNAMIC_TYPE_NONE'" class="dp-major dp-none-row">
+				<text class="dp-none-text" :style="pubStyle">{{ noneTips }}</text>
+			</view>
+
+			<!-- ⑥ 专栏/番剧等无内嵌渲染的类型：不占位（点击整卡走占位路由） -->
+
+			<!-- 附加卡：直播预约（WORD/DRAW 等类型尾部） -->
+			<view v-if="additionalReserve != null && archiveOfItem == null" class="dp-reserve" :style="addBgStyle">
+				<text class="dp-reserve-title" :style="titleTextStyle" :max-lines="1">{{ additionalReserve.title }}</text>
+				<text class="dp-reserve-desc" :style="pubStyle" :max-lines="1">{{ reserveDescText }}</text>
+			</view>
+		</view>
+
+		<!-- 操作栏（源 action_panel）：feed 态三等分 转发/评论/点赞；detail 态不渲染 -->
+		<view v-if="!isDetail" class="dp-actions">
+			<view class="dp-action" @click.stop="onForwardTap">
+				<text class="dp-action-icon" :style="actionIconStyle">{{ forwardGlyph }}</text>
+				<text class="dp-action-text" :style="actionTextStyle">{{ forwardText }}</text>
+			</view>
+			<view class="dp-action" @click.stop="onCommentTap">
+				<text class="dp-action-icon" :style="actionIconStyle">{{ commentGlyph }}</text>
+				<text class="dp-action-text" :style="actionTextStyle">{{ commentText }}</text>
+			</view>
+			<view class="dp-action" @click.stop="onLikeTap">
+				<text class="dp-action-icon" :style="likeIconStyle">{{ likeGlyph }}</text>
+				<text class="dp-action-text" :style="likeTextStyle">{{ likeText }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import PBadge from '../p-badge/p-badge.uvue'
+import {
+	DynamicItem, DynamicArchive, DynamicMajor, DynamicLiveRcmd, DynamicPicture, RichSeg, DynamicAddUgc, DynamicAddReserve
+} from '../../models/member.uts'
+import { likeDynamic } from '../../api/dynamics.uts'
+import { laterAdd } from '../../api/history.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { navigateTo, RT } from '../../utils/routes.uts'
+import { textPrimary, textSecondary, cardBackground, themeColor, currentThemeIndex, isDarkMode } from '../../utils/theme.uts'
+
+/**
+ * 完整动态卡（源头：`lib/pages/dynamics/widgets/dynamic_panel.dart` 及其子面板族）。
+ *
+ * 结构＝作者行（40 头像+vip 粉昵称+pubTime/pubAction+AV 型更多钮[稍后再看]）→ 正文
+ * （话题#+富文本段拆段渲染：文本段 text / 表情段内联 image / @与话题与链接段主色，
+ * feed 态 3 行折叠、detail 态全展）→ major 分支（DRAW 图集 / AV·UGC_SEASON·PGC·PGC_UNION
+ * 视频卡 / FORWARD 灰底引用块 / LIVE_RCMD 直播卡 / NONE 失效提示）→ 附加卡（UGC 投稿引用/
+ * 直播预约）→ 操作栏（转发/评论/点赞带计数，点赞乐观更新+失败回滚）。
+ *
+ * 平台约束与有意取舍（差异登记见迁移清单）：
+ *  - 转发引用块不递归组件自引用（蒸汽模式未实测）：orig 内再嵌 FORWARD 显示「转发动态」提示行；
+ *  - 视频卡底部信息条源为纵向渐变 → 纯色半透明底条（App 端渐变角度属静默坑，等价降级）；
+ *  - 图片预览源 pl_gallery → uni.previewImage；
+ *  - 纯文本动态（WORD）无 major 内容，正文已在 Content 段渲染，此处仅附加卡。
+ */
+const props = defineProps({
+	/** DynamicItem 实例（Object + as cast，工程惯例） */
+	item: { type: Object, required: true },
+	/** 'detail' = 详情态（正文全展、无操作栏）；默认 feed 态 */
+	source: { type: String, default: '' },
+	/** 1 顶层动态 / 2 转发引用层（决定详情页 oid 提取链） */
+	floor: { type: Number, default: 1 }
+})
+
+const rawItem = props.item
+const item = rawItem == null ? new DynamicItem() : (rawItem as DynamicItem)
+const isDetail = props.source == 'detail'
+
+const primary = themeColor(currentThemeIndex())
+const forwardGlyph = glyphOf('share')
+// MaterialIcons comment（\ue17e，码点按工程字体=Flutter SDK 3.3.10 icons.dart 旧码点体系核实）：源 FontAwesomeIcons.comment 实心对话气泡的语义等价物
+const commentGlyph = '\ue17e'
+const likeGlyphOn = glyphOf('thumb-up')
+const likeGlyphOff = glyphOf('thumb-up-off')
+/** 点赞图标按点赞态切换（模板一直引用 likeGlyph，此前只定义 On/Off 两个常量 → 运行时 ReferenceError 崩溃） */
+const likeGlyph = computed((): string => liked.value ? likeGlyphOn : likeGlyphOff)
+
+const author = item.modules.author
+const orig = item.orig
+const major = item.modules.dynamic.major
+const stat = item.modules.stat
+
+// ---------------------------------------------------------------- 状态镜像（点赞乐观更新）
+const liked = ref<boolean>(stat == null ? false : stat.like.status)
+const likeCount = ref<number>(stat == null ? 0 : stat.like.count)
+const liking = ref<boolean>(false)
+
+// ---------------------------------------------------------------- 派生数据
+const pubText = ((): string => {
+	let text = author.pubTime
+	if (author.pubTime.length > 0 && author.pubAction.length > 0) {
+		text = text + ' ' + author.pubAction
+	} else if (author.pubAction.length > 0) {
+		text = author.pubAction
+	}
+	return text
+})()
+
+const topicName = ((): string => {
+	const topic = item.modules.dynamic.topic
+	return topic == null ? '' : topic.name
+})()
+
+function opusPicsOf(node: DynamicMajor | null): Array<DynamicPicture> {
+	if (node == null || node.opus == null) {
+		return [] as Array<DynamicPicture>
+	}
+	return node.opus.pics
+}
+
+/** 富文本段：desc 优先，缺失时落 opus.summary（源 richNode 同序） */
+const segments = ((): Array<RichSeg> => {
+	const desc = item.modules.dynamic.desc
+	if (desc != null && desc.segments.length > 0) {
+		return desc.segments
+	}
+	if (major != null && major.opus != null && major.opus.summary.segments.length > 0) {
+		return major.opus.summary.segments
+	}
+	return [] as Array<RichSeg>
+})()
+
+const opusPics = opusPicsOf(major)
+const drawPics = ((): Array<DynamicPicture> => {
+	if (major == null || major.draw == null) {
+		return [] as Array<DynamicPicture>
+	}
+	return major.draw.items
+})()
+
+const hasBody = segments.length > 0 || opusPics.length > 0 || topicName.length > 0
+
+/** major 中可渲染的视频卡（AV→archive / UGC_SEASON→ugcSeason / PGC·PGC_UNION→pgc） */
+const archiveOfItem = ((): DynamicArchive | null => {
+	if (major == null) {
+		return null
+	}
+	if (item.type == 'DYNAMIC_TYPE_AV') {
+		return major.archive
+	}
+	if (item.type == 'DYNAMIC_TYPE_UGC_SEASON') {
+		return major.ugcSeason
+	}
+	if (item.type == 'DYNAMIC_TYPE_PGC' || item.type == 'DYNAMIC_TYPE_PGC_UNION') {
+		return major.pgc
+	}
+	return null
+})()
+
+const liveRcmd = major == null ? null : major.liveRcmd
+const origLiveRcmd = orig == null || orig.modules.dynamic.major == null ? null : orig.modules.dynamic.major.liveRcmd
+const origArchive = ((): DynamicArchive | null => {
+	if (orig == null) {
+		return null
+	}
+	const node = orig.modules.dynamic.major
+	if (node == null) {
+		return null
+	}
+	if (orig.type == 'DYNAMIC_TYPE_AV') {
+		return node.archive
+	}
+	if (orig.type == 'DYNAMIC_TYPE_UGC_SEASON') {
+		return node.ugcSeason
+	}
+	if (orig.type == 'DYNAMIC_TYPE_PGC' || orig.type == 'DYNAMIC_TYPE_PGC_UNION') {
+		return node.pgc
+	}
+	return null
+})()
+
+const additionalUgc = ((): DynamicAddUgc | null => {
+	const add = item.modules.dynamic.additional
+	if (add == null || add.type != 'ADDITIONAL_TYPE_UGC' || add.ugc == null) {
+		return null
+	}
+	return add.ugc
+})()
+
+const additionalReserve = ((): DynamicAddReserve | null => {
+	const add = item.modules.dynamic.additional
+	if (add == null || add.type != 'ADDITIONAL_TYPE_RESERVE' || add.reserve == null) {
+		return null
+	}
+	if (add.reserve.state == -1 || add.reserve.title.length == 0) {
+		return null
+	}
+	return add.reserve
+})()
+
+const reserveDescText = ((): string => {
+	const reserve = additionalReserve
+	if (reserve == null) {
+		return ''
+	}
+	let text = reserve.desc1
+	if (reserve.desc2.length > 0) {
+		text = text.length > 0 ? text + '  ' + reserve.desc2 : reserve.desc2
+	}
+	return text
+})()
+
+const noneTips = ((): string => {
+	if (major == null || major.none == null) {
+		return '动态已失效'
+	}
+	const tips = major.none.tips
+	return tips.length > 0 ? tips : '动态已失效'
+})()
+
+/** 引用块（floor=2）数据 */
+const origSegments = ((): Array<RichSeg> => {
+	if (orig == null) {
+		return [] as Array<RichSeg>
+	}
+	const desc = orig.modules.dynamic.desc
+	if (desc != null && desc.segments.length > 0) {
+		return desc.segments
+	}
+	const node = orig.modules.dynamic.major
+	if (node != null && node.opus != null && node.opus.summary.segments.length > 0) {
+		return node.opus.summary.segments
+	}
+	return [] as Array<RichSeg>
+})()
+
+const origPubText = ((): string => {
+	if (orig == null) {
+		return ''
+	}
+	const ts = orig.modules.author.pubTs
+	return ts > 0 ? dateFormat(ts, 'list') : orig.modules.author.pubTime
+})()
+
+const showMore = item.type == 'DYNAMIC_TYPE_AV' && !isDetail
+
+// ---------------------------------------------------------------- 尺寸（卡内宽 = 视口 - 24）
+const innerWidth = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowWidth - 24
+	} catch (e) {
+		return 351
+	}
+})()
+
+const screenHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowHeight
+	} catch (e) {
+		return 800
+	}
+})()
+
+/** 九宫格单元（cross = len<3 ? 2 : 3，间距 4） */
+const cellSize = Math.floor((innerWidth - 8) / 3)
+const cellStyle = 'width:' + cellSize.toString() + 'px;height:' + cellSize.toString() + 'px;'
+
+/** opus 单图：宽 = 卡宽/2，高按原图比（异常按 3:4），上限 0.6 卡宽；超 0.9 屏高标长图 */
+const singlePicWidth = Math.floor(innerWidth / 2)
+const singlePicHeight = ((): number => {
+	const pic = opusPics.length > 0 ? opusPics[0] : null
+	let ratio = 4.0 / 3.0
+	if (pic != null && pic.width > 0 && pic.height > 0) {
+		ratio = pic.height / pic.width
+	}
+	const raw = Math.round(singlePicWidth * ratio)
+	const capped = raw > innerWidth * 0.6 ? Math.round(innerWidth * 0.6) : raw
+	return capped < 60 ? 60 : capped
+})()
+const singlePicIsLong = singlePicWidth * (opusPics.length > 0 && opusPics[0].width > 0 ? opusPics[0].height / opusPics[0].width : 4.0 / 3.0) > screenHeight * 0.9
+const singlePicWidthText = singlePicWidth.toString() + 'px'
+const singlePicHeightText = singlePicHeight.toString() + 'px'
+
+/** draw 单图：源按 origAR<0.5 或宽<1920 分 2/3 列；高按比、下限比 0.4；超 0.9 屏高标长图 */
+const drawSingleWidth = ((): number => {
+	const pic = drawPics.length > 0 ? drawPics[0] : null
+	if (pic != null && pic.width >= 1920 && pic.height > 0 && pic.height / pic.width >= 0.5) {
+		return Math.floor(innerWidth / 3)
+	}
+	return Math.floor(innerWidth / 2)
+})()
+const drawSingleHeight = ((): number => {
+	const pic = drawPics.length > 0 ? drawPics[0] : null
+	let ratio = 4.0 / 3.0
+	if (pic != null && pic.width > 0 && pic.height > 0) {
+		ratio = pic.height / pic.width
+	}
+	if (ratio < 0.4) {
+		ratio = 0.4
+	}
+	const raw = Math.round(drawSingleWidth * ratio)
+	return raw > screenHeight * 0.9 ? Math.round(screenHeight * 0.9) : raw
+})()
+const drawSingleIsLong = drawPics.length > 0 && drawPics[0].width > 0 && drawPics[0].height > 0 &&
+	drawSingleWidth * (drawPics[0].height / drawPics[0].width) > screenHeight * 0.9
+const drawSingleWidthText = drawSingleWidth.toString() + 'px'
+const drawSingleHeightText = drawSingleHeight.toString() + 'px'
+
+/** 视频卡封面高（源 StyleString.aspectRatio = 16/10） */
+const coverHeight = Math.round(innerWidth * 10 / 16)
+const coverHeightText = coverHeight.toString() + 'px'
+const videoRadiusText = isDetail ? '6px' : '0px'
+const videoRadiusStyle = 'border-radius:' + videoRadiusText + ';overflow:hidden;'
+const smallVideoStyle = 'border-radius:6px;overflow:hidden;'
+
+// ---------------------------------------------------------------- 样式
+const rootStyle = computed((): string => isDetail ? 'background-color:' + cardBackground() + ';padding-bottom:12px;' : 'background-color:' + cardBackground() + ';')
+const nameStyle = computed((): string => author.vipStatus > 0 ? 'color:#FB64A3;' : 'color:' + textPrimary() + ';')
+const pubStyle = computed((): string => 'color:' + textSecondary() + ';')
+const titleTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const segTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const moreIconStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+/** 正文裁剪：feed 态 3 行（源 maxLines 3），detail 态全展 */
+const descClipStyle = isDetail ? '' : 'max-height:69px;overflow:hidden;'
+/** 引用块正文裁剪：detail 态 999 行（源 source=='detail' && floor!=2 全展），feed 态 4 行 */
+const fwdClipStyle = isDetail ? '' : 'max-height:92px;overflow:hidden;'
+
+const forwardBgStyle = ((): string => {
+	const base = isDarkMode() ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)'
+	return 'background-color:' + base + ';'
+})()
+const addBgStyle = forwardBgStyle
+/** 视频底条：源为纵向渐变，App 端渐变角度属静默坑 → 纯色半透明等价降级 */
+const videoBottomStyle = 'background-color:rgba(0,0,0,0.45);'
+
+const actionIconStyle = computed((): string => iconStyle('share', 16, textSecondary()))
+const actionTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+const likeIconStyle = computed((): string => iconStyle(liked.value ? 'thumb-up' : 'thumb-up-off', 16, liked.value ? primary : textSecondary()))
+const likeTextStyle = computed((): string => 'color:' + (liked.value ? primary : textSecondary()) + ';')
+
+const forwardText = stat == null || stat.forward.count <= 0 ? '转发' : stat.forward.count.toString()
+const commentText = stat == null || stat.comment.count <= 0 ? '评论' : stat.comment.count.toString()
+const likeText = computed((): string => likeCount.value <= 0 ? '点赞' : likeCount.value.toString())
+
+function emoteStyle(size: number): string {
+	// 源：emoji.size * 20（0.5/1/2 → 10/20/40px），上限 40 对齐源最大档
+	const side = Math.round(size * 20)
+	const capped = side > 40 ? 40 : side
+	return 'width:' + capped.toString() + 'px;height:' + capped.toString() + 'px;'
+}
+
+function isLinkSeg(type: string): boolean {
+	return type == 'RICH_TEXT_NODE_TYPE_AT' || type == 'RICH_TEXT_NODE_TYPE_TOPIC' ||
+		type == 'RICH_TEXT_NODE_TYPE_WEB' || type == 'RICH_TEXT_NODE_TYPE_VOTE' ||
+		type == 'RICH_TEXT_NODE_TYPE_LOTTERY' || type == 'RICH_TEXT_NODE_TYPE_GOODS'
+}
+
+/** 段展示文本：文本段用 origText，@与链接段用 text（源同款口径） */
+function segText(seg: RichSeg): string {
+	if (seg.type == 'RICH_TEXT_NODE_TYPE_TEXT') {
+		return seg.origText
+	}
+	if (seg.type == 'RICH_TEXT_NODE_TYPE_AT') {
+		return ' ' + seg.text
+	}
+	if (seg.type == 'RICH_TEXT_NODE_TYPE_TOPIC' || seg.type == 'RICH_TEXT_NODE_TYPE_LOTTERY' || seg.type == 'RICH_TEXT_NODE_TYPE_GOODS') {
+		return seg.origText + ' '
+	}
+	return seg.text
+}
+
+function videoStatText(arc: DynamicArchive): string {
+	let text = arc.durationText
+	if (arc.stat.play.length > 0) {
+		text = (text.length > 0 ? text + '  ' : '') + arc.stat.play + '次围观'
+	}
+	if (arc.stat.danmaku.length > 0) {
+		text = text + '  ' + arc.stat.danmaku + '条弹幕'
+	}
+	return text
+}
+
+// ---------------------------------------------------------------- 交互
+function onPreview(pics: Array<DynamicPicture>, index: number) {
+	const urls: Array<string> = []
+	for (let i = 0; i < pics.length; i++) {
+		urls.push(pics[i].src)
+	}
+	if (urls.length == 0) {
+		return
+	}
+	uni.previewImage({ urls: urls, current: index })
+}
+
+function onAuthorTap() {
+	// 源：番剧作者（AUTHOR_TYPE_PGC）不进主页
+	if (author.type == 'AUTHOR_TYPE_PGC' || author.mid <= 0) {
+		return
+	}
+	navigateTo(RT.member, 'mid=' + author.mid.toString())
+}
+
+function onFwdAuthorTap() {
+	if (orig == null || orig.modules.author.mid <= 0) {
+		return
+	}
+	navigateTo(RT.member, 'mid=' + orig.modules.author.mid.toString())
+}
+
+/** 整卡点击（源 pushDetail 路由矩阵） */
+function onCardTap() {
+	if (item.type == 'DYNAMIC_TYPE_FORWARD' || item.type == 'DYNAMIC_TYPE_DRAW' || item.type == 'DYNAMIC_TYPE_WORD') {
+		openDetail(item.idStr, props.floor)
+		return
+	}
+	if (item.type == 'DYNAMIC_TYPE_AV') {
+		const arc = major == null ? null : major.archive
+		if (arc != null && arc.bvid.length > 0 && arc.bvid != '0') {
+			navigateTo(RT.video, 'bvid=' + arc.bvid)
+		}
+		return
+	}
+	if (item.type == 'DYNAMIC_TYPE_UGC_SEASON') {
+		const season = major == null ? null : major.ugcSeason
+		if (season != null && season.bvid.length > 0 && season.bvid != '0') {
+			navigateTo(RT.video, 'bvid=' + season.bvid)
+		} else {
+			uni.showToast({ title: '合集信息缺失，暂时无法打开', icon: 'none' })
+		}
+		return
+	}
+	if (item.type == 'DYNAMIC_TYPE_ARTICLE' || item.type == 'DYNAMIC_TYPE_PGC' || item.type == 'DYNAMIC_TYPE_PGC_UNION') {
+		uni.showToast({ title: '内容域接入后开放', icon: 'none' })
+		return
+	}
+	if (item.type == 'DYNAMIC_TYPE_LIVE_RCMD') {
+		uni.showToast({ title: '直播域接入后开放', icon: 'none' })
+		return
+	}
+}
+
+/** 视频卡点击：AV/合集直跳视频页（新端惯例只传 bvid，cid 由视频页自取） */
+function onVideoTap(arc: DynamicArchive) {
+	if (arc.bvid.length > 0 && arc.bvid != '0') {
+		navigateTo(RT.video, 'bvid=' + arc.bvid)
+	}
+}
+
+/** 转发引用块点击：进 orig 的详情（floor=2，评论 oid 走 viewinfo/draw 链） */
+function onOrigTap() {
+	if (orig == null || orig.idStr.length == 0) {
+		return
+	}
+	openDetail(orig.idStr, 2)
+}
+
+function openDetail(id: string, floor: number) {
+	if (id.length == 0) {
+		return
+	}
+	navigateTo(RT.dynamicDetail, 'id=' + id + '&floor=' + floor.toString())
+}
+
+function onLiveRcmdTap() {
+	uni.showToast({ title: '直播域接入后开放', icon: 'none' })
+}
+
+/** 附加卡 UGC：从 jumpUrl 提取 BV 号跳视频（源同款正则语义，手写扫描避免引入正则差异） */
+function onAddUgcTap() {
+	const ugc = additionalUgc
+	if (ugc == null) {
+		return
+	}
+	const bvid = extractBvid(ugc.jumpUrl)
+	if (bvid.length > 0) {
+		navigateTo(RT.video, 'bvid=' + bvid)
+	}
+}
+
+function extractBvid(text: string): string {
+	const prefix = 'BV'
+	const BV_LEN = 12
+	let start = text.indexOf(prefix)
+	while (start >= 0) {
+		const end = start + BV_LEN
+		if (end <= text.length) {
+			return text.substring(start, end)
+		}
+		start = text.indexOf(prefix, start + 1)
+	}
+	return ''
+}
+
+/** 富文本 BV 段点击：rid 即 bvid */
+function onSegBvTap(seg: RichSeg) {
+	if (seg.rid.length > 0) {
+		navigateTo(RT.video, 'bvid=' + seg.rid)
+	}
+}
+
+/** 更多钮（仅 AV）：稍后再看（源 MorePanel，真实接线 api/history laterAdd） */
+async function onLaterTap() {
+	const arc = major == null ? null : major.archive
+	if (arc == null || arc.bvid.length == 0 || arc.bvid == '0') {
+		return
+	}
+	const res = await laterAdd(arc.bvid)
+	uni.showToast({ title: res.status ? '已加入稍后再看' : res.message, icon: 'none' })
+}
+
+/** 转发钮：转发弹层组件不在本批清单（api 已就绪 createDynamicForward），占位提示 */
+function onForwardTap() {
+	uni.showToast({ title: '转发功能随投稿面板接入后开放', icon: 'none' })
+}
+
+/** 评论钮：直达详情页评论区 */
+function onCommentTap() {
+	const floor = props.floor == 2 ? 2 : 1
+	navigateTo(RT.dynamicDetail, 'id=' + item.idStr + '&floor=' + floor.toString() + '&action=comment')
+}
+
+/** 点赞：乐观更新 → 失败回滚 + toast；处理中防重（源 ActionPanel 同款） */
+async function onLikeTap() {
+	if (liking.value) {
+		return
+	}
+	liking.value = true
+	const nextLiked = !liked.value
+	const nextCount = nextLiked ? likeCount.value + 1 : (likeCount.value > 1 ? likeCount.value - 1 : 0)
+	liked.value = nextLiked
+	likeCount.value = nextCount
+	const res = await likeDynamic(item.idStr, nextLiked ? 1 : 2)
+	liking.value = false
+	if (!res.status) {
+		// 回滚
+		liked.value = !nextLiked
+		likeCount.value = nextLiked ? (likeCount.value > 0 ? likeCount.value - 1 : 0) : likeCount.value + 1
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	uni.showToast({ title: nextLiked ? '点赞成功' : '取消赞', icon: 'none' })
+}
+</script>
+
+<style>
+	.dp {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 12px;
+		border-bottom-width: 8px;
+		border-bottom-style: solid;
+		border-bottom-color: rgba(128, 128, 128, 0.05);
+	}
+	.dp-author {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-bottom: 8px;
+	}
+	.dp-avatar {
+		width: 40px;
+		height: 40px;
+	}
+	.dp-author-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-right: 8px;
+	}
+	.dp-name {
+		font-size: 14px;
+		font-weight: 500;
+	}
+	.dp-pub {
+		font-size: 11px;
+		margin-top: 2px;
+	}
+	.dp-more {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.dp-more-icon {
+		font-size: 18px;
+	}
+	.dp-content {
+		display: flex;
+		flex-direction: column;
+		padding-bottom: 6px;
+	}
+	.dp-topic {
+		font-size: 14px;
+		margin-bottom: 4px;
+	}
+	.dp-richtext {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+	.dp-seg-text {
+		font-size: 14px;
+		line-height: 23px;
+	}
+	.dp-seg-link {
+		font-size: 14px;
+		line-height: 23px;
+	}
+	.dp-emote {
+		margin-top: 1px;
+	}
+	.dp-pics {
+		position: relative;
+		margin-top: 4px;
+	}
+	.dp-pic-long {
+		position: absolute;
+		left: 6px;
+		bottom: 6px;
+	}
+	.dp-pics-grid {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		margin-top: 4px;
+	}
+	.dp-pics-cell {
+		margin-right: 4px;
+		margin-bottom: 4px;
+		border-radius: 4px;
+		overflow: hidden;
+	}
+	.dp-major {
+		display: flex;
+		flex-direction: column;
+	}
+	.dp-video {
+		position: relative;
+	}
+	.dp-video-badge {
+		position: absolute;
+		top: 6px;
+		right: 6px;
+	}
+	.dp-live-watched {
+		position: absolute;
+		top: 6px;
+		right: 62px;
+	}
+	.dp-video-bottom {
+		position: absolute;
+		left: 0px;
+		right: 0px;
+		bottom: 0px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: flex-end;
+		padding-left: 10px;
+		padding-right: 10px;
+		padding-bottom: 8px;
+	}
+	.dp-video-stat {
+		font-size: 12px;
+		color: #FFFFFF;
+	}
+	.dp-video-title-row {
+		display: flex;
+		flex-direction: row;
+		padding-top: 6px;
+		padding-bottom: 2px;
+	}
+	.dp-video-title {
+		font-size: 14px;
+		font-weight: bold;
+	}
+	.dp-forward {
+		display: flex;
+		flex-direction: column;
+		border-radius: 6px;
+		padding-left: 12px;
+		padding-top: 10px;
+		padding-right: 12px;
+		padding-bottom: 8px;
+	}
+	.dp-fwd-author {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.dp-fwd-name {
+		font-size: 13px;
+	}
+	.dp-fwd-time {
+		font-size: 11px;
+		margin-left: 6px;
+	}
+	.dp-fwd-nested {
+		padding-top: 4px;
+	}
+	.dp-fwd-nested-text {
+		font-size: 12px;
+	}
+	.dp-none-row {
+		flex-direction: row;
+		align-items: center;
+		padding-top: 2px;
+		padding-bottom: 4px;
+	}
+	.dp-none-text {
+		font-size: 13px;
+	}
+	.dp-add {
+		display: flex;
+		flex-direction: row;
+		margin-top: 8px;
+		border-radius: 6px;
+		padding: 8px;
+	}
+	.dp-add-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+	}
+	.dp-add-title {
+		font-size: 13px;
+		line-height: 19px;
+	}
+	.dp-add-desc {
+		font-size: 12px;
+		margin-top: 4px;
+	}
+	.dp-reserve {
+		display: flex;
+		flex-direction: column;
+		margin-top: 8px;
+		border-radius: 6px;
+		padding: 10px;
+	}
+	.dp-reserve-title {
+		font-size: 13px;
+	}
+	.dp-reserve-desc {
+		font-size: 12px;
+		margin-top: 2px;
+	}
+	.dp-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-top: 2px;
+		padding-bottom: 4px;
+	}
+	.dp-action {
+		flex: 1;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.dp-action-icon {
+		font-family: MaterialIcons;
+		font-size: 16px;
+	}
+	.dp-action-text {
+		font-size: 13px;
+		margin-left: 6px;
+	}
+</style>

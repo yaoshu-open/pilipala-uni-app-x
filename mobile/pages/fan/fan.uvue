@@ -1,0 +1,212 @@
+<template>
+	<view class="fa" :style="pageStyle">
+		<!-- 顶栏：← + 「我的/xx 的粉丝」，无任何右侧按钮（基线 P5_fan） -->
+		<app-navbar :title="titleText"></app-navbar>
+
+		<view v-if="state == 'loading'" class="fa-skeleton">
+			<view v-for="n in 8" :key="'sk-' + n.toString()" class="fa-sk-row">
+				<skeleton-block width="45px" height="45px" radius="22.5px"></skeleton-block>
+				<view class="fa-sk-lines">
+					<skeleton-block width="40%" height="14px" radius="4px"></skeleton-block>
+					<view class="fa-sk-gap"></view>
+					<skeleton-block width="70%" height="12px" radius="4px"></skeleton-block>
+				</view>
+			</view>
+		</view>
+
+		<view v-else-if="state == 'error'" class="fa-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+
+		<list-view v-else-if="items.length > 0" class="fa-list" :lower-threshold="200" @scrolltolower="onLoadMore">
+			<list-item v-for="user in items" :key="user.mid" :type="1">
+				<user-row
+					:face="user.face"
+					:uname="user.uname"
+					:subtitle="user.sign"
+					:verify-text="user.verifyType >= 0 ? user.verifyDesc : ''"
+					@tap="openMember(user.mid)"
+				></user-row>
+			</list-item>
+			<list-item :key="'footer'" :type="2">
+				<view class="fa-footer">
+					<text class="fa-footer-text" :style="footerStyle">{{ footerText }}</text>
+				</view>
+			</list-item>
+		</list-view>
+
+		<view v-else class="fa-fill">
+			<!-- 空态：树下三人插画 +「没有数据」（基线同款） -->
+			<empty-illus text="没有数据"></empty-illus>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import UserRow from '../../components/relation/user-row.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchFans } from '../../api/relation.uts'
+import { FansItem } from '../../models/relation.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground, textSecondary } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 粉丝页（源头：lib/pages/fan/{view,controller}.dart + widgets/fan_item.dart）。
+ *
+ * 顶栏仅标题（源无 actions）；条目=头像+昵称+签名（源 fan_item 头像 38，新端统一走
+ * user-row 45——设计 §七/§九 共用行口径）；pn 分页 20/页，尾行 loadingText。
+ * 源有下拉刷新，设计 §八 限定下拉刷新仅 fav/blacklist/history——本页不设，登记差异。
+ */
+const PAGE_SIZE: number = 20
+
+const mid = ref<number>(0)
+const nameParam = ref<string>('')
+const isOwner = ref<boolean>(false)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const items = ref<Array<FansItem>>([])
+const page = ref<number>(1)
+const total = ref<number>(0)
+const loading = ref<boolean>(false)
+const noMore = ref<boolean>(false)
+const footerText = ref<string>('加载中...')
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footerStyle = computed((): string => 'color:' + textSecondary() + ';padding-bottom:' + (safeAreaBottom() + 16).toString() + 'px;')
+const titleText = computed((): string => isOwner.value ? '我的粉丝' : (nameParam.value.length > 0 ? nameParam.value + '的粉丝' : 'Ta 的粉丝'))
+
+async function loadPage(first: boolean) {
+	if (loading.value) {
+		return
+	}
+	if (first) {
+		page.value = 1
+		noMore.value = false
+		footerText.value = '加载中...'
+		if (state.value != 'ready') {
+			state.value = 'loading'
+		}
+	}
+	loading.value = true
+	const res = await fetchFans(mid.value, page.value, PAGE_SIZE)
+	loading.value = false
+	if (!res.status) {
+		if (state.value != 'ready') {
+			state.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	if (first) {
+		items.value = res.items
+		total.value = res.total
+	} else {
+		for (let i = 0; i < res.items.length; i++) {
+			items.value.push(res.items[i])
+		}
+	}
+	page.value = page.value + 1
+	if ((page.value == 2 && total.value < PAGE_SIZE) || res.items.length == 0) {
+		noMore.value = true
+		footerText.value = '没有更多了'
+	}
+	if (state.value != 'ready') {
+		state.value = 'ready'
+	}
+}
+
+function onLoadMore() {
+	if (noMore.value || loading.value || state.value != 'ready') {
+		return
+	}
+	loadPage(false)
+}
+
+function reload() {
+	state.value = 'loading'
+	loadPage(true)
+}
+
+function openMember(targetMid: number) {
+	if (targetMid <= 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/member/member?mid=' + targetMid.toString() })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	const myMid = userState.info.mid
+	if (rawMid != null && (rawMid as string).length > 0) {
+		const parsed = parseInt(rawMid as string)
+		mid.value = isNaN(parsed) ? myMid : parsed
+	} else {
+		mid.value = myMid
+	}
+	const rawName = options != null ? options['name'] : null
+	nameParam.value = rawName == null ? '' : decodeURIComponent(rawName as string)
+	isOwner.value = mid.value == myMid && myMid > 0
+	if (!isOwner.value && nameParam.value.length == 0) {
+		nameParam.value = 'Ta'
+	}
+	loadPage(true)
+})
+</script>
+
+<style>
+	.fa {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fa-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fa-list {
+		flex: 1;
+	}
+	.fa-skeleton {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-top: 8px;
+	}
+	.fa-sk-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-left: 16px;
+		margin-right: 16px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.fa-sk-lines {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 12px;
+	}
+	.fa-sk-gap {
+		height: 8px;
+	}
+	.fa-footer {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		height: 60px;
+	}
+	.fa-footer-text {
+		font-size: 13px;
+	}
+</style>

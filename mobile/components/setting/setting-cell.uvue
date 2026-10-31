@@ -1,0 +1,138 @@
+<template>
+	<view class="sc" :style="rowStyle" @click="onTap">
+		<view class="sc-main">
+			<text class="sc-title" :style="titleStyle">{{ title }}</text>
+			<text v-if="subTitle.length > 0" class="sc-sub" :style="subStyle">{{ subTitle }}</text>
+		</view>
+		<!-- 右槽三态：switch（开关项）/ value+箭头（选择项）/ 空（纯跳转，由行点击承载） -->
+		<view v-if="mode == 'switch'" class="sc-switch" @click.stop="onSwitchTap">
+			<view class="sc-switch-track" :style="trackStyle">
+				<view class="sc-switch-thumb" :style="thumbStyle"></view>
+			</view>
+		</view>
+		<view v-else-if="mode == 'value'" class="sc-trailing">
+			<text v-if="value.length > 0" class="sc-value" :style="valueStyle" :max-lines="1">{{ value }}</text>
+			<text class="sc-arrow" :style="arrowStyle">›</text>
+		</view>
+		<view v-else-if="mode == 'arrow'" class="sc-trailing">
+			<text class="sc-arrow" :style="arrowStyle">›</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { themeColor, currentThemeIndex, textPrimary, textSecondary, withAlpha, scaledFont } from '../../utils/theme.uts'
+
+/**
+ * 设置行组件（源头：lib/pages/setting/widgets/{switch_item,select_item}.dart 的 ListTile 形态）。
+ *
+ *  - mode='switch'：标题+副题+右侧自绘 switch（源 Transform.scale(0.8) 的等价：整体缩小 0.8）；
+ *    行点击与 switch 点击都触发 toggle（源 ListTile onTap + Switch onChanged 双入口同款）。
+ *  - mode='value'：标题+副题+右值+›箭头（源 SelectItem：副题/右值展示当前选项）。
+ *  - mode='arrow'：标题+副题+›箭头（纯跳转子页，源 ListTile 无 trailing 形态）。
+ *
+ * 状态由父页持有（value/on 由 props 传入，变更经事件上抛后写 SK 再回流）——
+ * 设置项读写唯一入口在父页，组件不做存储。
+ *
+ * 静默坑自查：switch 轨道位移不用 transition（App 端多值 transition 静默失效坑），v-if 直切。
+ */
+	const props = defineProps({
+		title: { type: String, default: '' },
+		subTitle: { type: String, default: '' },
+		/** switch = 开关行；value = 右值+箭头；arrow = 纯箭头 */
+		mode: { type: String, default: 'arrow' },
+		value: { type: String, default: '' },
+		on: { type: Boolean, default: false },
+		/** 开关项的 SK 键名（随 toggle 事件回传，父页按键分发——免模板内联箭头函数） */
+		switchKey: { type: String, default: '' }
+	})
+
+const emit = defineEmits(['tap', 'toggle'])
+
+// 样式一律 computed：主题切换后已挂载页面要当拍换色（theme.uts 的 themeTick 驱动）
+const primary = computed((): string => themeColor(currentThemeIndex()))
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';font-size:' + scaledFont(16) + ';')
+const subStyle = computed((): string => 'color:' + textSecondary() + ';font-size:' + scaledFont(12) + ';')
+const valueStyle = computed((): string => 'color:' + textSecondary() + ';font-size:' + scaledFont(12) + ';')
+const arrowStyle = computed((): string => 'color:' + withAlpha(textSecondary(), 0.7) + ';font-size:18px;')
+const rowStyle: string = 'background-color:transparent;'
+
+/** 自绘 switch：轨道 40x24（0.8 缩放后视觉约 32x19，对齐源缩放观感） */
+const trackStyle = computed((): string => {
+	return 'background-color:' + (props.on ? withAlpha(primary.value, 0.5) : '#B9BEC8') + ';'
+})
+const thumbStyle = computed((): string => {
+	return 'background-color:' + (props.on ? primary.value : '#FFFFFF') + ';margin-left:' + (props.on ? '18px' : '2px') + ';'
+})
+
+function onTap() {
+	if (props.mode == 'switch') {
+		emit('toggle', !props.on, props.switchKey)
+		return
+	}
+	emit('tap')
+}
+
+function onSwitchTap() {
+	emit('toggle', !props.on, props.switchKey)
+}
+</script>
+
+<style>
+	.sc {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.sc-main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		margin-right: 12px;
+	}
+	.sc-title {
+		font-size: 16px;
+		line-height: 24px;
+	}
+	.sc-sub {
+		font-size: 12px;
+		line-height: 18px;
+		margin-top: 2px;
+	}
+	.sc-trailing {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		flex-shrink: 0;
+	}
+	.sc-value {
+		font-size: 12px;
+		max-width: 180px;
+		margin-right: 4px;
+	}
+	.sc-arrow {
+		font-size: 18px;
+	}
+	.sc-switch {
+		flex-shrink: 0;
+	}
+	.sc-switch-track {
+		width: 40px;
+		height: 24px;
+		border-radius: 12px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.sc-switch-thumb {
+		width: 20px;
+		height: 20px;
+		border-radius: 10px;
+	}
+</style>

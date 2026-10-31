@@ -1,0 +1,146 @@
+<template>
+	<view class="lc" @click="onTap">
+		<view class="lc-cover" :style="coverStyle">
+			<network-img class="lc-cover-img" :src="pic" width="100%" height="100%" radius="10px"></network-img>
+			<!-- 底部渐变遮罩条（源 VideoStat：仅多列显示，高 50、上内边距 26、左右 10） -->
+			<view v-if="columns != 1" class="lc-stat">
+				<text v-if="areaName.length > 0" class="lc-stat-area" :max-lines="1">{{ areaName }}</text>
+				<text v-if="watchedText.length > 0" class="lc-stat-watch" :max-lines="1">{{ watchedText }}</text>
+			</view>
+		</view>
+		<view class="lc-info" :style="infoStyle">
+			<text class="lc-title" :style="titleStyle" :max-lines="titleLines">{{ title }}</text>
+			<view class="lc-meta">
+				<text class="lc-uname" :max-lines="1">{{ uname }}</text>
+				<!-- 单列时源在主播名右侧追加「• 分区」与「• N人观看」 -->
+				<text v-if="columns == 1 && areaName.length > 0" class="lc-uname"> • {{ areaName }}</text>
+				<text v-if="columns == 1 && watchedText.length > 0" class="lc-uname"> • {{ watchedText }}人观看</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+
+/**
+ * 直播卡（源头：`lib/pages/live/widgets/live_item.dart` LiveCardV）。
+ *
+ * 结构（严格按源码，不自行增删）：
+ *  - 封面 AspectRatio 16/10、圆角 StyleString.imgRadius=10，底部 VideoStat 渐变条（高 50，
+ *    padding-top 26 / 左右 10，左分区名 + 右 watched_show.text_small，11 号白）——**仅多列显示**；
+ *  - 文字区 padding：单列 (9,9,9,4) / 多列 (5,8,5,4)；
+ *  - 标题 fontWeight 500 + letterSpacing 0.3，行数：单列 1 行 / 多列 2 行；
+ *  - 主播名 12 号 outline 色；单列时右侧追加「 • 分区」「 • N人观看」。
+ *
+ * 卡片无底色（源为透明 Column，页面背景直接透出），封面圆角由 ClipRRect 裁切。
+ * 卡片只负责展示与点击（emit tap），跳转由页面执行。
+ */
+const props = defineProps({
+	pic: { type: String, default: '' },
+	title: { type: String, default: '' },
+	uname: { type: String, default: '' },
+	/** 分区名（父级已按 area_name → parent_name 降级） */
+	areaName: { type: String, default: '' },
+	/** watched_show.text_small 原文（如「5009」「1.2万」）；空则不显示 */
+	watchedText: { type: String, default: '' },
+	/** 列数（源 crossAxisCount，决定行数与内边距） */
+	columns: { type: Number, default: 2 },
+	/** 封面高度（px 文本 = 列宽 /(16/10)） */
+	coverHeight: { type: String, default: '110px' }
+})
+
+const emit = defineEmits(['tap'])
+
+const coverStyle = computed((): string => 'height:' + props.coverHeight + ';')
+const titleLines = computed((): number => props.columns == 1 ? 1 : 2)
+const infoStyle = computed((): string => {
+	if (props.columns == 1) {
+		return 'padding-left:9px;padding-right:9px;padding-top:9px;padding-bottom:4px;'
+	}
+	return 'padding-left:5px;padding-right:5px;padding-top:8px;padding-bottom:4px;'
+})
+const titleStyle = computed((): string => {
+	return 'letter-spacing:0.3px;'
+})
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	.lc {
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+
+	.lc-cover {
+		position: relative;
+		width: 100%;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+
+	.lc-cover-img {
+		width: 100%;
+		height: 100%;
+	}
+
+	/* 渐变条：App 端渐变角度为静默坑，统一用方向关键词 + 半透明兜底底色 */
+	.lc-stat {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 50px;
+		padding-top: 26px;
+		padding-left: 10px;
+		padding-right: 10px;
+		display: flex;
+		flex-direction: row;
+		align-items: flex-start;
+		justify-content: space-between;
+		background-color: rgba(0, 0, 0, 0.12);
+		background-image: linear-gradient(to bottom, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.54));
+	}
+
+	.lc-stat-area {
+		font-size: 11px;
+		color: #FFFFFF;
+	}
+
+	.lc-stat-watch {
+		font-size: 11px;
+		color: #FFFFFF;
+	}
+
+	.lc-info {
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		justify-content: space-between;
+		overflow: hidden;
+	}
+
+	.lc-title {
+		font-size: 14px;
+		font-weight: 500;
+		line-height: 19px;
+	}
+
+	.lc-meta {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+		overflow: hidden;
+	}
+
+	.lc-uname {
+		font-size: 12px;
+		line-height: 16px;
+	}
+</style>

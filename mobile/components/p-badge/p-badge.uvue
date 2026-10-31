@@ -1,0 +1,75 @@
+<template>
+	<view class="p-badge" :style="badgeStyle">
+		<text class="p-badge-text" :style="textStyle">{{ text }}</text>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { themeColor, currentThemeIndex } from '../../utils/theme.uts'
+
+/**
+ * 角标（源头：`lib/common/widgets/badge.dart` PBadge）。
+ *  - primary：主色底 + 白字（默认）
+ *  - gray：黑 40% 底 + 白字（封面时长）
+ *  - color：主色 12% 底 + 主色字（已关注 / 推荐理由）
+ *  - line：透明底 + 主色描边（番剧 / 动态）
+ * 尺寸：medium（内边距 1/6、圆角 4）、small（内边距 0/3、圆角 3）。
+ */
+const props = defineProps({
+	text: { type: String, default: '' },
+	type: { type: String, default: 'primary' },
+	size: { type: String, default: 'medium' },
+	fontSize: { type: Number, default: 11 }
+})
+
+const primary = themeColor(currentThemeIndex())
+
+/** #RRGGBB → rgba(r,g,b,a)，App 端 8 位 hex 不可靠，统一转 rgba */
+function hexAlpha(hex: string, alpha: number): string {
+	const text = hex.startsWith('#') ? hex.substring(1) : hex
+	const r = parseInt(text.substring(0, 2), 16)
+	const g = parseInt(text.substring(2, 4), 16)
+	const b = parseInt(text.substring(4, 6), 16)
+	return 'rgba(' + r.toString() + ',' + g.toString() + ',' + b.toString() + ',' + alpha.toString() + ')'
+}
+
+const badgeStyle = computed((): string => {
+	const small = props.size == 'small'
+	const radius = small ? '3px' : '4px'
+	const padding = small ? 'padding-left:3px;padding-right:3px;padding-top:0;padding-bottom:0;' : 'padding-left:6px;padding-right:6px;padding-top:1px;padding-bottom:1px;'
+	let background = primary
+	let border = 'border-width:0;'
+	if (props.type == 'gray') {
+		background = 'rgba(0,0,0,0.4)'
+	}
+	if (props.type == 'color') {
+		background = hexAlpha(primary, 0.14)
+	}
+	if (props.type == 'line') {
+		background = 'rgba(0,0,0,0)'
+		border = 'border-width:1px;border-style:solid;border-color:' + primary + ';'
+	}
+	return 'background-color:' + background + ';' + border + padding + 'border-radius:' + radius + ';'
+})
+
+const textStyle = computed((): string => {
+	let color = '#FFFFFF'
+	if (props.type == 'color' || props.type == 'line') {
+		color = primary
+	}
+	return 'font-size:' + props.fontSize.toString() + 'px;color:' + color + ';'
+})
+</script>
+
+<style>
+	.p-badge {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.p-badge-text {
+		font-size: 11px;
+	}
+</style>

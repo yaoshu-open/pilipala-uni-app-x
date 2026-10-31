@@ -1,0 +1,140 @@
+import { apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { appSign } from '../utils/sign.uts'
+import { APP_KEY, APP_SEC } from '../utils/constants.uts'
+import { strOf, numOf, objOf } from '../utils/json.uts'
+import { setAccessKey } from '../utils/storage.uts'
+import { logError, logInfo } from '../utils/logger.uts'
+
+/**
+ * access_key 换取（TV 端扫码确认链，源头 `lib/http/member.dart#cookieToKey`）。
+ *
+ * 流程（源逐段照搬）：
+ *  1. `getTVCode`：POST passport.snm0516.aisee.tv/x/passport-tv-login/qrcode/auth_code
+ *     —— appkey/local_id/ts + appSign 签名，返回 auth_code；
+ *  2. `cookieToKey`：POST passport /x/passport-tv-login/h5/qrcode/confirm
+ *     —— body { auth_code, build:708200, csrf }（cookie 里的 bili_jct）；
+ *  3. `qrcodePoll`：POST passport /x/passport-tv-login/qrcode/poll
+ *     —— appkey/auth_code/local_id/ts + appSign 签名，返回 data.access_token。
+ *
+ * 用途：推荐设置选「app 端推荐」时换取 access_key（源会先弹风控确认层）。
+ * 失败一律返回 status=false + 可读 message（含 csrf 缺失的明确文案），不静默成功。
+ */
+
+const TV_AUTH_CODE_URL: string =
+	'https://passport.snm0516.aisee.tv/x/passport-tv-login/qrcode/auth_code'
+const TV_CONFIRM_URL: string = 'https://passport.bilibili.com/x/passport-tv-login/h5/qrcode/confirm'
+const TV_POLL_URL: string = 'https://passport.bilibili.com/x/passport-tv-login/qrcode/poll'
+
+export class AccessKeyResult {
+	status: boolean = false
+	message: string = ''
+}
+
+function messageOf(res: UTSJSONObject | null): string {
+	if (res == null) {
+		return '网络异常，请稍后重试'
+	}
+	const message = res.getString('message')
+	if (message == null || message.length == 0) {
+		return '请求异常'
+	}
+	return message
+}
+
+function codeOf(res: UTSJSONObject | null): number {
+	if (res == null) {
+		return -1
+	}
+	const code = res.getNumber('code')
+	return code == null ? -1 : code
+}
+
+/** ① 申请 TV 端 auth_code（源 getTVCode） */
+async function requestAuthCode(): Promise<string> {
+	const params = new Params()
+	params.set('appkey', APP_KEY)
+	params.set('local_id', '0')
+	params.set('ts', Math.floor(Date.now() / 1000).toString())
+	const sign = appSign(params, APP_KEY, APP_SEC)
+	const query = params.clone()
+	query.set('sign', sign)
+	const res = await apiPost(TV_AUTH_CODE_URL, null, query)
+	if (codeOf(res) != 0) {
+		logError('accesskey', 'auth_code failed: ' + messageOf(res))
+		return ''
+	}
+	const data = res == null ? null : objOf(res as UTSJSONObject, 'data')
+	if (data == null) {
+		return ''
+	}
+	return strOf(data, 'auth_code')
+}
+
+/** ③ 轮询换取 access_token（源 qrcodePoll） */
+async function pollAccessKey(authCode: string): Promise<string> {
+	const params = new Params()
+	params.set('appkey', APP_KEY)
+	params.set('auth_code', authCode)
+	params.set('local_id', '0')
+	params.set('ts', Math.floor(Date.now() / 1000).toString())
+	const sign = appSign(params, APP_KEY, APP_SEC)
+	const query = params.clone()
+	query.set('sign', sign)
+	const res = await apiPost(TV_POLL_URL, null, query)
+	if (codeOf(res) != 0) {
+		logError('accesskey', 'poll failed: ' + messageOf(res))
+		return ''
+	}
+	const data = res == null ? null : objOf(res as UTSJSONObject, 'data')
+	if (data == null) {
+		return ''
+	}
+	return strOf(data, 'access_token')
+}
+
+/**
+ * 换取并落盘 access_key（成功时写 CK.accessKey = {mid, value}）。
+ * @param mid 当前登录用户 mid（只作溯源记录，取不到传 0）
+ */
+export async function cookieToKey(mid: number): Promise<AccessKeyResult> {
+	const result = new AccessKeyResult()
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		// 与其它写接口一致：凭据缺失明确失败，不假装换取成功
+		result.message = '登录凭据缺失，请重新登录后再试'
+		logError('accesskey', 'csrf empty, abort cookieToKey')
+		return result
+	}
+	const authCode = await requestAuthCode()
+	if (authCode.length == 0) {
+		result.message = '获取授权码失败，请稍后重试'
+		return result
+	}
+	// ② confirm：把 auth_code 与当前登录态绑定（body 带 csrf）
+	const body: UTSJSONObject = {}
+	body.set('auth_code', authCode)
+	body.set('build', 708200)
+	body.set('csrf', csrf)
+	const confirmRes = await apiPost(TV_CONFIRM_URL, body, null)
+	if (codeOf(confirmRes) != 0) {
+		result.message = messageOf(confirmRes)
+		return result
+	}
+	// 源在 confirm 后延迟 300ms 再 poll，避免服务端尚未就绪
+	await new Promise<void>((resolve) => {
+		setTimeout(() => {
+			resolve()
+		}, 300)
+	})
+	const accessKey = await pollAccessKey(authCode)
+	if (accessKey.length == 0) {
+		result.message = 'access_key 获取失败，请稍后重试'
+		return result
+	}
+	setAccessKey(mid, accessKey)
+	result.status = true
+	result.message = '操作成功'
+	logInfo('accesskey', 'access_key saved mid=' + mid.toString())
+	return result
+}

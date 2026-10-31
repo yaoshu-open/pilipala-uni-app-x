@@ -1,0 +1,234 @@
+<template>
+	<view class="nb" :style="pageStyle">
+		<app-navbar title="Navbar编辑">
+			<template #right>
+				<view class="nb-save" @click="save">
+					<text class="nb-save-text" :style="saveStyle">保存</text>
+				</view>
+			</template>
+		</app-navbar>
+
+		<scroll-view class="nb-scroll" direction="vertical">
+			<view class="nb-list">
+				<view v-for="(tab, index) in tabs" :key="tab.id.toString()" class="nb-row">
+					<!-- 源 CheckboxListTile 的 secondary 位：左侧拖拽把手图标（顺序用行内 ↑↓ 调整） -->
+					<text class="nb-drag" :style="dragStyle">{{ dragGlyph }}</text>
+					<text class="nb-label" :style="labelStyle(tab.checked)">{{ tab.label }}</text>
+					<view class="nb-actions">
+						<view class="nb-move" @click="move(index, -1)">
+							<text class="nb-move-glyph" :style="moveStyle(index, -1)">↑</text>
+						</view>
+						<view class="nb-move" @click="move(index, 1)">
+							<text class="nb-move-glyph" :style="moveStyle(index, 1)">↓</text>
+						</view>
+					</view>
+					<view class="nb-check" :style="checkStyle(tab.checked)" @click="onCheck(tab)">
+						<text v-if="tab.checked" class="nb-check-mark">✓</text>
+					</view>
+				</view>
+			</view>
+			<view class="nb-foot" :style="footStyle"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import { pageBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { SK, getNumberArray, setNumberArray } from '../../utils/storage.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+
+/**
+ * 底部导航栏编辑（源头：lib/pages/setting/pages/navigation_bar_set.dart）。
+ *
+ *  - 数据源：SK.navBarSort（数字 id 数组，源默认 [0,1,2,3]）；四入口 =
+ *    源 defaultNavigationBars（首页/排行榜/动态/媒体库）。
+ *  - 消费方：main.uvue 底栏当前为固定序（未读 navBarSort）——本页先落编辑与写键，
+ *    main 底栏接线由集成阶段登记（P10 报告接线点）。
+ *  - 排序取上移/下移按钮（拖拽兜底，同 home-tabbar-set）；非法集（<2）拒绝保存。
+ */
+
+type NavRow = {
+	id: number
+	label: string
+	checked: boolean
+}
+
+/** 全量底栏入口（源 defaultNavigationBars：id/label） */
+const ALL_NAVS: string[][] = [
+	['0', '首页'],
+	['1', '排行榜'],
+	['2', '动态'],
+	['3', '媒体库']
+]
+
+function buildRows(): Array<NavRow> {
+	const sort = getNumberArray(SK.navBarSort, [0, 1, 2, 3])
+	const rows: Array<NavRow> = []
+	for (let i = 0; i < sort.length; i++) {
+		for (let j = 0; j < ALL_NAVS.length; j++) {
+			if (parseInt(ALL_NAVS[j][0]) == sort[i]) {
+				rows.push({ id: sort[i], label: ALL_NAVS[j][1], checked: true } as NavRow)
+			}
+		}
+	}
+	for (let j = 0; j < ALL_NAVS.length; j++) {
+		const id = parseInt(ALL_NAVS[j][0])
+		let found = false
+		for (let i = 0; i < sort.length; i++) {
+			if (sort[i] == id) {
+				found = true
+				break
+			}
+		}
+		if (!found) {
+			rows.push({ id: id, label: ALL_NAVS[j][1], checked: false } as NavRow)
+		}
+	}
+	return rows
+}
+
+const tabs = ref<Array<NavRow>>(buildRows())
+
+const primary: string = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+const saveStyle: string = 'color:' + primary + ';'
+const dragGlyph = glyphOf('drag-indicator')
+const dragStyle: string = iconStyle('drag-indicator', 22, textSecondary())
+
+function checkStyle(checked: boolean): string {
+	if (checked) {
+		return 'background-color:' + primary + ';border-color:' + primary + ';'
+	}
+	return 'background-color:transparent;border-color:' + withAlpha(textSecondary(), 0.5) + ';'
+}
+
+function labelStyle(checked: boolean): string {
+	return 'color:' + (checked ? textPrimary() : textSecondary()) + ';'
+}
+
+function moveStyle(index: number, delta: number): string {
+	const target = index + delta
+	if (target < 0 || target >= tabs.value.length) {
+		return 'color:' + withAlpha(textSecondary(), 0.3) + ';'
+	}
+	return 'color:' + textSecondary() + ';'
+}
+
+function onCheck(row: NavRow) {
+	row.checked = !row.checked
+}
+
+function move(index: number, delta: number) {
+	const target = index + delta
+	if (target < 0 || target >= tabs.value.length) {
+		return
+	}
+	const next: Array<NavRow> = []
+	for (let i = 0; i < tabs.value.length; i++) {
+		next.push(tabs.value[i])
+	}
+	const item = next[index]
+	next.splice(index, 1)
+	next.splice(target, 0, item)
+	tabs.value = next
+}
+
+function save() {
+	const list: number[] = []
+	for (let i = 0; i < tabs.value.length; i++) {
+		if (tabs.value[i].checked) {
+			list.push(tabs.value[i].id)
+		}
+	}
+	if (list.length < 2) {
+		uni.showToast({ title: '至少保留两个入口', icon: 'none' })
+		return
+	}
+	setNumberArray(SK.navBarSort, list)
+	uni.showToast({ title: '保存成功，下次启动时生效', icon: 'none' })
+}
+</script>
+
+<style>
+	.nb {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.nb-scroll {
+		flex: 1;
+	}
+	.nb-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.nb-row {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.nb-check {
+		width: 22px;
+		height: 22px;
+		border-radius: 6px;
+		border-width: 2px;
+		border-style: solid;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		margin-right: 14px;
+		flex-shrink: 0;
+	}
+	.nb-check-mark {
+		color: #FFFFFF;
+		font-size: 14px;
+		font-weight: bold;
+	}
+	.nb-label {
+		flex: 1;
+		font-size: 16px;
+	}
+	.nb-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.nb-move {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.nb-move-glyph {
+		font-size: 18px;
+	}
+	.nb-drag {
+		font-family: MaterialIcons;
+		margin-right: 14px;
+		flex-shrink: 0;
+	}
+	.nb-save {
+		min-height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.nb-save-text {
+		font-size: 15px;
+	}
+	.nb-foot {
+		height: 1px;
+	}
+</style>

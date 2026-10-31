@@ -1,0 +1,321 @@
+<template>
+	<view class="main">
+		<view class="main-bg" :style="bgStyle"></view>
+		<view v-if="gradientEnabled" class="main-bg-gradient" :style="gradientStyle"></view>
+		<!-- 页面按「入口 id」显隐（navBarSort 只改底栏顺序，不改页面身份） -->
+		<view class="main-body">
+			<view class="main-page" v-show="currentId == 0">
+				<home-page></home-page>
+			</view>
+			<view class="main-page" v-show="currentId == 1">
+				<rank-page></rank-page>
+			</view>
+			<view class="main-page" v-show="currentId == 2">
+				<dynamics-page></dynamics-page>
+			</view>
+			<view class="main-page" v-show="currentId == 3">
+				<media-panel></media-panel>
+			</view>
+		</view>
+		<view class="main-tabbar" :style="tabbarStyle">
+			<view v-for="(tab, index) in tabs" :key="tab.key" class="main-tabbar-item" @click="onTab(index)">
+				<view class="main-tabbar-indicator" :style="indicatorStyle(index)">
+					<p-icon :name="current == index ? tab.iconOn : tab.iconOff" :size="24" :color="iconColor(index)"></p-icon>
+				</view>
+				<text class="main-tabbar-label" :style="labelStyle(index)">{{ tab.label }}</text>
+				<!-- 未读标记形态（SK.dynamicBadgeMode：0 隐藏 / 1 红点 / 2 数字） -->
+				<view v-if="tab.id == 2 && unreadDynamic > 0 && badgeMode == 1" class="main-tabbar-dot"></view>
+				<view v-if="tab.id == 2 && unreadDynamic > 0 && badgeMode == 2" class="main-tabbar-badge">
+					<text class="main-tabbar-badge-text">{{ unreadText }}</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onBackPress } from '@dcloudio/uni-app'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import MediaPanel from '../../components/media/media-panel.uvue'
+import HomePage from '../home/home.uvue'
+import RankPage from '../rank/rank.uvue'
+import DynamicsPage from '../dynamics/dynamics.uvue'
+import { themeColor, currentThemeIndex, isDarkMode, pageBackground, textSecondary, textPrimary } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { getBool, getNumber, getNumberArray, SK } from '../../utils/storage.uts'
+import { userState } from '../../stores/user.uts'
+import { homeTopSeq, homeRefreshSeq, rankTopSeq, rankRefreshSeq, dynTopSeq, dynRefreshSeq, tapTwice, collapseSignal } from '../../stores/tabSignal.uts'
+
+/**
+ * 启动宿主（源头：lib/pages/main/view.dart）。
+ *
+ * 单页承载 4 个常驻页（v-show 保活，与源 PageView + AutomaticKeepAlive 等价）：
+ * 首页 / 排行榜 / 动态（dynamics 组件，P6 接入）/ 媒体库（media-panel 组件，P5 接入）。
+ * 底栏自绘：Material3 NavigationBar 等价形态（图标 24 + 文字 12 + 选中胶囊 64×32）。
+ * 背景：enableGradientBg 开启时为主色渐变（App 端 linear-gradient 仅两色，源为三色 stops，
+ * 差异登记为平台约束）。
+ * 返回键：非首页先切首页；首页 2 秒内二次返回退出应用（源 SystemNavigator.pop 等价）。
+ */
+
+class MainTab {
+	/** 入口 id（源 defaultNavigationBars：0 首页 / 1 排行榜 / 2 动态 / 3 媒体库） */
+	id: number = 0
+	key: string = ''
+	label: string = ''
+	iconOff: string = ''
+	iconOn: string = ''
+}
+
+/** 全量入口（源 lib/models/common/nav_bar_config.dart defaultNavigationBars 同序） */
+function allTabs(): Array<MainTab> {
+	const list: Array<MainTab> = []
+	const conf: Array<Array<string>> = [
+		['0', 'home', '首页', 'home-outlined', 'home'],
+		['1', 'rank', '排行榜', 'trending-up-outlined', 'trending-up'],
+		['2', 'dynamics', '动态', 'motion-photos-on-outlined', 'motion-photos-on'],
+		['3', 'media', '媒体库', 'video-collection-outlined', 'video-collection']
+	]
+	for (let i = 0; i < conf.length; i++) {
+		const tab = new MainTab()
+		tab.id = parseInt(conf[i][0])
+		tab.key = conf[i][1]
+		tab.label = conf[i][2]
+		tab.iconOff = conf[i][3]
+		tab.iconOn = conf[i][4]
+		list.push(tab)
+	}
+	return list
+}
+
+/**
+ * 底栏入口（SK.navBarSort：数字 id 数组，隐藏的入口直接不出现、顺序即数组序）。
+ * 全部隐藏属非法值（子页保存时已拦 <2 项），这里再兜一层：结果为空则回落全量。
+ */
+function buildTabs(): Array<MainTab> {
+	const all = allTabs()
+	const sort = getNumberArray(SK.navBarSort, [0, 1, 2, 3])
+	const list: Array<MainTab> = []
+	for (let i = 0; i < sort.length; i++) {
+		for (let j = 0; j < all.length; j++) {
+			if (all[j].id == sort[i]) {
+				list.push(all[j])
+			}
+		}
+	}
+	return list.length > 0 ? list : all
+}
+
+const tabs: Array<MainTab> = buildTabs()
+
+/** 启动页（SK.defaultHomePage 命中的入口 id → 在底栏里的下标；找不到回落第一个） */
+function initialIndex(): number {
+	const target = getNumber(SK.defaultHomePage, 0)
+	for (let i = 0; i < tabs.length; i++) {
+		if (tabs[i].id == target) {
+			return i
+		}
+	}
+	return 0
+}
+
+const current = ref<number>(initialIndex())
+const currentId = computed((): number => tabs[current.value].id)
+const gradientEnabled = ref<boolean>(getBool(SK.enableGradientBg, true))
+/** 首页底栏收起（SK.hideTabBar）：内容下滑时隐藏底栏，回滑/到顶恢复 */
+const hideTabBar = ref<boolean>(getBool(SK.hideTabBar, true))
+const badgeMode = ref<number>(getNumber(SK.dynamicBadgeMode, 2))
+const primary = themeColor(currentThemeIndex())
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const safeBottom = safeAreaBottom()
+
+const bgStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const gradientStyle = computed((): string => {
+	// 两色近似：主色 → 透明（源为三色 + stops）
+	const text = primary.startsWith('#') ? primary.substring(1) : primary
+	const r = parseInt(text.substring(0, 2), 16)
+	const g = parseInt(text.substring(2, 4), 16)
+	const b = parseInt(text.substring(4, 6), 16)
+	const alpha = isDarkMode() ? 0.3 : 0.35
+	const top = 'rgba(' + r.toString() + ',' + g.toString() + ',' + b.toString() + ',' + alpha.toString() + ')'
+	return 'background-image:linear-gradient(to bottom,' + top + ',rgba(' + r.toString() + ',' + g.toString() + ',' + b.toString() + ',0));'
+})
+const tabbarStyle = computed((): string => {
+	// 收起时整条底栏让出空间（源 hideTabBar：滑动隐藏/回滑显示）
+	if (hideTabBar.value && collapseSignal.value == 1) {
+		return 'display:none;'
+	}
+	return 'height:' + (80 + safeBottom).toString() + 'px;padding-bottom:' + safeBottom.toString() + 'px;'
+})
+const unreadDynamic = computed((): number => userState.unread.dynamic)
+const unreadText = computed((): string => {
+	const count = userState.unread.dynamic
+	return count > 99 ? '99+' : count.toString()
+})
+
+function indicatorStyle(index: number): string {
+	if (current.value == index) {
+		return 'background-color:rgba(255,255,255,0.22);'
+	}
+	return 'background-color:rgba(0,0,0,0);'
+}
+
+function iconColor(index: number): string {
+	return current.value == index ? primary : textSecondary()
+}
+
+function labelStyle(index: number): string {
+	const color = current.value == index ? primary : textSecondary()
+	return 'color:' + color + ';'
+}
+
+function onTab(index: number) {
+	const tabId = tabs[index].id
+	if (current.value == index) {
+		const refresh = tapTwice('main:' + tabs[index].key)
+		if (tabId == 0) {
+			if (refresh) {
+				homeRefreshSeq.value = homeRefreshSeq.value + 1
+			} else {
+				homeTopSeq.value = homeTopSeq.value + 1
+			}
+		}
+		if (tabId == 1) {
+			if (refresh) {
+				rankRefreshSeq.value = rankRefreshSeq.value + 1
+			} else {
+				rankTopSeq.value = rankTopSeq.value + 1
+			}
+		}
+		if (tabId == 2) {
+			if (refresh) {
+				dynRefreshSeq.value = dynRefreshSeq.value + 1
+			} else {
+				dynTopSeq.value = dynTopSeq.value + 1
+			}
+		}
+		return
+	}
+	current.value = index
+	collapseSignal.value = 0
+}
+
+let lastBackTime: number = 0
+
+onBackPress(() => {
+	const now = Date.now()
+	if (current.value != 0) {
+		current.value = 0
+		uni.showToast({ title: '再按一次退出Pili', icon: 'none' })
+		lastBackTime = now
+		return true
+	}
+	if (now - lastBackTime > 2000) {
+		lastBackTime = now
+		uni.showToast({ title: '再按一次退出Pili', icon: 'none' })
+		return true
+	}
+	uni.exit()
+	return true
+})
+</script>
+
+<style>
+	.main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.main-bg {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+	}
+	.main-bg-gradient {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		height: 320px;
+	}
+	.main-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.main-page {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.main-placeholder {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.main-placeholder-text {
+		font-size: 14px;
+	}
+	.main-tabbar {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.main-tabbar-item {
+		flex: 1;
+		position: relative;
+		height: 80px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.main-tabbar-indicator {
+		width: 64px;
+		height: 32px;
+		border-radius: 16px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.main-tabbar-label {
+		font-size: 12px;
+		margin-top: 2px;
+	}
+	/* 红点形态（SK.dynamicBadgeMode=1）：8px 圆点，位置同数字徽标 */
+	.main-tabbar-dot {
+		position: absolute;
+		margin-left: 34px;
+		margin-top: -26px;
+		width: 8px;
+		height: 8px;
+		border-radius: 4px;
+		background-color: #E45C5C;
+	}
+	.main-tabbar-badge {
+		position: absolute;
+		margin-left: 34px;
+		margin-top: -26px;
+		min-width: 16px;
+		height: 16px;
+		border-radius: 8px;
+		background-color: #E45C5C;
+		padding-left: 4px;
+		padding-right: 4px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.main-tabbar-badge-text {
+		font-size: 10px;
+		color: #FFFFFF;
+	}
+</style>

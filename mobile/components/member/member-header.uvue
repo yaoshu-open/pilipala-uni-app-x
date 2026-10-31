@@ -1,0 +1,248 @@
+<template>
+	<view class="mh">
+		<!-- 头像 90 圆形 + 直播中角标（仅 liveStatus=1；点击提示直播域占位） -->
+		<view class="mh-avatar-wrap">
+			<network-img v-if="!loading" :src="face" width="90px" height="90px" radius="45px"></network-img>
+			<skeleton-block v-else width="90px" height="90px" radius="45px"></skeleton-block>
+			<view v-if="!loading && liveStatus == 1" class="mh-live" :style="liveStyle" @click="onLiveTap">
+				<text class="mh-live-text">直播中</text>
+			</view>
+		</view>
+		<view class="mh-side">
+			<view class="mh-stats">
+				<view class="mh-stat" @click="onOpenFollow">
+					<text class="mh-stat-num" :style="numStyle">{{ followingText }}</text>
+					<text class="mh-stat-label" :style="labelStyle">关注</text>
+				</view>
+				<view class="mh-stat" @click="onOpenFans">
+					<text class="mh-stat-num" :style="numStyle">{{ followerText }}</text>
+					<text class="mh-stat-label" :style="labelStyle">粉丝</text>
+				</view>
+				<view class="mh-stat">
+					<text class="mh-stat-num" :style="numStyle">{{ likesText }}</text>
+					<text class="mh-stat-label" :style="labelStyle">获赞</text>
+				</view>
+			</view>
+			<view v-if="loading" class="mh-btn-row">
+				<skeleton-block width="40%" height="40px" radius="20px"></skeleton-block>
+				<view class="mh-btn-gap"></view>
+				<skeleton-block width="40%" height="40px" radius="20px"></skeleton-block>
+			</view>
+			<!-- 他人 + 已登录：关注（状态机）+ 发消息 -->
+			<view v-else-if="!isOwner && isLogin" class="mh-btn-row">
+				<view class="mh-btn" :style="followBtnStyle" @click="onFollowTap">
+					<text class="mh-btn-text" :style="followTextStyle">{{ followText }}</text>
+				</view>
+				<view class="mh-btn-gap"></view>
+				<view class="mh-btn" :style="plainBtnStyle" @click="onWhisperTap">
+					<text class="mh-btn-text" :style="plainTextStyle">发消息</text>
+				</view>
+			</view>
+			<!-- 本人：编辑资料（源同款：点击 toast 功能开发中） -->
+			<view v-else-if="isOwner" class="mh-btn-solo" :style="solidBtnStyle" @click="onEditTap">
+				<text class="mh-btn-text" :style="solidTextStyle">编辑资料</text>
+			</view>
+			<!-- 未登录：占位按钮（源 foregroundColor outline 的禁用观感） -->
+			<view v-else class="mh-btn-solo" :style="plainBtnStyle" @click="onLoginTap">
+				<text class="mh-btn-text" :style="plainTextStyle">未登录</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import SkeletonBlock from '../skeleton/skeleton-block.uvue'
+import { numFormat } from '../../utils/format.uts'
+import {
+	textSecondary, textPrimary, themeColor, currentThemeIndex, onPrimaryText, skeletonBase
+} from '../../utils/theme.uts'
+
+/**
+ * 用户主页资料区（源头：`lib/pages/member/widgets/profile.dart` ProfilePanel）。
+ *
+ * 结构：左头像 90 圆形（直播中时左下角主色胶囊）+ 右侧统计列——
+ * 关注/粉丝/获赞三列（数值加粗、标签 12 次要色，关注/粉丝可点跳列表）+ 按钮行。
+ * 按钮三态照源：他人已登录=关注（attribute 状态机：0 关注/1 悄悄关注/2 已关注/6 已互关/
+ * 128 已拉黑，special=1 追加 SP）+发消息；本人=编辑资料；未登录=未登录占位。
+ * 未取到关系（attribute=-1，如未登录他人页）时关注按钮文字透明占位（源同款）。
+ */
+const props = defineProps({
+	face: { type: String, default: '' },
+	liveStatus: { type: Number, default: 0 },
+	following: { type: Number, default: -1 },
+	follower: { type: Number, default: -1 },
+	likes: { type: Number, default: -1 },
+	attribute: { type: Number, default: -1 },
+	special: { type: Number, default: 0 },
+	isOwner: { type: Boolean, default: false },
+	isLogin: { type: Boolean, default: false },
+	loading: { type: Boolean, default: false }
+})
+
+const emit = defineEmits(['openFollow', 'openFans', 'follow', 'whisper', 'editProfile', 'needLogin', 'openLive'])
+
+const primary = themeColor(currentThemeIndex())
+
+const numStyle = computed((): string => 'color:' + textPrimary() + ';')
+const labelStyle = computed((): string => 'color:' + textSecondary() + ';')
+/** 直播胶囊底色跟主题色（class 里的静态色仅作兜底） */
+const liveStyle = computed((): string => 'background-color:' + primary + ';')
+
+function statText(value: number): string {
+	return value < 0 ? '-' : numFormat(value)
+}
+const followingText = computed((): string => statText(props.following))
+const followerText = computed((): string => statText(props.follower))
+const likesText = computed((): string => statText(props.likes))
+
+/** 关注按钮文案（源 MemberController.relationSearch 的 attributeText 映射） */
+const followText = computed((): string => {
+	let text = '关注'
+	if (props.attribute == 1) {
+		text = '悄悄关注'
+	} else if (props.attribute == 2) {
+		text = '已关注'
+	} else if (props.attribute == 6) {
+		text = '已互关'
+	} else if (props.attribute == 128) {
+		text = '已拉黑'
+	}
+	if (props.special == 1 && props.attribute != 0 && props.attribute != 128 && props.attribute != -1) {
+		text = text + 'SP'
+	}
+	return text
+})
+
+/** 未关注=主色实心；已关注等态=浅灰底；attribute=-1 时文字透明占位（源 foregroundColor 透明） */
+const followBtnStyle = computed((): string => {
+	const bg = props.attribute == 0 ? primary : skeletonBase()
+	return 'background-color:' + bg + ';'
+})
+const followTextStyle = computed((): string => {
+	const color = props.attribute == -1 ? 'rgba(0,0,0,0)' : (props.attribute == 0 ? onPrimaryText() : textSecondary())
+	return 'color:' + color + ';'
+})
+/** 浅灰底 + 主色字（源发消息：onInverseSurface 底 + 默认主色前景） */
+const plainBtnStyle = computed((): string => 'background-color:' + skeletonBase() + ';')
+const plainTextStyle = computed((): string => 'color:' + primary + ';')
+const solidBtnStyle = computed((): string => 'background-color:' + primary + ';')
+const solidTextStyle = computed((): string => 'color:' + onPrimaryText() + ';')
+
+function onOpenFollow() {
+	emit('openFollow')
+}
+function onOpenFans() {
+	emit('openFans')
+}
+function onFollowTap() {
+	emit('follow')
+}
+function onWhisperTap() {
+	emit('whisper')
+}
+function onEditTap() {
+	emit('editProfile')
+}
+function onLoginTap() {
+	emit('needLogin')
+}
+function onLiveTap() {
+	emit('openLive')
+}
+</script>
+
+<style>
+	.mh {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.mh-avatar-wrap {
+		position: relative;
+		width: 90px;
+		height: 90px;
+	}
+	/* 直播中胶囊：头像左下角，主色底白字（源 left:14 bottom:0） */
+	.mh-live {
+		position: absolute;
+		left: 14px;
+		bottom: 0;
+		padding-left: 6px;
+		padding-right: 6px;
+		padding-top: 2px;
+		padding-bottom: 2px;
+		border-radius: 10px;
+		background-color: #5CB67B;
+	}
+	.mh-live-text {
+		font-size: 11px;
+		color: #FFFFFF;
+	}
+	.mh-side {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+	}
+	.mh-stats {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-top: 10px;
+		padding-bottom: 10px;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.mh-stat {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+	.mh-stat-num {
+		font-size: 14px;
+		font-weight: 700;
+		line-height: 20px;
+	}
+	.mh-stat-label {
+		font-size: 12px;
+		margin-top: 2px;
+	}
+	.mh-btn-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 10px;
+		padding-right: 10px;
+	}
+	.mh-btn {
+		flex: 1;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		border-radius: 20px;
+	}
+	.mh-btn-gap {
+		width: 8px;
+	}
+	.mh-btn-text {
+		font-size: 14px;
+	}
+	/* 单按钮（编辑资料/未登录）：居中胶囊（源 padding 80 的等价收敛） */
+	.mh-btn-solo {
+		align-self: center;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding-left: 40px;
+		padding-right: 40px;
+		border-radius: 20px;
+		margin-top: 10px;
+	}
+</style>

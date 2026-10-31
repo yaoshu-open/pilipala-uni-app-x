@@ -1,0 +1,88 @@
+<template>
+	<view class="ps" :style="pageStyle">
+		<app-navbar title="隐私设置"></app-navbar>
+
+		<scroll-view class="ps-scroll" direction="vertical">
+			<view class="ps-list">
+				<setting-cell
+					title="黑名单管理"
+					sub-title="已拉黑用户"
+					mode="arrow"
+					@tap="openBlacklist"
+				></setting-cell>
+				<setting-cell
+					title="刷新access_key"
+					mode="arrow"
+					@tap="onRefreshKey"
+				></setting-cell>
+			</view>
+			<view class="ps-foot" :style="footStyle"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import SettingCell from '../../components/setting/setting-cell.uvue'
+import { pageBackground } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+import { userState } from '../../stores/user.uts'
+import { cookieToKey } from '../../api/accesskey.uts'
+import { ensureLoginState } from '../../composables/useLogin.uts'
+
+/**
+ * 隐私设置（源头：lib/pages/setting/privacy_setting.dart）。
+ *
+ *  - 黑名单管理：跳 P5 /pages/blacklist/blacklist；未登录 toast「登录后查看」（源逐字）。
+ *  - 刷新 access_key：源 MemberHttp.cookieToKey（TV 端 auth_code → confirm → poll 换
+ *    access_token，appSign 签名链）。新端实现见 `api/accesskey.uts`（三段请求逐段照源），
+ *    结果直接落 CK.accessKey（{mid, value}），供 app 端推荐取用；失败按接口 message 如实提示。
+ */
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 24).toString() + 'px;')
+
+async function openBlacklist() {
+	// 登录态以 nav 复核（不靠内存标志），未登录给源同款文案
+	const logged = await ensureLoginState()
+	if (!logged) {
+		uni.showToast({ title: '登录后查看', icon: 'none' })
+		return
+	}
+	uni.navigateTo({ url: '/pages/blacklist/blacklist' })
+}
+
+/**
+ * 刷新 access_key（源 MemberHttp.cookieToKey：TV 端 auth_code → confirm → poll 换 token）。
+ * 真实请求 + 真实结果：成功 toast「操作成功」，失败把接口 message 原样呈现（不假成功）。
+ */
+async function onRefreshKey() {
+	const logged = await ensureLoginState()
+	if (!logged) {
+		uni.showToast({ title: '请先登录', icon: 'none' })
+		return
+	}
+	uni.showLoading({ title: '正在获取…' })
+	const res = await cookieToKey(userState.info.mid)
+	uni.hideLoading()
+	uni.showToast({ title: res.status ? '操作成功' : res.message, icon: 'none' })
+}
+</script>
+
+<style>
+	.ps {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.ps-scroll {
+		flex: 1;
+	}
+	.ps-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.ps-foot {
+		height: 1px;
+	}
+</style>

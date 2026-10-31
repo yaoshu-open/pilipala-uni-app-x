@@ -1,0 +1,288 @@
+<template>
+	<view class="bl" :style="pageStyle">
+		<!-- 顶栏：← +「黑名单管理 - N」+ ⋮（基线 P5_blacklist；⋮ 菜单承载刷新） -->
+		<app-navbar :title="titleText">
+			<template #right>
+				<view class="bl-nav-btn" @click="openMenu">
+					<p-icon name="more-vert" :size="22" :color="iconColor"></p-icon>
+				</view>
+			</template>
+		</app-navbar>
+
+		<view v-if="state == 'loading'" class="bl-skeleton">
+			<view v-for="n in 8" :key="'sk-' + n.toString()" class="bl-sk-row">
+				<skeleton-block width="45px" height="45px" radius="22.5px"></skeleton-block>
+				<view class="bl-sk-lines">
+					<skeleton-block width="40%" height="14px" radius="4px"></skeleton-block>
+					<view class="bl-sk-gap"></view>
+					<skeleton-block width="50%" height="12px" radius="4px"></skeleton-block>
+				</view>
+			</view>
+		</view>
+
+		<view v-else-if="state == 'error'" class="bl-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+
+		<list-view
+			v-else-if="items.length > 0"
+			class="bl-list"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:lower-threshold="200"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+		>
+			<list-item v-for="user in items" :key="user.mid" :type="1">
+				<user-row
+					:face="user.face"
+					:uname="user.uname"
+					:subtitle="dateText(user.mtime)"
+					action-text="移除"
+					action-tone="text"
+					@tap="openMember(user.mid)"
+					@action="removeFromList(user)"
+				></user-row>
+			</list-item>
+			<list-item :key="'footer'" :type="2">
+				<view class="bl-footer">
+					<text class="bl-footer-text" :style="footerStyle">共 {{ total.toString() }} 人</text>
+				</view>
+			</list-item>
+		</list-view>
+
+		<view v-else class="bl-fill">
+			<!-- 空态：插画 +「你没有拉黑任何人哦～_～」+「点击重试」（基线同款） -->
+			<empty-illus text="你没有拉黑任何人哦～_～" :retry="true" @retry="reload"></empty-illus>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onUnload } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import UserRow from '../../components/relation/user-row.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchBlacks, removeBlack } from '../../api/relation.uts'
+import { BlackItem } from '../../models/relation.uts'
+import { pageBackground, textPrimary, textSecondary } from '../../utils/theme.uts'
+import { dateFormat } from '../../utils/format.uts'
+import { SK, setNumberArray } from '../../utils/storage.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 黑名单管理（源头：lib/pages/blacklist/index.dart + lib/http/black.dart）。
+ *
+ * 列表 = GET /x/relation/blacks（需登录态；设计 §十：先不附 csrf，接口要求凭据时
+ * 给真实错误态）。条目 = 头像 + 昵称 + 拉黑时间（dateFormat）+「移除」文字钮
+ *（源 ListTile trailing TextButton，无确认弹层——直接移除 + toast，照源行为）。
+ * 移除 = POST /x/relation/modify act=6（csrf 前置校验，缺失即真实失败 toast）。
+ *
+ * 联动（P3）：页面卸载把当前 mid 列表写回 SK.blackMidsList（推荐流过滤键）。
+ * 与源的差异：仅在「至少成功加载过一次」时回写——加载失败态下源会把空列表写回、
+ * 意外清空既有过滤配置，新端加 hasLoaded 守卫（防数据丢失，登记差异）。
+ * 下拉刷新：源 RefreshIndicator 同款保留（设计 §八 白名单页）。
+ */
+const PAGE_SIZE: number = 50
+
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const items = ref<Array<BlackItem>>([])
+const total = ref<number>(0)
+const page = ref<number>(1)
+const loading = ref<boolean>(false)
+const refreshing = ref<boolean>(false)
+const hasLoaded = ref<boolean>(false)
+
+const iconColor = textPrimary()
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footerStyle = computed((): string => 'color:' + textSecondary() + ';padding-bottom:' + (safeAreaBottom() + 16).toString() + 'px;')
+const titleText = computed((): string => total.value > 0 ? '黑名单管理 - ' + total.value.toString() : '黑名单管理')
+
+function dateText(timestamp: number): string {
+	return dateFormat(timestamp, 'detail')
+}
+
+async function loadPage(first: boolean) {
+	if (loading.value) {
+		return
+	}
+	if (first) {
+		page.value = 1
+		if (state.value != 'ready') {
+			state.value = 'loading'
+		}
+	}
+	loading.value = true
+	const res = await fetchBlacks(page.value, PAGE_SIZE)
+	loading.value = false
+	if (!res.status) {
+		if (state.value != 'ready') {
+			state.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	if (first) {
+		items.value = res.items
+		total.value = res.total
+	} else {
+		for (let i = 0; i < res.items.length; i++) {
+			items.value.push(res.items[i])
+		}
+	}
+	page.value = page.value + 1
+	hasLoaded.value = true
+	if (state.value != 'ready') {
+		state.value = 'ready'
+	}
+}
+
+function onLoadMore() {
+	if (loading.value || state.value != 'ready') {
+		return
+	}
+	loadPage(false)
+}
+
+function reload() {
+	items.value = []
+	total.value = 0
+	state.value = 'loading'
+	loadPage(true)
+}
+
+async function onRefreshGesture() {
+	if (refreshing.value || loading.value) {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	await loadPage(true)
+	refreshing.value = false
+}
+/** ⋮ 菜单：刷新（基线有 ⋮、源无 actions；菜单项取刷新这一真实动作） */
+function openMenu() {
+	uni.showActionSheet({
+		itemList: ['刷新列表'],
+		success: (res) => {
+			if (res.tapIndex == 0) {
+				reload()
+			}
+		}
+	})
+}
+
+/** 移除黑名单：直接执行（源无确认弹层）→ act=6 写接口 */
+async function removeFromList(user: BlackItem) {
+	const res = await removeBlack(user.mid)
+	if (!res.status) {
+		// 凭据缺失/接口失败：真实失败 toast，列表不变（不假成功）
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	const next: Array<BlackItem> = []
+	for (let i = 0; i < items.value.length; i++) {
+		if (items.value[i].mid != user.mid) {
+			next.push(items.value[i])
+		}
+	}
+	items.value = next
+	total.value = total.value > 0 ? total.value - 1 : 0
+	uni.showToast({ title: '操作成功', icon: 'none' })
+}
+
+/** 行点击：进用户主页（源 onTap 为空操作；新端与其他用户行同语义，登记差异） */
+function openMember(targetMid: number) {
+	if (targetMid <= 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/member/member?mid=' + targetMid.toString() })
+}
+
+/** 卸载回写过滤键（P3 推荐流消费）；hasLoaded 守卫防加载失败误清空 */
+function persistBlackMids() {
+	if (!hasLoaded.value) {
+		return
+	}
+	const mids: Array<number> = []
+	for (let i = 0; i < items.value.length; i++) {
+		if (items.value[i].mid > 0) {
+			mids.push(items.value[i].mid)
+		}
+	}
+	setNumberArray(SK.blackMidsList, mids)
+}
+
+onLoad(() => {
+	loadPage(true)
+})
+
+onUnload(() => {
+	persistBlackMids()
+})
+</script>
+
+<style>
+	.bl {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.bl-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.bl-nav-btn {
+		width: 40px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.bl-list {
+		flex: 1;
+	}
+	.bl-skeleton {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-top: 8px;
+	}
+	.bl-sk-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-left: 16px;
+		margin-right: 16px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.bl-sk-lines {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 12px;
+	}
+	.bl-sk-gap {
+		height: 8px;
+	}
+	.bl-footer {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		height: 60px;
+	}
+	.bl-footer-text {
+		font-size: 13px;
+	}
+</style>

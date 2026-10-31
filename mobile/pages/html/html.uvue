@@ -1,0 +1,922 @@
+<template>
+	<view class="hp" :style="pageStyle">
+		<app-navbar :title="pageTitle" :show-back="true">
+			<template #right>
+				<view class="hp-icon-btn" @click="onOpenBrowser">
+					<p-icon name="open-in-browser" :size="20" :color="textPrimary()"></p-icon>
+				</view>
+				<view class="hp-icon-btn" @click="openMenu">
+					<p-icon name="more-vert" :size="22" :color="textPrimary()"></p-icon>
+				</view>
+			</template>
+		</app-navbar>
+
+		<scroll-view class="hp-scroll" direction="vertical" @scroll="onScroll">
+			<!-- 内容头：作者 40 + 昵称 + 时间（源 12/12 边距，正文 12/8） -->
+			<view class="hp-head" :style="headStyle">
+				<network-img :src="avatar" width="40px" height="40px" radius="20px"></network-img>
+				<view class="hp-gap10"></view>
+				<view class="hp-head-body">
+					<text class="hp-uname" :style="primaryTextStyle" :max-lines="1">{{ uname }}</text>
+					<text class="hp-time" :style="secondaryStyle" :max-lines="1">{{ updateTime }}</text>
+				</view>
+			</view>
+
+			<view class="hp-detail" :style="detailStyle">
+				<view class="hp-loading" :style="loadingStyle">
+					<view v-for="n in 4" :key="'sk-' + n.toString()" class="hp-sk-row">
+						<skeleton-block width="90%" height="14px" radius="4px"></skeleton-block>
+						<view class="hp-sk-gap"></view>
+						<skeleton-block width="60%" height="13px" radius="4px"></skeleton-block>
+						<view class="hp-sk-gap"></view>
+					</view>
+				</view>
+				<view class="hp-error" :style="errorStyle">
+					<text class="hp-error-text" :style="secondaryStyle">{{ errorText }}</text>
+					<view class="hp-retry" @click="loadAll">
+						<text class="hp-retry-text" :style="primaryStyle">点击重试</text>
+					</view>
+				</view>
+				<view class="hp-body" :style="bodyStyle">
+					<article-body v-if="paragraphs.length > 0" :paragraphs="paragraphs"></article-body>
+					<view v-else class="hp-plain">
+						<text
+							v-for="(line, index) in plainLines"
+							:key="'ln-' + index.toString()"
+							class="hp-plain-line"
+							:style="plainStyle"
+						>{{ line }}</text>
+					</view>
+				</view>
+			</view>
+
+			<!-- 分割线（源 8px 高、5% 透明） -->
+			<view class="hp-divider" :style="dividerStyle"></view>
+
+			<!-- 回复栏：标题 + 排序（源 45 高、左 12 右 6） -->
+			<view class="hp-reply-head" :style="replyHeadStyle">
+				<text class="hp-reply-title" :style="primaryTextStyle">回复</text>
+				<view class="hp-flex1"></view>
+				<view class="hp-sort" @click="onToggleSort">
+					<p-icon name="sort" :size="16" :color="primary"></p-icon>
+					<view class="hp-gap6"></view>
+					<text class="hp-sort-text" :style="primaryStyle">{{ sort == 0 ? '按时间' : '按最热' }}</text>
+				</view>
+			</view>
+
+			<view class="hp-reply-state" :style="replyStateStyle('loading')">
+				<text class="hp-state-text" :style="secondaryStyle">加载中…</text>
+			</view>
+			<view class="hp-reply-state" :style="replyStateStyle('error')" @click="reloadReply">
+				<text class="hp-state-text" :style="secondaryStyle">{{ replyError }}</text>
+				<text class="hp-state-retry" :style="primaryStyle">点击重试</text>
+			</view>
+			<view class="hp-reply-state" :style="replyStateStyle('empty')">
+				<text class="hp-state-text" :style="secondaryStyle">还没有评论</text>
+			</view>
+
+			<view class="hp-list" :style="replyListStyle">
+				<view v-for="reply in replies" :key="reply.rpid" class="hp-item">
+					<view class="hp-item-head">
+						<view class="hp-avatar" @click="openMember(reply.member.mid)">
+							<network-img :src="reply.member.avatar" width="30px" height="30px" radius="15px"></network-img>
+						</view>
+						<view class="hp-item-head-body">
+							<view class="hp-name-row">
+								<text class="hp-name" :style="nameStyle(reply)" :max-lines="1">{{ reply.member.uname }}</text>
+								<view v-if="reply.isUp" class="hp-badge" :style="upBadgeStyle">
+									<text class="hp-badge-text" :style="primaryStyle">UP</text>
+								</view>
+								<view v-if="reply.isTop" class="hp-badge" :style="upBadgeStyle">
+									<text class="hp-badge-text" :style="primaryStyle">置顶</text>
+								</view>
+							</view>
+							<text class="hp-meta" :style="secondaryStyle" :max-lines="1">{{ metaText(reply) }}</text>
+						</view>
+					</view>
+					<view class="hp-item-content">
+						<reply-rich-text :content="reply.content" :font-size="14" :line-height="20"
+							@open-user="openMember" @open-link="onOpenLink"></reply-rich-text>
+					</view>
+					<view class="hp-item-actions">
+						<view class="hp-act" @click="onLikeReply(reply)">
+							<p-icon :name="reply.action == 1 ? 'thumb-up' : 'thumb-up-alt-outlined'" :size="14"
+								:color="reply.action == 1 ? primary : textSecondary()"></p-icon>
+							<view class="hp-gap4"></view>
+							<text class="hp-act-text" :style="actTextStyle(reply)">{{ reply.like > 0 ? numFormat(reply.like) : '' }}</text>
+						</view>
+						<view class="hp-act" @click="onReplyTo(reply)">
+							<text class="hp-act-text" :style="secondaryStyle">回复</text>
+						</view>
+					</view>
+					<view v-if="reply.replies.length > 0 || reply.count > 0" class="hp-sub" :style="subStyle">
+						<view v-for="sub in reply.replies" :key="sub.rpid" class="hp-sub-row">
+							<text class="hp-sub-name" :style="primaryStyle">{{ sub.member.uname }}</text>
+							<view class="hp-sub-body">
+								<reply-rich-text :content="sub.content" :font-size="12" :line-height="17" :max-lines="2"></reply-rich-text>
+							</view>
+						</view>
+						<view class="hp-sub-more" @click="onToggleSub(reply)">
+							<text class="hp-sub-more-text" :style="primaryStyle">{{ subMoreText(reply) }}</text>
+						</view>
+					</view>
+				</view>
+				<view class="hp-footer">
+					<text class="hp-footer-text" :style="secondaryStyle">{{ footerText }}</text>
+				</view>
+				<view class="hp-bottom" :style="bottomStyle"></view>
+			</view>
+		</scroll-view>
+
+		<!-- 评论入口 FAB（源 FAB reply 图标；滚动收起动画不做，常驻展示） -->
+		<view class="hp-fab" :style="fabStyle" @click="openInput">
+			<p-icon name="reply" :size="22" :color="'#FFFFFF'"></p-icon>
+		</view>
+
+		<!-- 评论输入弹层（键盘上移） -->
+		<view class="hp-input-mask" :style="inputMaskStyle" @click="closeInput">
+			<view class="hp-input-sheet" :style="inputSheetStyle" @click.stop="noop">
+				<view v-if="replyTarget != null" class="hp-input-target">
+					<text class="hp-input-target-text" :style="secondaryStyle" :max-lines="1">回复 @{{ replyTargetName }}</text>
+					<text class="hp-input-cancel" :style="secondaryStyle" @click="cancelReplyTarget">取消</text>
+				</view>
+				<view class="hp-input-row">
+					<input
+						class="hp-input"
+						:style="inputStyle"
+						:value="inputText"
+						:maxlength="1000"
+						:adjust-position="false"
+						placeholder="发个友善的评论"
+						placeholder-class="hp-input-placeholder"
+						confirm-type="send"
+						@input="onInput"
+						@confirm="onSend"
+					/>
+					<view class="hp-send" :style="sendStyle" @click="onSend">
+						<text class="hp-send-text">{{ sending ? '发送中' : '发送' }}</text>
+					</view>
+				</view>
+			</view>
+		</view>
+
+		<!-- 更多菜单（源 PopupMenuButton：复制链接 / 分享） -->
+		<view class="hp-menu-mask" :style="menuMaskStyle" @click="closeMenu">
+			<view class="hp-menu" :style="menuStyle">
+				<view class="hp-menu-item" @click.stop="onCopyLink">
+					<text class="hp-menu-text" :style="primaryTextStyle">复制链接</text>
+				</view>
+				<view class="hp-menu-item" @click.stop="onShare">
+					<text class="hp-menu-text" :style="primaryTextStyle">分享</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad, onBackPress } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import ArticleBody from '../../components/article/article-body.uvue'
+import ReplyRichText from '../../components/reply/reply-rich-text.uvue'
+import { fetchDynamicHtml } from '../../api/article.uts'
+import { fetchReplyListByStr, fetchReplyReplyListByStr, likeReplyByStr, addReplyByStr, REPLY_CLOSED_CODE } from '../../api/reply.uts'
+import { ArticleParagraph } from '../../models/article.uts'
+import { ReplyItem } from '../../models/reply.uts'
+import { userState } from '../../stores/user.uts'
+import { navigateTo } from '../../utils/routes.uts'
+import { pageBackground, cardBackground, textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom, statusBarHeight } from '../../utils/safeArea.uts'
+import { numFormat, dateFormat } from '../../utils/format.uts'
+
+/**
+ * 动态/专栏内容详情（源头：`lib/pages/html/view.dart` + `controller.dart`）。
+ *
+ * 本页不是通用 url 容器：上半区是动态/专栏内容（作者行 + 正文），下半区是评论（type 11/12）。
+ * 取数（api/article.uts#fetchDynamicHtml）：opus/picture 形态解析 opus 页 __INITIAL_STATE__；
+ * 其它 dynamicType 走专栏 JSON 端点。**源 DOM 选择器链在 2026 站点已失效**（类名不存在），
+ * 改为等价字段解析；解析失败整页错误态，不静默空白。
+ * 结构（1:1）：导航栏（浏览器打开 / ⋮ 复制链接·分享）→ 作者行（40 头像 + 昵称 + 时间）→ 正文
+ * → 分割线 → 回复栏（标题 + 排序）→ 评论列表（置顶/UP/二级展开）→ FAB 发评论。
+ * 差异：源 FAB 随滚动方向收起（无等价动画，常驻）；源二级评论为独立面板，本端行内展开。
+ */
+const id = ref<string>('')
+const dynamicType = ref<string>('opus')
+const pageTitle = ref<string>('')
+const sourceUrl = ref<string>('')
+const avatar = ref<string>('')
+const uname = ref<string>('')
+const updateTime = ref<string>('')
+const paragraphs = ref<Array<ArticleParagraph>>([])
+const contentText = ref<string>('')
+const oid = ref<string>('')
+const commentType = ref<number>(12)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const scrollY = ref<number>(0)
+const menuVisible = ref<boolean>(false)
+
+// 评论
+const replies = ref<Array<ReplyItem>>([])
+const replyState = ref<string>('loading')
+const replyError = ref<string>('')
+const page = ref<number>(0)
+const sort = ref<number>(0)
+const noMore = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const subPages = new Map<string, number>()
+
+// 输入
+const inputVisible = ref<boolean>(false)
+const inputText = ref<string>('')
+const sending = ref<boolean>(false)
+const replyTarget = ref<ReplyItem | null>(null)
+const replyTargetName = ref<string>('')
+const kbHeight = ref<number>(0)
+
+const primary = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const primaryTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryStyle = computed((): string => 'color:' + primary + ';')
+const plainStyle = computed((): string => 'color:' + textPrimary() + ';')
+const dividerStyle = computed((): string => 'background-color:' + withAlpha(textSecondary(), 0.05) + ';')
+const headStyle = computed((): string => 'display:flex;')
+const detailStyle = computed((): string => 'display:flex;')
+const loadingStyle = computed((): string => state.value == 'loading' ? 'display:flex;' : 'display:none;')
+const errorStyle = computed((): string => state.value == 'error' ? 'display:flex;' : 'display:none;')
+const bodyStyle = computed((): string => state.value == 'ready' ? 'display:flex;' : 'display:none;')
+const replyHeadStyle = computed((): string => 'background-color:' + cardBackground() + ';')
+const replyListStyle = computed((): string => state.value == 'ready' && replyState.value == 'ready' ? 'display:flex;' : 'display:none;')
+const menuMaskStyle = computed((): string => menuVisible.value ? 'display:flex;' : 'display:none;')
+const menuStyle = computed((): string => 'margin-top:' + (statusBarHeight() + 44).toString() + 'px;background-color:' + pageBackground() + ';')
+const inputMaskStyle = computed((): string => inputVisible.value ? 'display:flex;' : 'display:none;')
+const inputSheetStyle = computed((): string => {
+	const lift = kbHeight.value > 0 ? 'margin-bottom:' + kbHeight.value.toString() + 'px;' : ''
+	return lift + 'padding-bottom:' + (safeAreaBottom() + 8).toString() + 'px;background-color:' + cardBackground() + ';'
+})
+const inputStyle = computed((): string => 'background-color:' + pageBackground() + ';color:' + textPrimary() + ';')
+const sendEnabled = computed((): boolean => inputText.value.trim().length > 0 && !sending.value)
+const sendStyle = computed((): string => 'background-color:' + (sendEnabled.value ? primary : withAlpha(textSecondary(), 0.3)) + ';')
+const bottomStyle = computed((): string => 'height:' + (safeAreaBottom() + 80).toString() + 'px;')
+const fabStyle = computed((): string => 'background-color:' + primary + ';')
+const upBadgeStyle = computed((): string => 'background-color:' + withAlpha(primary, 0.12) + ';')
+const subStyle = computed((): string => 'background-color:' + withAlpha(textSecondary(), 0.05) + ';')
+const plainLines = computed((): Array<string> => {
+	const text = contentText.value
+	const lines: Array<string> = []
+	if (text.length == 0) {
+		return lines
+	}
+	const raw = text.split('\n')
+	for (let i = 0; i < raw.length; i++) {
+		const line = raw[i].trim()
+		if (line.length > 0) {
+			lines.push(line)
+		}
+	}
+	return lines
+})
+const footerText = computed((): string => {
+	if (loadingMore.value) {
+		return '加载中…'
+	}
+	return noMore.value ? '没有更多了' : ''
+})
+
+function replyStateStyle(name: string): string {
+	return replyState.value == name && state.value == 'ready' ? 'display:flex;' : 'display:none;'
+}
+
+function nameStyle(reply: ReplyItem): string {
+	return reply.member.vipStatus > 0 ? 'color:#FB64A3;' : 'color:' + textPrimary() + ';'
+}
+
+function actTextStyle(reply: ReplyItem): string {
+	return reply.action == 1 ? 'color:' + primary + ';' : 'color:' + textSecondary() + ';'
+}
+
+function metaText(reply: ReplyItem): string {
+	let text = dateFormat(reply.ctime, 'list')
+	const control = reply.replyControl
+	if (control != null && control.location.length > 0) {
+		text = text + ' · ' + control.location
+	}
+	return text
+}
+
+function subMoreText(reply: ReplyItem): string {
+	const shown = subPages.get(reply.rpid)
+	if (shown == null) {
+		return '共 ' + reply.count.toString() + ' 条回复'
+	}
+	if (reply.replies.length >= reply.count) {
+		return '收起回复'
+	}
+	return '加载更多回复'
+}
+
+function onScroll(event: UniScrollEvent) {
+	scrollY.value = Math.round(event.detail.scrollTop)
+	if (event.detail.scrollTop + 1 >= event.detail.scrollHeight - 400) {
+		onLoadMore()
+	}
+}
+
+async function loadAll() {
+	state.value = 'loading'
+	errorText.value = ''
+	const res = await fetchDynamicHtml(id.value, dynamicType.value)
+	if (!res.status || res.data == null) {
+		state.value = 'error'
+		errorText.value = res.message.length > 0 ? res.message : '内容解析失败'
+		return
+	}
+	const info = res.data
+	avatar.value = info.avatar
+	uname.value = info.uname
+	updateTime.value = info.updateTime
+	paragraphs.value = info.paragraphs
+	contentText.value = info.contentText
+	oid.value = info.commentId
+	commentType.value = info.commentType
+	if (pageTitle.value.length == 0) {
+		pageTitle.value = info.uname.length > 0 ? info.uname + '的动态' : '内容详情'
+	}
+	state.value = 'ready'
+	loadReplyPage(1)
+}
+
+async function loadReplyPage(pn: number) {
+	if (oid.value.length == 0) {
+		return
+	}
+	if (pn == 1) {
+		replyState.value = 'loading'
+		replyError.value = ''
+	}
+	const res = await fetchReplyListByStr(oid.value, pn, sort.value, commentType.value)
+	if (!res.status || res.data == null) {
+		if (res.code == REPLY_CLOSED_CODE) {
+			replyState.value = 'empty'
+			return
+		}
+		if (pn == 1) {
+			replyState.value = 'error'
+			replyError.value = res.message.length > 0 ? res.message : '请求异常'
+		} else {
+			uni.showToast({ title: res.message.length > 0 ? res.message : '请求异常', icon: 'none' })
+		}
+		return
+	}
+	const data = res.data
+	const next: Array<ReplyItem> = pn == 1 ? [] : replies.value.slice()
+	for (let i = 0; i < data.topReplies.length; i++) {
+		next.push(data.topReplies[i])
+	}
+	for (let i = 0; i < data.replies.length; i++) {
+		next.push(data.replies[i])
+	}
+	replies.value = next
+	noMore.value = data.replies.length < 20
+	page.value = pn
+	replyState.value = next.length == 0 ? 'empty' : 'ready'
+}
+
+function reloadReply() {
+	page.value = 0
+	noMore.value = false
+	subPages.clear()
+	loadReplyPage(1)
+}
+
+function onLoadMore() {
+	if (state.value != 'ready' || replyState.value != 'ready' || noMore.value || loadingMore.value) {
+		return
+	}
+	loadingMore.value = true
+	loadReplyPage(page.value + 1).then(() => {
+		loadingMore.value = false
+	})
+}
+
+function onToggleSort() {
+	sort.value = sort.value == 0 ? 1 : 0
+	reloadReply()
+}
+
+async function onLikeReply(reply: ReplyItem) {
+	if (!userState.isLogin) {
+		navigateTo('/pages/login/login')
+		return
+	}
+	const nextAction = reply.action == 1 ? 0 : 1
+	const res = await likeReplyByStr(oid.value, reply.rpid, nextAction, commentType.value)
+	if (!res.status) {
+		uni.showToast({ title: res.message, icon: 'none' })
+		return
+	}
+	reply.action = nextAction
+	reply.like = reply.like + (nextAction == 1 ? 1 : -1)
+}
+
+async function onToggleSub(reply: ReplyItem) {
+	const shown = subPages.get(reply.rpid)
+	if (shown != null && reply.replies.length >= reply.count) {
+		subPages.delete(reply.rpid)
+		reply.replies = [] as Array<ReplyItem>
+		return
+	}
+	const nextPage = (shown == null ? 0 : shown as number) + 1
+	const res = await fetchReplyReplyListByStr(oid.value, reply.rpid, nextPage, commentType.value)
+	if (!res.status || res.data == null) {
+		uni.showToast({ title: res.message.length > 0 ? res.message : '请求异常', icon: 'none' })
+		return
+	}
+	const merged = nextPage == 1 ? [] as Array<ReplyItem> : reply.replies.slice()
+	for (let i = 0; i < res.data.replies.length; i++) {
+		merged.push(res.data.replies[i])
+	}
+	reply.replies = merged
+	subPages.set(reply.rpid, nextPage)
+}
+
+function onReplyTo(reply: ReplyItem) {
+	replyTarget.value = reply
+	replyTargetName.value = reply.member.uname
+	inputVisible.value = true
+}
+
+function cancelReplyTarget() {
+	replyTarget.value = null
+	replyTargetName.value = ''
+}
+
+function openInput() {
+	inputVisible.value = true
+}
+
+function closeInput() {
+	inputVisible.value = false
+	if (kbHeight.value > 0) {
+		kbHeight.value = 0
+	}
+}
+
+function noop() {}
+
+function onInput(event: UniInputEvent) {
+	inputText.value = event.detail.value
+}
+
+async function onSend() {
+	const text = inputText.value.trim()
+	if (text.length == 0) {
+		uni.showToast({ title: '请输入评论内容', icon: 'none' })
+		return
+	}
+	if (sending.value) {
+		return
+	}
+	if (!userState.isLogin) {
+		navigateTo('/pages/login/login')
+		return
+	}
+	sending.value = true
+	const target = replyTarget.value
+	const root = target == null ? '0' : target.rpid
+	const parent = target == null ? '0' : target.rpid
+	const res = await addReplyByStr(oid.value, root, parent, text, commentType.value)
+	sending.value = false
+	if (!res.status || res.item == null) {
+		uni.showToast({ title: res.message.length > 0 ? res.message : '发送失败', icon: 'none' })
+		return
+	}
+	const item = res.item
+	const next: Array<ReplyItem> = [item]
+	for (let i = 0; i < replies.value.length; i++) {
+		next.push(replies.value[i])
+	}
+	replies.value = next
+	replyState.value = 'ready'
+	inputText.value = ''
+	closeInput()
+	cancelReplyTarget()
+	uni.showToast({ title: '评论成功', icon: 'none' })
+}
+
+function openMenu() {
+	menuVisible.value = true
+}
+
+function closeMenu() {
+	menuVisible.value = false
+}
+
+function pageUrl(): string {
+	if (sourceUrl.value.length > 0) {
+		return sourceUrl.value.startsWith('http') ? sourceUrl.value : 'https:' + sourceUrl.value
+	}
+	if (dynamicType.value == 'opus' || dynamicType.value == 'picture') {
+		return 'https://www.bilibili.com/opus/' + id.value
+	}
+	return 'https://www.bilibili.com/' + dynamicType.value + '/' + id.value + '/'
+}
+
+function onOpenBrowser() {
+	navigateTo('/pages/webview/webview?url=' + encodeURIComponent(pageUrl()) + '&type=webview&pageTitle=' + encodeURIComponent(pageTitle.value))
+}
+
+function onCopyLink() {
+	menuVisible.value = false
+	uni.setClipboardData({
+		data: pageUrl(),
+		success: (_) => {
+			uni.showToast({ title: '已复制', icon: 'none' })
+		}
+	})
+}
+
+function onShare() {
+	// 源「分享」项无动作（onTap: () {}）——本端同样只复制链接，不假装调起分享面板
+	onCopyLink()
+}
+
+function openMember(mid: string) {
+	if (mid.length == 0) {
+		return
+	}
+	navigateTo('/pages/member/member?mid=' + mid)
+}
+
+function onOpenLink(text: string) {
+	if (text.length == 0) {
+		return
+	}
+	if (text.startsWith('http')) {
+		navigateTo('/pages/webview/webview?url=' + encodeURIComponent(text) + '&type=webview&pageTitle=' + encodeURIComponent(pageTitle.value))
+		return
+	}
+	const bvMark = text.indexOf('BV')
+	if (bvMark >= 0) {
+		navigateTo('/pages/search-result/search-result?keyword=' + text)
+	}
+}
+
+onBackPress(() => {
+	if (inputVisible.value) {
+		closeInput()
+		return true
+	}
+	if (menuVisible.value) {
+		closeMenu()
+		return true
+	}
+	return false
+})
+
+onLoad((options) => {
+	const rawId = options != null ? options['id'] : null
+	if (rawId == null || (rawId as string).length == 0) {
+		state.value = 'error'
+		errorText.value = '缺少内容参数（id）'
+		return
+	}
+	id.value = rawId as string
+	const rawType = options != null ? options['dynamicType'] : null
+	if (rawType != null && (rawType as string).length > 0) {
+		dynamicType.value = rawType as string
+	}
+	const rawTitle = options != null ? options['title'] : null
+	if (rawTitle != null) {
+		pageTitle.value = rawTitle as string
+	}
+	const rawUrl = options != null ? options['url'] : null
+	if (rawUrl != null) {
+		sourceUrl.value = rawUrl as string
+	}
+	try {
+		uni.onKeyboardHeightChange((res) => {
+			kbHeight.value = res.height
+		})
+	} catch (e) {
+		kbHeight.value = 0
+	}
+	loadAll()
+})
+</script>
+
+<style>
+	.hp {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+	}
+	.hp-icon-btn {
+		width: 40px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.hp-scroll {
+		flex: 1;
+	}
+	.hp-head {
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 12px;
+		padding-bottom: 8px;
+	}
+	.hp-head-body {
+		display: flex;
+		flex-direction: column;
+	}
+	.hp-uname {
+		font-size: 14px;
+		font-weight: 500;
+	}
+	.hp-time {
+		font-size: 11px;
+	}
+	.hp-detail {
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 8px;
+		padding-bottom: 8px;
+	}
+	.hp-loading {
+		flex-direction: column;
+	}
+	.hp-sk-row {
+		display: flex;
+		flex-direction: column;
+		padding-bottom: 4px;
+	}
+	.hp-sk-gap {
+		height: 6px;
+	}
+	.hp-error {
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		height: 120px;
+	}
+	.hp-error-text {
+		font-size: 14px;
+	}
+	.hp-retry {
+		margin-top: 10px;
+	}
+	.hp-retry-text {
+		font-size: 14px;
+	}
+	.hp-body {
+		flex-direction: column;
+	}
+	.hp-plain {
+		display: flex;
+		flex-direction: column;
+	}
+	.hp-plain-line {
+		font-size: 14px;
+		line-height: 21px;
+		margin-bottom: 10px;
+	}
+	.hp-divider {
+		width: 100%;
+		height: 8px;
+	}
+	.hp-reply-head {
+		height: 45px;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 6px;
+	}
+	.hp-reply-title {
+		font-size: 15px;
+	}
+	.hp-flex1 {
+		flex: 1;
+	}
+	.hp-sort {
+		height: 35px;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 8px;
+		padding-right: 8px;
+	}
+	.hp-sort-text {
+		font-size: 13px;
+	}
+	.hp-reply-state {
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		height: 120px;
+	}
+	.hp-state-text {
+		font-size: 13px;
+	}
+	.hp-state-retry {
+		font-size: 13px;
+		margin-top: 8px;
+	}
+	.hp-list {
+		flex-direction: column;
+	}
+	.hp-item {
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.hp-item-head {
+		flex-direction: row;
+	}
+	.hp-avatar {
+		width: 30px;
+		height: 30px;
+	}
+	.hp-item-head-body {
+		flex: 1;
+		flex-direction: column;
+		padding-left: 10px;
+	}
+	.hp-name-row {
+		flex-direction: row;
+		align-items: center;
+	}
+	.hp-name {
+		font-size: 12px;
+	}
+	.hp-badge {
+		margin-left: 6px;
+		padding-left: 4px;
+		padding-right: 4px;
+		border-radius: 3px;
+	}
+	.hp-badge-text {
+		font-size: 10px;
+	}
+	.hp-meta {
+		font-size: 11px;
+	}
+	.hp-item-content {
+		padding-top: 6px;
+	}
+	.hp-item-actions {
+		flex-direction: row;
+		align-items: center;
+		padding-top: 6px;
+	}
+	.hp-act {
+		flex-direction: row;
+		align-items: center;
+		margin-right: 16px;
+	}
+	.hp-act-text {
+		font-size: 11px;
+	}
+	.hp-sub {
+		margin-top: 6px;
+		border-radius: 4px;
+		padding: 8px;
+		flex-direction: column;
+	}
+	.hp-sub-row {
+		flex-direction: row;
+		padding-bottom: 4px;
+	}
+	.hp-sub-name {
+		font-size: 12px;
+	}
+	.hp-sub-body {
+		flex: 1;
+		padding-left: 6px;
+	}
+	.hp-sub-more {
+		padding-top: 2px;
+	}
+	.hp-sub-more-text {
+		font-size: 12px;
+	}
+	.hp-footer {
+		height: 40px;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.hp-footer-text {
+		font-size: 12px;
+	}
+	.hp-fab {
+		position: absolute;
+		right: 16px;
+		bottom: 24px;
+		width: 48px;
+		height: 48px;
+		border-radius: 24px;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.hp-input-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		flex-direction: column;
+		justify-content: flex-end;
+		background-color: rgba(0, 0, 0, 0.35);
+	}
+	.hp-input-sheet {
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 10px;
+	}
+	.hp-input-target {
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding-bottom: 6px;
+	}
+	.hp-input-target-text {
+		font-size: 12px;
+		flex: 1;
+	}
+	.hp-input-cancel {
+		font-size: 12px;
+	}
+	.hp-input-row {
+		flex-direction: row;
+		align-items: center;
+	}
+	.hp-input {
+		flex: 1;
+		height: 40px;
+		border-radius: 20px;
+		padding-left: 14px;
+		font-size: 14px;
+	}
+	.hp-send {
+		margin-left: 10px;
+		height: 36px;
+		padding-left: 16px;
+		padding-right: 16px;
+		border-radius: 18px;
+		flex-direction: row;
+		align-items: center;
+	}
+	.hp-send-text {
+		font-size: 14px;
+		color: #FFFFFF;
+	}
+	.hp-menu-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		flex-direction: column;
+		align-items: flex-end;
+	}
+	.hp-menu {
+		width: 140px;
+		border-radius: 8px;
+		padding-top: 6px;
+		padding-bottom: 6px;
+		margin-right: 10px;
+	}
+	.hp-menu-item {
+		height: 44px;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+	}
+	.hp-menu-text {
+		font-size: 15px;
+	}
+	.hp-gap4 {
+		width: 4px;
+	}
+	.hp-gap6 {
+		width: 6px;
+	}
+	.hp-gap10 {
+		width: 10px;
+	}
+</style>

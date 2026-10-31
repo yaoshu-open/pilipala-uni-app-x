@@ -1,0 +1,14 @@
+/**
+ * web 端没有可读的持久 cookie jar：
+ * 浏览器 cookie 只对同源页面可读（document.cookie 也拿不到跨域接口域的 cookie），
+ * 因此本端恒返回空串，写操作按「凭据缺失」明确失败，不假装成功。
+ */
+export function getCookie(url: string): string {
+	console.log('[pl-cookie] web 端不支持读取 cookie jar（url=' + url + '）')
+	return ''
+}
+
+export function clearAllCookies(): boolean {
+	console.log('[pl-cookie] web 端不支持清空 cookie jar')
+	return false
+}

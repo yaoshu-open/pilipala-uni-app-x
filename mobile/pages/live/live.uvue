@@ -1,0 +1,412 @@
+<template>
+	<view class="lv">
+		<!-- 错误态：源在滚动区内显示 HttpError（-352 等）；本端用同组件同位置，列表隐藏 -->
+		<view class="lv-fill" :style="errorBoxStyle">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+
+		<list-view
+			class="lv-list"
+			:style="listBoxStyle"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:scroll-top="scrollTop"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+		>
+			<!-- 我的关注（源 buildFollowingList：上内边距 16；标题行 + 高 100 横滑行） -->
+			<list-item :key="'follow'" :type="1">
+				<view class="lv-follow">
+					<view class="lv-follow-head">
+						<text class="lv-follow-title">我的关注</text>
+						<text class="lv-follow-count" :style="primaryStyle">{{ following.length }}</text>
+						<text class="lv-follow-sub" :style="secondaryStyle">人正在直播</text>
+					</view>
+					<live-following-row
+						v-if="following.length > 0"
+						:list="following"
+						@tap="openFollowing"
+					></live-following-row>
+					<!-- 关注接口失败时源显示 80 高居中文案（未登录/失败同一位置） -->
+					<view v-if="following.length == 0 && followingMessage.length > 0" class="lv-follow-tip">
+						<text class="lv-follow-tip-text" :style="secondaryStyle">{{ followingMessage }}</text>
+					</view>
+				</view>
+			</list-item>
+
+			<!-- 首屏骨架：常驻渲染 + display 切换（v-if 在蒸汽端不卸载，P8 真机复现） -->
+			<list-item v-for="n in skeletonRows" :key="'sk-' + n.toString()" :type="2" :style="skeletonBoxStyle">
+				<view class="lv-row">
+					<view v-for="c in columns" :key="'skc-' + c.toString()" class="lv-cell" :style="skeletonCellStyle">
+						<skeleton-video-card-v :img-height="coverHeightText"></skeleton-video-card-v>
+					</view>
+				</view>
+			</list-item>
+
+			<list-item v-for="row in rows" :key="row.key" :type="1">
+				<view class="lv-row">
+					<view v-for="(item, index) in row.cells" :key="item.roomId.toString()" class="lv-cell" :style="cellStyle(index)">
+						<live-card
+							:pic="coverOf(item)"
+							:title="item.title"
+							:uname="item.uname"
+							:area-name="areaOf(item)"
+							:watched-text="item.watchedText"
+							:cover-height="coverHeightText"
+							:columns="columns"
+							@tap="openRoom(item)"
+						></live-card>
+					</view>
+				</view>
+			</list-item>
+
+			<list-item :key="'footer'" :type="3">
+				<view class="lv-footer">
+					<text v-if="finished" class="lv-footer-text" :style="secondaryStyle">没有更多了</text>
+				</view>
+			</list-item>
+		</list-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch, onMounted } from 'vue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonVideoCardV from '../../components/skeleton/skeleton-video-card-v.uvue'
+import LiveCard from '../../components/live/live-card.uvue'
+import LiveFollowingRow from '../../components/live/live-following-row.uvue'
+import { liveList, liveFollowing } from '../../api/live.uts'
+import { LiveItem, LiveFollowingItem } from '../../models/live.uts'
+import { ListResult } from '../../models/video.uts'
+import { navigateTo } from '../../utils/routes.uts'
+import { themeColor, currentThemeIndex, textSecondary } from '../../utils/theme.uts'
+import { getNumber, SK } from '../../utils/storage.uts'
+import { ensureLoginState } from '../../composables/useLogin.uts'
+import { liveTopSeq, liveRefreshSeq } from '../../stores/tabSignal.uts'
+
+/**
+ * 直播频道（源头：`lib/pages/live/view.dart`）。
+ *
+ * 形态：首页「直播」频道的常驻组件（源为 HomePage 里的 LivePage，AutomaticKeepAlive），**不注册路由**；
+ * 头部与状态栏留白由宿主 `pages/home` 提供。频道信号 `liveTopSeq` / `liveRefreshSeq` 由首页 chip
+ * 单击/双击递增（与 rcmd/hot 同机制，见 stores/tabSignal.uts）。
+ *
+ * 结构（1:1 源码）：
+ *  外框 margin 左右 12 + 圆角 10 裁切 → 下拉刷新 → 滚动区：
+ *  ① 我的关注（上内边距 16）：标题「我的关注 / N / 人正在直播」+ 高 100 横滑行；
+ *  ② 直播卡网格：列数 = SK.customRows（默认 2），行/列间距 12（safeSpace），
+ *     单元格高 = 屏宽/列数/(16/10) + (单列 48 / 多列 68)（源 mainAxisExtent 同式）；
+ *  ③ 首屏 10 张竖向卡骨架（源 childCount 10）。
+ * 分页：page 递增、page_size 30、空页停（源无 count 终止条件）。
+ */
+const PAGE_SIZE: number = 30
+/** 外框左右留白（源 StyleString.safeSpace = 12） */
+const SAFE_SPACE: number = 12
+/** 行/列间距（源 crossAxisSpacing / mainAxisSpacing = safeSpace） */
+const GUTTER: number = 12
+/** 封面宽高比（源 StyleString.aspectRatio = 16/10） */
+const ASPECT_RATIO: number = 16 / 10
+
+class CardRow {
+	cells: Array<LiveItem> = []
+	key: string = ''
+}
+
+const items = ref<Array<LiveItem>>([])
+const following = ref<Array<LiveFollowingItem>>([])
+const followingMessage = ref<string>('')
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const refreshing = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const page = ref<number>(1)
+const scrollTop = ref<number>(0)
+const finished = ref<boolean>(false)
+const skeletonRows = ref<number>(5)
+
+const primary = themeColor(currentThemeIndex())
+const primaryStyle = computed((): string => 'color:' + primary + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const errorBoxStyle = computed((): string => state.value == 'error' ? 'display:flex;' : 'display:none;')
+const listBoxStyle = computed((): string => state.value == 'error' ? 'display:none;' : 'display:flex;')
+const skeletonBoxStyle = computed((): string => state.value == 'loading' ? '' : 'display:none;')
+
+/** 列数：源 SK.customRows（首页网格列数设置），缺省 2，clamp 1~3 */
+const columns = ((): number => {
+	const raw = getNumber(SK.customRows, 2)
+	const rounded = Math.round(raw)
+	if (rounded < 1) {
+		return 1
+	}
+	if (rounded > 3) {
+		return 3
+	}
+	return rounded
+})()
+
+const windowWidth = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowWidth
+	} catch (e) {
+		return 390
+	}
+})()
+
+const cellWidth = Math.floor((windowWidth - SAFE_SPACE * 2 - GUTTER * (columns - 1)) / columns)
+/** 单元格总高：源 mainAxisExtent = 屏宽/列数/aspectRatio + (单列 48 / 多列 68) */
+const cellHeight = Math.round(windowWidth / columns / ASPECT_RATIO + (columns == 1 ? 48 : 68))
+const coverHeight = Math.round(cellWidth / ASPECT_RATIO)
+const coverHeightText = coverHeight.toString() + 'px'
+const skeletonCellStyle = 'width:' + cellWidth.toString() + 'px;margin-right:' + GUTTER.toString() + 'px;'
+
+function cellStyle(index: number): string {
+	const base = 'width:' + cellWidth.toString() + 'px;height:' + cellHeight.toString() + 'px;'
+	if (index < columns - 1) {
+		return base + 'margin-right:' + GUTTER.toString() + 'px;'
+	}
+	return base
+}
+
+/** 卡片封面取 cover、缺省 pic；分区角标取 area_name、缺省 parent_name（模型层静态工具） */
+function coverOf(item: LiveItem): string {
+	return LiveItem.coverOf(item)
+}
+
+function areaOf(item: LiveItem): string {
+	return LiveItem.areaOf(item)
+}
+
+/** 行分组（columns 列） */
+const rows = computed((): Array<CardRow> => {
+	const list: Array<CardRow> = []
+	const source = items.value
+	const total = source.length
+	let index = 0
+	while (index < total) {
+		const row = new CardRow()
+		const take = Math.min(columns, total - index)
+		for (let i = 0; i < take; i++) {
+			row.cells.push(source[index + i])
+		}
+		row.key = source[index].roomId.toString() + '-' + index.toString()
+		list.push(row)
+		index = index + take
+	}
+	return list
+})
+
+function appendItems(source: Array<LiveItem>) {
+	for (let i = 0; i < source.length; i++) {
+		items.value.push(source[i])
+	}
+}
+
+async function loadFollowing() {
+	const res: ListResult<LiveFollowingItem> = await liveFollowing(1, 20)
+	if (res.status) {
+		following.value = res.items
+		followingMessage.value = ''
+		return
+	}
+	// 源：接口失败时该区域显示 80 高居中文案（未登录会回 -101，文案由接口 message 决定）
+	following.value = []
+	followingMessage.value = res.message.length > 0 ? res.message : '关注列表加载失败'
+	console.log('[live] following fail: ' + res.message)
+}
+
+async function loadFirst() {
+	const res: ListResult<LiveItem> = await liveList(1, PAGE_SIZE)
+	if (!res.status) {
+		state.value = 'error'
+		errorText.value = res.message
+		return
+	}
+	items.value = []
+	appendItems(res.items)
+	page.value = 2
+	finished.value = res.items.length == 0
+	state.value = 'ready'
+}
+
+async function onRefresh() {
+	if (refreshing.value) {
+		return
+	}
+	refreshing.value = true
+	loadFollowing()
+	await loadFirst()
+	refreshing.value = false
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value || refreshing.value || finished.value) {
+		return
+	}
+	loadingMore.value = true
+	const res: ListResult<LiveItem> = await liveList(page.value, PAGE_SIZE)
+	if (res.status) {
+		appendItems(res.items)
+		if (res.items.length == 0) {
+			finished.value = true
+		} else {
+			page.value = page.value + 1
+		}
+	} else {
+		// 后续页失败即停（上游 -352 时避免每次触底都重打接口）
+		console.log('[live] loadMore fail page=' + page.value.toString() + ' msg=' + res.message)
+		finished.value = true
+	}
+	loadingMore.value = false
+}
+
+function reload() {
+	state.value = 'loading'
+	finished.value = false
+	loadFollowing()
+	loadFirst()
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+function scrollToTop() {
+	// scroll-top 同值不触发滚动：先置 1 再归 0
+	scrollTop.value = scrollTop.value == 0 ? 1 : 0
+	setTimeout(() => {
+		scrollTop.value = 0
+	}, 30)
+}
+
+function openRoom(item: LiveItem) {
+	let query = 'roomid=' + item.roomId.toString()
+	if (item.uname.length > 0) {
+		query = query + '&uname=' + encodeURIComponent(item.uname)
+	}
+	if (item.face.length > 0) {
+		query = query + '&face=' + encodeURIComponent(item.face)
+	}
+	const cover = coverOf(item)
+	if (cover.length > 0) {
+		query = query + '&cover=' + encodeURIComponent(cover)
+	}
+	navigateTo('/pages/live-room/live-room', query)
+}
+
+function openFollowing(item: LiveFollowingItem) {
+	let query = 'roomid=' + item.roomId.toString()
+	if (item.uname.length > 0) {
+		query = query + '&uname=' + encodeURIComponent(item.uname)
+	}
+	if (item.face.length > 0) {
+		query = query + '&face=' + encodeURIComponent(item.face)
+	}
+	navigateTo('/pages/live-room/live-room', query)
+}
+
+watch(liveTopSeq, (value: number) => {
+	if (value <= 0) {
+		return
+	}
+	scrollToTop()
+})
+
+watch(liveRefreshSeq, (value: number) => {
+	if (value <= 0) {
+		return
+	}
+	onRefresh()
+})
+
+onMounted(() => {
+	// 登录态自愈（P8 口径）：关注横滑行依赖登录，内存标志未恢复时先打一次 nav
+	ensureLoginState()
+	loadFollowing()
+	loadFirst()
+})
+</script>
+
+<style>
+	.lv {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 12px;
+		margin-right: 12px;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+
+	.lv-fill {
+		flex: 1;
+		flex-direction: column;
+	}
+
+	.lv-list {
+		flex: 1;
+	}
+
+	.lv-follow {
+		display: flex;
+		flex-direction: column;
+		padding-top: 16px;
+	}
+
+	.lv-follow-head {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+	}
+
+	.lv-follow-title {
+		font-size: 15px;
+		font-weight: bold;
+	}
+
+	.lv-follow-count {
+		margin-left: 4px;
+		font-size: 12px;
+	}
+
+	.lv-follow-sub {
+		margin-left: 2px;
+		font-size: 12px;
+	}
+
+	.lv-follow-tip {
+		height: 80px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lv-follow-tip-text {
+		font-size: 12px;
+	}
+
+	.lv-row {
+		display: flex;
+		flex-direction: row;
+		margin-top: 12px;
+	}
+
+	.lv-cell {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.lv-footer {
+		height: 60px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.lv-footer-text {
+		font-size: 12px;
+	}
+</style>

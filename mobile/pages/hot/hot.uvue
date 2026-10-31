@@ -1,0 +1,210 @@
+<template>
+	<view class="hot">
+		<view v-if="state == 'error'" class="hot-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+		<view v-else-if="state == 'empty'" class="hot-fill">
+			<view class="hot-empty">
+				<text class="hot-empty-text" :style="secondaryStyle">暂无热门内容</text>
+			</view>
+		</view>
+		<list-view v-if="state == 'loading'" class="hot-list">
+			<list-item v-for="n in skeletonCount" :key="'sk-' + n.toString()" :type="2">
+				<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+			</list-item>
+		</list-view>
+		<list-view
+			v-if="state != 'loading'"
+			class="hot-list"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			:scroll-top="scrollTop"
+			@refresherrefresh="onRefreshGesture"
+			@scrolltolower="onLoadMore"
+		>
+			<list-item v-for="item in items" :key="item.bvid" :type="1">
+				<p-video-card-h
+					:pic="item.pic"
+					:title="item.title"
+					:duration="item.duration"
+					:view-count="item.stat.view"
+					:danmu-count="item.stat.danmaku"
+					:pubdate="item.pubdate"
+					:owner-name="item.owner.name"
+					:show-pubdate="true"
+					:card-height="cardHeight"
+					@tap="openDetail(item.bvid, item.cid)"
+				></p-video-card-h>
+			</list-item>
+			<list-item :key="'footer'" :type="3">
+				<view class="hot-footer"></view>
+			</list-item>
+		</list-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch, onMounted } from 'vue'
+import PVideoCardH from '../../components/p-video-card-h/p-video-card-h.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import { fetchHot } from '../../api/video.uts'
+import { HotVideoItem, ListResult } from '../../models/video.uts'
+import { hotTopSeq, hotRefreshSeq } from '../../stores/tabSignal.uts'
+import { navigateTo } from '../../utils/routes.uts'
+import { textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 热门（源头：lib/pages/hot/view.dart）。
+ *
+ * 单列横向卡列表：封面 16:10，右侧标题/发布时间/UP 主/播放量+弹幕数；
+ * 分页 20/页，下拉刷新保留旧数据（源 insertAll 前插）。
+ */
+const PAGE_SIZE: number = 20
+
+const items = ref<Array<HotVideoItem>>([])
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const refreshing = ref<boolean>(false)
+const loadingMore = ref<boolean>(false)
+const page = ref<number>(1)
+const scrollTop = ref<number>(0)
+const skeletonCount = ref<number>(10)
+
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return Math.max(88, Math.round(((info.windowWidth - 24 - 48) / 2) / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+async function loadFirst() {
+	const res: ListResult<HotVideoItem> = await fetchHot(1, PAGE_SIZE)
+	if (!res.status) {
+		state.value = 'error'
+		errorText.value = res.message
+		return
+	}
+	items.value = []
+	for (let i = 0; i < res.items.length; i++) {
+		items.value.push(res.items[i])
+	}
+	page.value = 2
+	state.value = items.value.length > 0 ? 'ready' : 'empty'
+}
+
+async function onRefresh() {
+	if (state.value == 'loading') {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	const res: ListResult<HotVideoItem> = await fetchHot(1, PAGE_SIZE)
+	if (res.status) {
+		// 源刷新为前插，保留已加载的后续页
+		const merged: Array<HotVideoItem> = []
+		for (let i = 0; i < res.items.length; i++) {
+			merged.push(res.items[i])
+		}
+		for (let j = 0; j < items.value.length; j++) {
+			merged.push(items.value[j])
+		}
+		items.value = merged
+	}
+	refreshing.value = false
+}
+
+async function onLoadMore() {
+	if (state.value != 'ready' || loadingMore.value || refreshing.value) {
+		return
+	}
+	loadingMore.value = true
+	const res = await fetchHot(page.value, PAGE_SIZE)
+	if (res.status) {
+		for (let i = 0; i < res.items.length; i++) {
+			items.value.push(res.items[i])
+		}
+		page.value = page.value + 1
+	}
+	loadingMore.value = false
+}
+
+function reload() {
+	state.value = 'loading'
+	loadFirst()
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+function scrollToTop() {
+	scrollTop.value = 1
+	setTimeout(() => {
+		scrollTop.value = 0
+	}, 16)
+}
+
+/** 点卡片进详情（源头 lib/common/widgets/video_card_h.dart:75：/video?bvid=&cid=） */
+function openDetail(bvid: string, cid: number) {
+	if (bvid.length == 0) {
+		uni.showToast({ title: '无法获取视频信息', icon: 'none' })
+		return
+	}
+	let url = '/pages/video/video?bvid=' + bvid
+	if (cid > 0) {
+		url = url + '&cid=' + cid.toString()
+	}
+	navigateTo(url)
+}
+
+watch(hotTopSeq, (value: number) => {
+	if (value > 0) {
+		scrollToTop()
+	}
+})
+
+watch(hotRefreshSeq, (value: number) => {
+	if (value > 0) {
+		onRefresh()
+	}
+})
+
+onMounted(() => {
+	loadFirst()
+})
+</script>
+
+<style>
+	.hot {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-top: 7px;
+	}
+	.hot-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.hot-empty {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.hot-empty-text {
+		font-size: 14px;
+	}
+	.hot-list {
+		flex: 1;
+	}
+	.hot-footer {
+		height: 60px;
+	}
+</style>

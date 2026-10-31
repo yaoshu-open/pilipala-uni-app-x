@@ -1,0 +1,173 @@
+import { strOf, numOf, objOf, strArrayOf } from '../utils/json.uts'
+
+/**
+ * 观看历史域模型。源头：`lib/models/user/history.dart`（HisListItem/HisHistory/Cursor）。
+ * 字段名与源保持一致（源 snake_case JSON 键在 from() 内映射），供
+ * history / history-search 页与 history-item 组件消费。
+ * later 页消费 models/video.uts 的 HotVideoItem（源同款 HotVideoItemModel）。
+ */
+
+/** 历史条目的定位信息（源 History：oid/bvid/cid/epid/business/page） */
+export class HisHistory {
+	oid: number = 0
+	bvid: string = ''
+	cid: number = 0
+	epid: string = ''
+	/** archive / pgc / live / article-list / article */
+	business: string = ''
+	page: number = 0
+
+	static from(obj: UTSJSONObject | null): HisHistory {
+		const history = new HisHistory()
+		if (obj == null) {
+			return history
+		}
+		history.oid = numOf(obj, 'oid')
+		history.bvid = strOf(obj, 'bvid')
+		history.cid = numOf(obj, 'cid')
+		history.epid = strOf(obj, 'epid')
+		history.business = strOf(obj, 'business')
+		history.page = numOf(obj, 'page')
+		return history
+	}
+}
+
+/** 历史条目（源 HisListItem；多选态 checked 为 UI 态字段，源同款挂在条目上） */
+export class HisListItem {
+	title: string = ''
+	longTitle: string = ''
+	cover: string = ''
+	pic: string = ''
+	covers: Array<string> = []
+	uri: string = ''
+	history: HisHistory = new HisHistory()
+	videos: number = 0
+	authorName: string = ''
+	authorFace: string = ''
+	authorMid: number = 0
+	viewAt: number = 0
+	/** -1 = 已看完（源同款哨兵值） */
+	progress: number = 0
+	badge: string = ''
+	/** 分 P / 集名（源 showTitle） */
+	showTitle: string = ''
+	duration: number = 0
+	kid: number = 0
+	tagName: string = ''
+	liveStatus: number = 0
+	/** 多选勾选态（UI 字段） */
+	checked: boolean = false
+
+	static from(obj: UTSJSONObject | null): HisListItem {
+		const item = new HisListItem()
+		if (obj == null) {
+			return item
+		}
+		item.title = strOf(obj, 'title')
+		item.longTitle = strOf(obj, 'long_title')
+		item.cover = strOf(obj, 'cover')
+		item.pic = strOf(obj, 'pic')
+		item.uri = strOf(obj, 'uri')
+		item.history = HisHistory.from(objOf(obj, 'history'))
+		item.videos = numOf(obj, 'videos')
+		item.authorName = strOf(jsonAuthor(obj), 'name')
+		item.authorFace = strOf(jsonAuthor(obj), 'face')
+		item.authorMid = numOf(jsonAuthor(obj), 'mid')
+		item.viewAt = numOf(obj, 'view_at')
+		item.progress = numOf(obj, 'progress')
+		item.badge = strOf(obj, 'badge')
+		item.showTitle = strOf(obj, 'show_title')
+		item.duration = numOf(obj, 'duration')
+		item.kid = numOf(obj, 'kid')
+		item.tagName = strOf(obj, 'tag_name')
+		item.liveStatus = numOf(obj, 'live_status')
+		// covers 字符串数组（部分端点用 covers[0] 兜底封面）
+		item.covers = strArrayOf(obj, 'covers')
+		// author_name / author_face 扁平字段（history cursor 端点）
+		if (item.authorName.length == 0) {
+			item.authorName = strOf(obj, 'author_name')
+		}
+		if (item.authorFace.length == 0) {
+			item.authorFace = strOf(obj, 'author_face')
+		}
+		if (item.authorMid == 0) {
+			item.authorMid = numOf(obj, 'author_mid')
+		}
+		return item
+	}
+}
+
+/** 展示封面：cover 优先，其次 covers 首项（源同款兜底链） */
+export function historyCoverOf(item: HisListItem): string {
+	if (item.cover.length > 0) {
+		return item.cover
+	}
+	if (item.covers.length > 0) {
+		return item.covers[0]
+	}
+	return item.pic
+}
+
+/** 是否已看完（progress == -1，源同款哨兵值） */
+export function historyFinished(item: HisListItem): boolean {
+	return item.progress == -1
+}
+
+/** 作者对象兜底（author 字段存在时取其 name/face/mid；history cursor 为扁平键） */
+function jsonAuthor(obj: UTSJSONObject): UTSJSONObject {
+	const author = objOf(obj, 'author')
+	if (author != null) {
+		return author
+	}
+	return obj
+}
+
+/** 游标（源 Cursor：max/view_at/business/ps） */
+export class HisCursor {
+	max: number = 0
+	viewAt: number = 0
+	business: string = ''
+	ps: number = 0
+
+	static from(obj: UTSJSONObject | null): HisCursor {
+		const cursor = new HisCursor()
+		if (obj == null) {
+			return cursor
+		}
+		cursor.max = numOf(obj, 'max')
+		cursor.viewAt = numOf(obj, 'view_at')
+		cursor.business = strOf(obj, 'business')
+		cursor.ps = numOf(obj, 'ps')
+		return cursor
+	}
+}
+
+/** 历史列表请求结果（游标型 + 搜索 pn 型共用载体） */
+export class HistoryResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	items: Array<HisListItem> = []
+	/** 游标型：cursor（下页 max/view_at 取上页末条时仅作参考） */
+	cursor: HisCursor = new HisCursor()
+	/** 搜索型：page.total */
+	total: number = 0
+}
+
+/** 暂停状态结果（/x/v2/history/shadow：data 为 bool） */
+export class HistoryShadowResult {
+	status: boolean = false
+	message: string = ''
+	paused: boolean = false
+}
+
+/** 删除历史的 kid 拼接（源 delHistory：archive_/live_/article_ 前缀） */
+export function historyKidOf(kid: number, business: string): string {
+	if (business == 'live') {
+		return 'live_' + kid.toString()
+	}
+	if (business.indexOf('article') >= 0) {
+		return 'article_' + kid.toString()
+	}
+	return 'archive_' + kid.toString()
+}

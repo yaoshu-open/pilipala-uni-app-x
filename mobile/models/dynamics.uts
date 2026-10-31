@@ -1,0 +1,124 @@
+import { strOf, numOf, boolOf, objOf, arrOf } from '../utils/json.uts'
+import { DynamicItem } from './member.uts'
+
+/**
+ * 动态域包装模型。源头：`lib/models/dynamics/up.dart`（关注面板）与
+ * `lib/models/dynamics/result.dart` 的 DynamicsDataModel（feed 包装）。
+ *
+ * 动态条目本体（DynamicItem 族）单源在 `models/member.uts`，本文件只落包装层，
+ * 不复制条目类型定义（设计_动态域 §六）。
+ */
+
+/** 直播中的关注（源 LiveUserItem；live_users.items[] 项） */
+export class LiveUpItem {
+	face: string = ''
+	mid: number = 0
+	roomId: number = 0
+	title: string = ''
+	uname: string = ''
+	/** 面板渲染分组标识，恒 'live'（源同款写死字段） */
+	type: string = 'live'
+
+	static from(obj: UTSJSONObject): LiveUpItem {
+		const item = new LiveUpItem()
+		item.face = strOf(obj, 'face')
+		item.mid = numOf(obj, 'mid')
+		item.roomId = numOf(obj, 'room_id')
+		item.title = strOf(obj, 'title')
+		item.uname = strOf(obj, 'uname')
+		return item
+	}
+}
+
+/** 关注 UP（源 UpItem；up_list[] 项） */
+export class FollowUpItem {
+	face: string = ''
+	mid: number = 0
+	uname: string = ''
+	/** 有更新时的红点角标 */
+	hasUpdate: boolean = false
+	/** 面板渲染分组标识，恒 'up' */
+	type: string = 'up'
+
+	static from(obj: UTSJSONObject): FollowUpItem {
+		const item = new FollowUpItem()
+		item.face = strOf(obj, 'face')
+		item.mid = numOf(obj, 'mid')
+		item.uname = strOf(obj, 'uname')
+		item.hasUpdate = boolOf(obj, 'has_update')
+		return item
+	}
+}
+
+/** 最新关注面板（源 FollowUpModel；upList 头插「全部动态/我」由 api 层做，模型不感知） */
+export class FollowUpPanel {
+	liveList: Array<LiveUpItem> = []
+	upList: Array<FollowUpItem> = []
+	/** 我的头像与 mid（插「我」项、跳 follow 页用） */
+	myFace: string = ''
+	myMid: number = 0
+
+	static from(obj: UTSJSONObject | null): FollowUpPanel {
+		const panel = new FollowUpPanel()
+		if (obj == null) {
+			return panel
+		}
+		const liveUsers = objOf(obj, 'live_users')
+		if (liveUsers != null) {
+			const items = arrOf(liveUsers, 'items')
+			for (let i = 0; i < items.length; i++) {
+				panel.liveList.push(LiveUpItem.from(items[i]))
+			}
+		}
+		const upList = arrOf(obj, 'up_list')
+		for (let i = 0; i < upList.length; i++) {
+			panel.upList.push(FollowUpItem.from(upList[i]))
+		}
+		const myInfo = objOf(obj, 'my_info')
+		if (myInfo != null) {
+			panel.myFace = strOf(myInfo, 'face')
+			panel.myMid = numOf(myInfo, 'mid')
+		}
+		return panel
+	}
+}
+
+/** 关注面板结果 */
+export class FollowUpResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	panel: FollowUpPanel | null = null
+}
+
+/** 动态流页（源 DynamicsDataModel；offset 空串 = 没有更多） */
+export class DynamicsFeedResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	items: Array<DynamicItem> = []
+	offset: string = ''
+	hasMore: boolean = false
+}
+
+/** 动态详情结果 */
+export class DynamicDetailResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	item: DynamicItem | null = null
+}
+
+/** 图文动态评论 oid 结果（/x/article/viewinfo → data.comment_id；floor=2 且 MAJOR_TYPE_OPUS 前置） */
+export class ArticleViewInfoResult {
+	status: boolean = false
+	message: string = ''
+	commentId: number = 0
+}
+
+/** 写操作通用结果（点赞/转发） */
+export class DynamicsActionResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+}

@@ -1,0 +1,745 @@
+<template>
+	<view class="ps" :style="rootStyle" @longpress="onLongPressStart" @touchend="onLongPressEnd" @touchcancel="onLongPressEnd">
+		<video
+			id="vd-video"
+			class="ps-video"
+			:src="innerSrc"
+			:controls="false"
+			:autoplay="autoPlay"
+			:initial-time="startTime"
+			:header="headerObj"
+			:show-loading="true"
+			:show-center-play-btn="false"
+			:show-play-btn="false"
+			:show-fullscreen-btn="false"
+			:show-progress="false"
+			object-fit="contain"
+			@loadedmetadata="onLoadedMetadata"
+			@play="onPlay"
+			@pause="onPause"
+			@timeupdate="onTimeUpdate"
+			@ended="onEnded"
+			@error="onError"
+		>
+			<!-- 首帧封面：未起播时铺满，起播后淡出（源 isShowCover） -->
+			<view v-if="coverShown" class="ps-cover" :style="coverStyle" @click="onCoverTap">
+				<network-img v-if="cover.length > 0" :src="cover" width="100%" height="100%"></network-img>
+				<view class="ps-cover-mask"></view>
+				<view class="ps-cover-play">
+					<text class="ps-cover-play-icon" :style="coverPlayIconStyle">{{ playGlyph }}</text>
+				</view>
+			</view>
+
+			<!-- 播放失败：明确错误 + 点击重试，不静默停在黑屏 -->
+			<view v-if="errorText.length > 0" class="ps-error" @click="retry">
+				<text class="ps-error-text">{{ errorText }}</text>
+				<text class="ps-error-retry">点击重试</text>
+			</view>
+
+			<!-- 最小控制条：进度条（可拖动 seek）+ 播放/暂停 + 时间 -->
+			<view class="ps-controls">
+				<view
+					class="ps-bar-area"
+					@touchstart="onBarTouchStart"
+					@touchmove="onBarTouchMove"
+					@touchend="onBarTouchEnd"
+					@touchcancel="onBarTouchEnd"
+				>
+					<view class="ps-bar-track">
+						<view class="ps-bar-fill" :style="fillStyle"></view>
+						<view class="ps-bar-thumb" :style="thumbStyle"></view>
+					</view>
+				</view>
+				<view class="ps-row">
+					<view class="ps-btn" @click="togglePlay">
+						<text class="ps-btn-icon" :style="controlIconStyle">{{ playing ? pauseGlyph : playGlyph }}</text>
+					</view>
+					<text class="ps-time">{{ timeText }}</text>
+					<view class="ps-row-fill"></view>
+					<!-- 倍速：当前倍速显示 + 点按开菜单（源控制条倍速钮；列表与默认值读 SK.playSpeed* 三键） -->
+					<view class="ps-act" @click="toggleSpeedMenu">
+						<text class="ps-act-text" :style="actTextStyle">{{ rateText }}</text>
+					</view>
+					<!-- 全屏：跳转与位置回传由页面执行 -->
+					<view class="ps-act" @click="onFullscreen">
+						<text class="ps-act-text" :style="actTextStyle">全屏</text>
+					</view>
+					<text v-if="title.length > 0" class="ps-title" :max-lines="1">{{ title }}</text>
+				</view>
+
+				<!-- 倍速菜单：面板常驻 + display 切换（App 端 v-if 转 false 不卸载节点的坑，P8/P9 已复现） -->
+				<scroll-view class="ps-speed-panel" :style="speedPanelStyle" direction="vertical" @click.stop="noop">
+					<view
+						v-for="(speed, index) in speeds"
+						:key="'spd-' + index.toString()"
+						class="ps-speed-item"
+						@click="onPickSpeed(speed)"
+					>
+						<text class="ps-speed-text" :style="speedItemStyle(speed)">{{ speedText(speed) }}</text>
+					</view>
+				</scroll-view>
+			</view>
+
+			<!-- 顶栏（返回）放在最后绘制：cover / 错误浮层都在它下面，避免被盖住 -->
+			<view class="ps-top" :style="topStyle">
+				<view class="ps-back" @click="onBack">
+					<text class="ps-back-icon" :style="backIconStyle">{{ backGlyph }}</text>
+				</view>
+			</view>
+		</video>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { timeFormat } from '../../utils/format.uts'
+import { statusBarHeight } from '../../utils/safeArea.uts'
+import { UA_DESKTOP, REFERER } from '../../utils/constants.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+import { SK, getBool, getNumber, getNumberArray, defaultSpeedList } from '../../utils/storage.uts'
+
+/**
+ * 播放区（后端 A：内置 video 组件 + durl 单文件流）。
+ *
+ * 源头：`lib/pages/video/detail/widgets/header_control.dart` + `pl_player` 的播放/暂停/进度交互。
+ * 分期口径（设计_视频详情域 §二）：页面只依赖本组件暴露的「换源/播放/暂停/seek/全屏」能力，
+ * 后续切 pl-player（DASH 合并）时替换本组件内部实现，页面与业务不动。
+ *
+ * 视觉：16:9 黑底 + 封面铺满 + 底部控制条（进度条 / 播放暂停 / 时间 / 全屏）；
+ * 浮层颜色固定为深色底上的白字，不参与明暗主题（播放区底色恒为黑，设计_视频详情域 §七）。
+ *
+ * 与页面的接线（页面负责业务，本组件只抛意图）：
+ *  - `progress`(毫秒) / `playing`(boolean)：播放进度与播放态，供页面喂给弹幕层与全屏入口
+ *  - `fullscreen`：全屏入口被点，跳转与回传由页面执行（video 上下文仍在页面侧）
+ * 底部控制条的高度是页面判断「弹幕层该让出多少」的依据——改 `.ps-controls` 的
+ * 进度区 20 / 操作行 40 / padding-bottom 2 时，必须同步 pages/video/video.uvue 的 CONTROL_BAR_HEIGHT。
+ */
+const props = defineProps({
+	src: { type: String, default: '' },
+	cover: { type: String, default: '' },
+	title: { type: String, default: '' },
+	/** 起播位置（秒，来自 playurl.last_play_time） */
+	startTime: { type: Number, default: 0 },
+	autoPlay: { type: Boolean, default: true },
+	/** 总时长提示（秒，来自 playurl.timelength；timeupdate 到达前先用它显示） */
+	durationHint: { type: Number, default: 0 },
+	/** 备用播放地址（durl.backup_url）：主地址失败时自动切换一次 */
+	backupSrc: { type: String, default: '' }
+})
+
+// 弹幕开关不在本组件内：唯一入口在详情页 Tab 栏（1:1 基线），本组件只负责画面与播放控制
+const emit = defineEmits(['started', 'back', 'error', 'progress', 'playing', 'fullscreen'])
+
+const OVERLAY_TEXT = '#FFFFFF'
+
+const windowWidth = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowWidth
+	} catch (e) {
+		return 390
+	}
+})()
+
+const videoHeight = Math.round(windowWidth * 9 / 16)
+const rootStyle = 'width:100%;height:' + videoHeight.toString() + 'px;background-color:#000000;'
+const topStyle = 'padding-top:' + (statusBarHeight() + 4).toString() + 'px;'
+
+// 进度条轨道左右内边距固定 12，触摸换算用同一常量（避免 selector 查询时机问题）
+const BAR_INSET = 12
+const barWidth = windowWidth - BAR_INSET * 2
+
+const playing = ref<boolean>(false)
+const currentSec = ref<number>(0)
+const durationSec = ref<number>(props.durationHint)
+const coverShown = ref<boolean>(true)
+const coverFading = ref<boolean>(false)
+const errorText = ref<string>('')
+const dragging = ref<boolean>(false)
+const dragSec = ref<number>(0)
+/** 换源（切分P/合集分集）后待执行的定位秒数；元数据就绪时消费 */
+const pendingSeek = ref<number>(-1)
+/** 实际播放地址（主地址失败会切到 props.backupSrc） */
+const innerSrc = ref<string>('')
+const triedBackup = ref<boolean>(false)
+
+// ---------------------------------------------------------------- 倍速（设置域消费：SK.playSpeed* 三键）
+
+const speeds = ref<Array<number>>(getNumberArray(SK.playSpeedList, defaultSpeedList()))
+/** 用户选定倍速（长按临时倍速不改它） */
+const baseRate = ref<number>(getNumber(SK.playSpeedDefault, 1.0))
+const rate = ref<number>(baseRate.value)
+const speedMenuVisible = ref<boolean>(false)
+
+let longPressTimer = -1
+let longPressActive = false
+
+const speedPanelStyle = computed((): string => {
+	return (speedMenuVisible.value ? '' : 'display:none;') + 'position:absolute;right:8px;bottom:100%;' +
+		'width:96px;max-height:196px;background-color:rgba(0,0,0,0.86);border-radius:8px;' +
+		'padding-top:4px;padding-bottom:4px;'
+})
+
+const rateText = computed((): string => {
+	const value = rate.value
+	return (Math.round(value * 100) / 100).toFixed(2).replace('.00', '.0') + 'X'
+})
+
+function speedText(speed: number): string {
+	return (Math.round(speed * 100) / 100).toString() + 'X'
+}
+
+function speedItemStyle(speed: number): string {
+	const active = Math.abs(speed - rate.value) < 0.001
+	return 'color:' + (active ? '#5CB67B' : OVERLAY_TEXT) + ';' + (active ? 'font-weight:bold;' : '')
+}
+
+function applyRate(value: number) {
+	const ctx = videoContext()
+	rate.value = value
+	if (ctx == null) {
+		return
+	}
+	try {
+		ctx.playbackRate(value)
+	} catch (e) {
+		console.log('[player] playbackRate failed rate=' + value.toString())
+	}
+}
+
+function toggleSpeedMenu() {
+	// 每次打开重读设置：倍速子页增删档位后回到详情页即生效
+	speeds.value = getNumberArray(SK.playSpeedList, defaultSpeedList())
+	speedMenuVisible.value = !speedMenuVisible.value
+}
+
+function closeSpeedMenu() {
+	speedMenuVisible.value = false
+}
+
+function onPickSpeed(speed: number) {
+	baseRate.value = speed
+	applyRate(speed)
+	closeSpeedMenu()
+}
+
+function noop() {}
+
+/** 长按临时加速（源 pl_player：长按按长按倍速，松手恢复） */
+function onLongPressStart() {
+	if (longPressTimer >= 0) {
+		clearTimeout(longPressTimer)
+	}
+	longPressTimer = setTimeout(() => {
+		longPressTimer = -1
+		if (longPressActive) {
+			return
+		}
+		longPressActive = true
+		const target = getBool(SK.enableAutoLongPressSpeed, false)
+			? Math.round(baseRate.value * 2 * 100) / 100
+			: getNumber(SK.playSpeedLongPressDefault, 2.0)
+		applyRate(target)
+		console.log('[player] long press rate=' + target.toString())
+	}, 500)
+}
+
+function onLongPressEnd() {
+	if (longPressTimer >= 0) {
+		clearTimeout(longPressTimer)
+		longPressTimer = -1
+	}
+	if (longPressActive) {
+		longPressActive = false
+		applyRate(baseRate.value)
+	}
+}
+
+const backGlyph = glyphOf('arrow-back')
+const playGlyph = glyphOf('play-arrow')
+const pauseGlyph = glyphOf('pause')
+
+const backIconStyle = iconStyle('arrow-back', 22, OVERLAY_TEXT)
+const coverPlayIconStyle = iconStyle('play-arrow', 34, OVERLAY_TEXT)
+const controlIconStyle = iconStyle('play-arrow', 20, OVERLAY_TEXT)
+
+/** 控制条文字按钮：常态白 */
+const actTextStyle = 'color:' + OVERLAY_TEXT + ';'
+
+// 播放器（ExoPlayer）不走平台 cookie jar，防盗链头必须自带；口径对齐源 playerInit 的 httpHeaders
+const headerObj: UTSJSONObject = {}
+headerObj.set('referer', REFERER)
+headerObj.set('user-agent', UA_DESKTOP)
+
+const coverStyle = computed((): string => 'opacity:' + (coverFading.value ? '0' : '1') + ';')
+
+const totalSec = computed((): number => {
+	if (durationSec.value > 0) {
+		return durationSec.value
+	}
+	return props.durationHint
+})
+
+const displaySec = computed((): number => {
+	return dragging.value ? dragSec.value : currentSec.value
+})
+
+const timeText = computed((): string => {
+	return timeFormat(displaySec.value) + ' / ' + timeFormat(totalSec.value)
+})
+
+const ratio = computed((): number => {
+	const total = totalSec.value
+	if (total <= 0) {
+		return 0
+	}
+	let value = displaySec.value / total
+	if (value < 0) {
+		value = 0
+	}
+	if (value > 1) {
+		value = 1
+	}
+	return value
+})
+
+const fillStyle = computed((): string => 'width:' + Math.round(ratio.value * 1000) / 10 + '%;')
+const thumbStyle = computed((): string => 'left:' + Math.round(ratio.value * 1000) / 10 + '%;')
+
+function videoContext(): VideoContext | null {
+	try {
+		return uni.createVideoContext('vd-video')
+	} catch (e) {
+		console.log('[player] createVideoContext failed')
+		return null
+	}
+}
+
+function onLoadedMetadata() {
+	const ctx = videoContext()
+	if (ctx == null) {
+		return
+	}
+	if (pendingSeek.value >= 0) {
+		ctx.seek(pendingSeek.value)
+		pendingSeek.value = -1
+	}
+	// 元数据就绪后兜底起播：播放地址是异步取回的，autoplay 属性只在元素初始化时生效，
+	// 只 setSrc 会偶发停在封面（真机实测：冷启动首帧停在「点击播放」）
+	if (props.autoPlay && !playing.value) {
+		ctx.play()
+	}
+	// 元数据就绪后应用设置里的默认倍速（VideoContext.playbackRate 需播放器已创建）
+	applyRate(baseRate.value)
+}
+
+function onPlay() {
+	playing.value = true
+	errorText.value = ''
+	emit('playing', true)
+	if (coverShown.value && !coverFading.value) {
+		coverFading.value = true
+		// 单属性 opacity 过渡完成后移除封面（App 端 transition 多值不可靠）
+		setTimeout(() => {
+			coverShown.value = false
+		}, 260)
+	}
+	emit('started')
+}
+
+function onPause() {
+	playing.value = false
+	emit('playing', false)
+}
+
+function onTimeUpdate(event: UniVideoTimeUpdateEvent) {
+	const detail = event.detail
+	currentSec.value = detail.currentTime
+	if (detail.duration > 0) {
+		durationSec.value = detail.duration
+	}
+	// 向上抛毫秒进度：弹幕层按这个进度取要上屏的弹幕（与全屏入口的起始秒数同源）
+	emit('progress', Math.max(0, Math.floor(detail.currentTime * 1000)))
+}
+
+function onEnded() {
+	playing.value = false
+	emit('playing', false)
+}
+
+/** 取 URL 的 host（错误排查用，不含查询串） */
+function hostOfUrl(url: string): string {
+	const schemeIndex = url.indexOf('://')
+	const start = schemeIndex >= 0 ? schemeIndex + 3 : 0
+	const rest = url.substring(start)
+	const slash = rest.indexOf('/')
+	return slash >= 0 ? rest.substring(0, slash) : rest
+}
+
+function onError(event: UniVideoErrorEvent) {
+	if (innerSrc.value.length == 0) {
+		// 起播前 src 为空属正常（播放地址仍在请求 / 进全屏前主动清空释放），不记录不误报
+		return
+	}
+	console.log('[player] video error code=' + event.detail.errCode.toString() + ' msg=' + event.detail.errMsg +
+		' host=' + hostOfUrl(innerSrc.value))
+	// 主地址（常见为 PCDN 节点）失败时切备用 CDN 再试一次
+	if (!triedBackup.value && props.backupSrc.length > 0) {
+		triedBackup.value = true
+		console.log('[player] switch to backup host=' + hostOfUrl(props.backupSrc))
+		pendingSeek.value = currentSec.value
+		innerSrc.value = props.backupSrc
+		errorText.value = ''
+		setTimeout(() => {
+			const ctx = videoContext()
+			if (ctx != null) {
+				ctx.play()
+			}
+		}, 300)
+		return
+	}
+	errorText.value = '播放失败'
+	emit('error')
+}
+
+function retry() {
+	errorText.value = ''
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.play()
+	}
+}
+
+function onCoverTap() {
+	togglePlay()
+}
+
+/** 全屏入口：跳转与回传由页面执行 */
+function onFullscreen() {
+	emit('fullscreen')
+}
+
+function togglePlay() {
+	const ctx = videoContext()
+	if (ctx == null) {
+		return
+	}
+	if (playing.value) {
+		ctx.pause()
+	} else {
+		ctx.play()
+	}
+}
+
+/** 触摸位置 → 播放比例（页面无横向滚动，pageX 与轨道左缘同为屏幕坐标） */
+function ratioFromEvent(event: TouchEvent): number {
+	let touch: Touch | null = null
+	if (event.touches.length > 0) {
+		touch = event.touches[0]
+	} else if (event.changedTouches.length > 0) {
+		touch = event.changedTouches[0]
+	}
+	if (touch == null) {
+		return -1
+	}
+	let value = (touch.pageX - BAR_INSET) / barWidth
+	if (value < 0) {
+		value = 0
+	}
+	if (value > 1) {
+		value = 1
+	}
+	return value
+}
+
+function onBarTouchStart(event: TouchEvent) {
+	const value = ratioFromEvent(event)
+	if (value < 0) {
+		return
+	}
+	dragging.value = true
+	dragSec.value = value * totalSec.value
+}
+
+function onBarTouchMove(event: TouchEvent) {
+	if (!dragging.value) {
+		return
+	}
+	const value = ratioFromEvent(event)
+	if (value < 0) {
+		return
+	}
+	dragSec.value = value * totalSec.value
+}
+
+function onBarTouchEnd(event: TouchEvent) {
+	if (!dragging.value) {
+		return
+	}
+	dragging.value = false
+	const value = ratioFromEvent(event)
+	const target = value < 0 ? dragSec.value : value * totalSec.value
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.seek(target)
+	}
+	currentSec.value = target
+}
+
+function onBack() {
+	emit('back')
+}
+
+/** 全屏能力（后续阶段接入全屏页时由页面调用；本期无按钮） */
+function requestFullscreen() {
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.requestFullScreen()
+	}
+}
+
+function pause() {
+	const ctx = videoContext()
+	if (ctx != null) {
+		ctx.pause()
+	}
+}
+
+// 页面换了播放地址（首次取到 / 切分P / 切合集分集）：主地址复位并清掉备份尝试标记
+watch((): string => props.src, (value: string) => {
+	triedBackup.value = false
+	innerSrc.value = value
+})
+
+// 实际 src 变化：重置封面与进度，元数据就绪后定位到起点并起播
+watch(innerSrc, (value: string) => {
+	if (value.length == 0) {
+		return
+	}
+	coverShown.value = true
+	coverFading.value = false
+	errorText.value = ''
+	playing.value = false
+	emit('playing', false)
+	currentSec.value = props.startTime
+	durationSec.value = props.durationHint
+	if (!triedBackup.value) {
+		pendingSeek.value = props.startTime
+	}
+	const ctx = videoContext()
+	if (ctx != null && props.autoPlay) {
+		ctx.play()
+	}
+	rate.value = baseRate.value
+	applyRate(baseRate.value)
+})
+
+// 播放地址晚于组件挂载返回时，补上总时长（timeupdate 到达前也能显示 x / 总时长）
+watch((): number => props.durationHint, (value: number) => {
+	if (value > 0 && durationSec.value == 0) {
+		durationSec.value = value
+	}
+})
+
+defineExpose({ requestFullscreen, pause })
+</script>
+
+<style>
+	.ps {
+		position: relative;
+		overflow: hidden;
+	}
+	.ps-video {
+		width: 100%;
+		height: 100%;
+	}
+	.ps-top {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		display: flex;
+		flex-direction: row;
+	}
+	.ps-back {
+		width: 44px;
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		margin-left: 4px;
+		border-radius: 22px;
+		background-color: rgba(0, 0, 0, 0.35);
+	}
+	.ps-back-icon {
+		font-family: MaterialIcons;
+	}
+	.ps-cover {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		transition-property: opacity;
+		transition-duration: 0.25s;
+	}
+	.ps-cover-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.18);
+	}
+	.ps-cover-play {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.ps-cover-play-icon {
+		font-family: MaterialIcons;
+	}
+	.ps-error {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		background-color: rgba(0, 0, 0, 0.6);
+	}
+	.ps-error-text {
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+	.ps-error-retry {
+		font-size: 12px;
+		color: #FFFFFF;
+		margin-top: 6px;
+	}
+	.ps-controls {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		display: flex;
+		flex-direction: column;
+		background-color: rgba(0, 0, 0, 0.45);
+		padding-bottom: 2px;
+	}
+	.ps-bar-area {
+		height: 20px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 4px;
+	}
+	.ps-bar-track {
+		flex: 1;
+		height: 3px;
+		border-radius: 2px;
+		background-color: rgba(255, 255, 255, 0.28);
+		position: relative;
+	}
+	.ps-bar-fill {
+		position: absolute;
+		left: 0;
+		top: 0;
+		height: 3px;
+		border-radius: 2px;
+		background-color: #5CB67B;
+	}
+	.ps-bar-thumb {
+		position: absolute;
+		top: -3px;
+		width: 9px;
+		height: 9px;
+		margin-left: -4px;
+		border-radius: 5px;
+		background-color: #FFFFFF;
+	}
+	.ps-row {
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 4px;
+		padding-right: 12px;
+	}
+	.ps-btn {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.ps-btn-icon {
+		font-family: MaterialIcons;
+	}
+	.ps-time {
+		font-size: 11px;
+		color: #FFFFFF;
+		margin-left: 2px;
+	}
+	.ps-row-fill {
+		flex: 1;
+	}
+	/* 弹幕开关 / 全屏：触控目标 44x40（不小于底部控制条的播放键），保证真机可点 */
+	.ps-act {
+		width: 44px;
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.ps-act-text {
+		font-size: 12px;
+		color: #FFFFFF;
+	}
+	/* 倍速菜单：贴在控制条上沿（bottom:100% 相对 .ps-controls） */
+	.ps-speed-panel {
+		position: absolute;
+		right: 8px;
+		bottom: 100%;
+		width: 96px;
+		max-height: 196px;
+		background-color: rgba(0, 0, 0, 0.86);
+		border-radius: 8px;
+		padding-top: 4px;
+		padding-bottom: 4px;
+	}
+	.ps-speed-item {
+		height: 40px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.ps-speed-text {
+		font-size: 13px;
+		color: #FFFFFF;
+	}
+	.ps-title {
+		font-size: 11px;
+		color: #FFFFFF;
+		margin-left: 4px;
+		/* App 端 max-width 只接受 number/px（百分比被静默丢弃，编译期报 ERROR）；
+		   控制条新增弹幕/全屏两个按钮后，标题可用宽度收窄到 110px，超出按 1 行省略 */
+		max-width: 110px;
+	}
+</style>

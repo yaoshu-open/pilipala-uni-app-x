@@ -1,0 +1,76 @@
+<template>
+	<view class="phe">
+		<image class="phe-image" src="/static/images/error.png" mode="aspectFit"></image>
+		<text class="phe-message" :style="messageStyle">{{ message }}</text>
+		<view v-if="showRetry" class="phe-button" :style="buttonStyle" @click="onRetry">
+			<text class="phe-button-text" :style="buttonTextStyle">点击重试</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { themeColor, currentThemeIndex, textPrimary } from '../../utils/theme.uts'
+
+/**
+ * 错误态（源头：`lib/common/widgets/http_error.dart` HttpError）。
+ * 插画取自源 `assets/images/error.svg`（转 PNG，App 端不支持 SVG 渲染），
+ * 高度 200、与文案间距 30、文案 titleSmall、按钮为主色 8% 底的 tonal 样式。
+ */
+const props = defineProps({
+	message: { type: String, default: '请求异常' },
+	showRetry: { type: Boolean, default: true }
+})
+
+const emit = defineEmits(['retry'])
+
+const primary = themeColor(currentThemeIndex())
+const messageStyle = computed((): string => 'color:' + textPrimary() + ';')
+const buttonStyle = computed((): string => {
+	const text = primary.startsWith('#') ? primary.substring(1) : primary
+	const r = parseInt(text.substring(0, 2), 16)
+	const g = parseInt(text.substring(2, 4), 16)
+	const b = parseInt(text.substring(4, 6), 16)
+	return 'background-color:rgba(' + r.toString() + ',' + g.toString() + ',' + b.toString() + ',0.08);'
+})
+const buttonTextStyle = computed((): string => 'color:' + primary + ';')
+
+function onRetry() {
+	emit('retry')
+}
+</script>
+
+<style>
+	.phe {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding-top: 40px;
+		padding-bottom: 40px;
+	}
+	.phe-image {
+		width: 236px;
+		height: 200px;
+	}
+	.phe-message {
+		font-size: 14px;
+		margin-top: 30px;
+		text-align: center;
+	}
+	.phe-button {
+		margin-top: 20px;
+		height: 40px;
+		padding-left: 16px;
+		padding-right: 16px;
+		border-radius: 20px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.phe-button-text {
+		font-size: 14px;
+	}
+</style>

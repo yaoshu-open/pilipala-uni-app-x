@@ -1,0 +1,327 @@
+<template>
+	<view class="ar" :style="rootStyle">
+		<view class="ar-item" @click="onLikeTap" @longpress="onTriple">
+			<text class="ar-icon" :style="likeIconStyle">{{ liked ? likeOnGlyph : likeOffGlyph }}</text>
+			<text class="ar-label" :style="likeTextStyle">{{ likeLabel }}</text>
+		</view>
+		<view class="ar-item" @click="onCoinTap">
+			<text class="ar-icon" :style="coinIconStyle">{{ coinGlyph }}</text>
+			<text class="ar-label" :style="coinTextStyle">{{ coinLabel }}</text>
+		</view>
+		<view class="ar-item" @click="onFavTap">
+			<text class="ar-icon" :style="favIconStyle">{{ faved ? favOnGlyph : favOffGlyph }}</text>
+			<text class="ar-label" :style="favTextStyle">{{ favLabel }}</text>
+		</view>
+		<view class="ar-item" @click="onWatchLaterTap">
+			<text class="ar-icon" :style="laterIconStyle">{{ laterGlyph }}</text>
+			<text class="ar-label" :style="normalTextStyle">稍后看</text>
+		</view>
+		<view class="ar-item" @click="onShareTap">
+			<text class="ar-icon" :style="shareIconStyle">{{ shareGlyph }}</text>
+			<text class="ar-label" :style="normalTextStyle">分享</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch, onMounted } from 'vue'
+import { hasLike, hasCoin, hasFav, likeVideo, coinVideo, toggleDefaultFav, oneThree, addWatchLater } from '../../api/play.uts'
+import { userState } from '../../stores/user.uts'
+import { textSecondary, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+import { navigateTo, RT } from '../../utils/routes.uts'
+
+/**
+ * 操作行：点赞 / 投币 / 收藏 / 稍后再看 / 分享（顺序＝源 actionGrid 的 actionTypeSort 默认序，
+ * 见 `lib/pages/video/detail/introduction/view.dart`：稍后看 584 行在 分享 590 行之前）。
+ *
+ * 视觉（源 actionGrid）：容器 margin 上下 6/4、**高度 = 可用宽 / 5**（LayoutBuilder 的
+ * `constraints.maxWidth / 5`，可用宽即屏幕宽减左右 12），每项宽 `(屏宽 - 24) / 5` 等分，
+ * 图标 20 + 间距 6 + 文字 11（labelSmall）；已点赞/已投币/已收藏为主色。
+ * 交互口径：
+ *  - 点赞/投币/收藏/稍后再看都**真实调用接口**，成功后即时刷新选中态与数值，失败原样提示接口 message；
+ *  - 未登录点击给出登录引导（弹窗 → 跳登录页），不静默失败；
+ *  - 收藏走源同款「快速收藏」：默认（第一个）收藏夹加入/移出；
+ *  - 点赞长按 = 一键三连（源 actionGrid 的长按行为）。
+ * 计数以详情接口的 stat 为初值，本组件只在成功后做 ±1 的即时修正。
+ */
+const props = defineProps({
+	bvid: { type: String, default: '' },
+	aid: { type: Number, default: 0 },
+	likeCount: { type: Number, default: 0 },
+	coinCount: { type: Number, default: 0 },
+	favCount: { type: Number, default: 0 }
+})
+
+const primary = themeColor(currentThemeIndex())
+
+const liked = ref<boolean>(false)
+const coined = ref<boolean>(false)
+const faved = ref<boolean>(false)
+const likeNum = ref<number>(props.likeCount)
+const coinNum = ref<number>(props.coinCount)
+const favNum = ref<number>(props.favCount)
+const busy = ref<boolean>(false)
+
+const likeOnGlyph = glyphOf('thumb-up')
+const likeOffGlyph = glyphOf('thumb-up-off')
+const coinGlyph = glyphOf('coin')
+const favOnGlyph = glyphOf('star')
+const favOffGlyph = glyphOf('star-border')
+const shareGlyph = glyphOf('share')
+const laterGlyph = glyphOf('watch-later')
+
+/** 每项宽度与容器高度同源：源 `(Get.size.width - 24) / 5`（左右各 12 的页边距由页面给出） */
+const windowWidth = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return info.windowWidth
+	} catch (e) {
+		return 390
+	}
+})()
+const itemSize = Math.round((windowWidth - 24) / 5)
+const rootStyle = 'height:' + itemSize.toString() + 'px;'
+
+const ICON_SIZE = 20
+
+const likeIconStyle = computed((): string => iconStyle('thumb-up', ICON_SIZE, liked.value ? primary : textSecondary()))
+const coinIconStyle = computed((): string => iconStyle('coin', ICON_SIZE, coined.value ? primary : textSecondary()))
+const favIconStyle = computed((): string => iconStyle('star', ICON_SIZE, faved.value ? primary : textSecondary()))
+const shareIconStyle = computed((): string => iconStyle('share', ICON_SIZE, textSecondary()))
+const laterIconStyle = computed((): string => iconStyle('watch-later', ICON_SIZE, textSecondary()))
+
+const likeTextStyle = computed((): string => 'color:' + (liked.value ? primary : textSecondary()) + ';')
+const coinTextStyle = computed((): string => 'color:' + (coined.value ? primary : textSecondary()) + ';')
+const favTextStyle = computed((): string => 'color:' + (faved.value ? primary : textSecondary()) + ';')
+const normalTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+/**
+ * 计数文案：源 ActionItem 直接 `stat.like.toString()`——**不缩写**（旧版基线可见 `284269`）。
+ * 故这里同样输出原始整数，只有点赞/收藏这类自身可变的项在成功后做 ±1 修正。
+ */
+const likeLabel = computed((): string => likeNum.value.toString())
+const coinLabel = computed((): string => coinNum.value.toString())
+const favLabel = computed((): string => favNum.value.toString())
+
+function toast(text: string) {
+	uni.showToast({ title: text, icon: 'none' })
+}
+
+/** 未登录引导：明确告知并给登录入口，返回 true 表示本次操作已被拦下 */
+function requireLogin(): boolean {
+	if (userState.isLogin) {
+		return false
+	}
+	uni.showModal({
+		title: '未登录',
+		content: '该操作需要登录，是否前往登录？',
+		confirmText: '去登录',
+		cancelText: '取消',
+		success: (res) => {
+			if (res.confirm == true) {
+				navigateTo(RT.login)
+			}
+		}
+	})
+	return true
+}
+
+async function syncStates() {
+	liked.value = false
+	coined.value = false
+	faved.value = false
+	if (props.bvid.length == 0 || props.aid <= 0 || !userState.isLogin) {
+		return
+	}
+	const likeRes = await hasLike(props.bvid)
+	if (likeRes.status) {
+		liked.value = likeRes.value
+	}
+	const coinRes = await hasCoin(props.bvid)
+	if (coinRes.status) {
+		coined.value = coinRes.multiply > 0
+	}
+	const favRes = await hasFav(props.aid)
+	if (favRes.status) {
+		faved.value = favRes.value
+	}
+}
+
+function onLikeTap() {
+	if (busy.value || requireLogin()) {
+		return
+	}
+	busy.value = true
+	likeVideo(props.bvid, !liked.value).then((res) => {
+		if (res.status) {
+			if (liked.value) {
+				liked.value = false
+				likeNum.value = likeNum.value > 0 ? likeNum.value - 1 : 0
+				toast('取消赞')
+			} else {
+				liked.value = true
+				likeNum.value = likeNum.value + 1
+				toast('点赞成功')
+			}
+		} else {
+			toast(res.message)
+		}
+		busy.value = false
+	})
+}
+
+function onCoinTap() {
+	if (busy.value || requireLogin()) {
+		return
+	}
+	uni.showActionSheet({
+		itemList: ['投 1 枚硬币', '投 2 枚硬币'],
+		success: (res) => {
+			doCoin(res.tapIndex + 1)
+		}
+	})
+}
+
+function doCoin(multiply: number) {
+	if (busy.value) {
+		return
+	}
+	busy.value = true
+	coinVideo(props.bvid, multiply).then((res) => {
+		if (res.status) {
+			coined.value = true
+			coinNum.value = coinNum.value + multiply
+			toast('投币成功')
+		} else {
+			toast(res.message)
+		}
+		busy.value = false
+	})
+}
+
+function onFavTap() {
+	if (busy.value || requireLogin()) {
+		return
+	}
+	if (props.aid <= 0) {
+		toast('稿件信息未就绪，请稍后重试')
+		return
+	}
+	busy.value = true
+	toggleDefaultFav(props.aid).then((res) => {
+		if (res.status) {
+			const before = faved.value
+			faved.value = res.faved
+			if (before != res.faved) {
+				favNum.value = res.faved ? favNum.value + 1 : (favNum.value > 0 ? favNum.value - 1 : 0)
+			}
+			toast(res.faved ? '已收藏到默认收藏夹' : '已取消收藏')
+		} else {
+			toast(res.message)
+		}
+		busy.value = false
+	})
+}
+
+function onShareTap() {
+	const link = 'https://www.bilibili.com/video/' + props.bvid
+	uni.setClipboardData({
+		data: link,
+		success: () => {
+			toast('链接已复制')
+		},
+		fail: () => {
+			toast('复制失败，请稍后重试')
+		}
+	})
+}
+
+function onWatchLaterTap() {
+	if (busy.value || requireLogin()) {
+		return
+	}
+	busy.value = true
+	addWatchLater(props.bvid).then((res) => {
+		toast(res.status ? '已加入稍后再看' : res.message)
+		busy.value = false
+	})
+}
+
+function onTriple() {
+	if (busy.value || requireLogin()) {
+		return
+	}
+	busy.value = true
+	oneThree(props.bvid).then((res) => {
+		if (res.status) {
+			if (res.like && !liked.value) {
+				likeNum.value = likeNum.value + 1
+			}
+			if (res.coin && !coined.value) {
+				coinNum.value = coinNum.value + 1
+			}
+			if (res.fav && !faved.value) {
+				favNum.value = favNum.value + 1
+			}
+			liked.value = res.like
+			coined.value = res.coin
+			faved.value = res.fav
+			toast('三连成功')
+		} else {
+			toast(res.message)
+		}
+		busy.value = false
+	})
+}
+
+watch((): string => props.bvid, (value: string) => {
+	if (value.length == 0) {
+		return
+	}
+	syncStates()
+})
+
+watch((): number => props.likeCount, (value: number) => {
+	likeNum.value = value
+})
+
+watch((): number => props.coinCount, (value: number) => {
+	coinNum.value = value
+})
+
+watch((): number => props.favCount, (value: number) => {
+	favNum.value = value
+})
+
+onMounted(() => {
+	syncStates()
+})
+</script>
+
+<style>
+	/* 高度由 rootStyle 给出（= 可用宽 / 5，源 actionGrid 同款公式），5 项按同宽等分 */
+	.ar {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 6px;
+		margin-bottom: 4px;
+		padding-left: 12px;
+		padding-right: 12px;
+	}
+	.ar-item {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+	.ar-icon {
+		font-family: MaterialIcons;
+	}
+	.ar-label {
+		font-size: 11px;
+		margin-top: 6px;
+	}
+</style>

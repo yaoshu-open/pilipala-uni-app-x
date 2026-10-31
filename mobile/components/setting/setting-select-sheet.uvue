@@ -1,0 +1,162 @@
+<template>
+	<!-- 常驻 + display 切换：App 端 v-if 转 false 不卸载节点（P8/P9 已复现） -->
+	<view class="sg-mask" :style="maskStyle" @click="onMaskTap">
+		<view class="sg-sheet" :style="sheetStyle" @click.stop="noop">
+			<text class="sg-title" :style="titleStyle">{{ title }}</text>
+			<scroll-view class="sg-scroll" direction="vertical" :show-scrollbar="false">
+				<view class="sg-list">
+					<view
+						v-for="opt in options"
+						:key="opt.value"
+						class="sg-opt"
+						@click="onOptionTap(opt)"
+					>
+						<!-- 单选圆点：实心=选中，描边=未选（源 RadioListTile 等价） -->
+						<view class="sg-radio" :style="radioStyle(opt.checked)">
+							<view v-if="opt.checked" class="sg-radio-dot" :style="dotStyle"></view>
+						</view>
+						<text class="sg-opt-text" :style="optTextStyle(opt.checked)">{{ opt.label }}</text>
+					</view>
+				</view>
+			</scroll-view>
+			<view class="sg-cancel" @click.stop="onMaskTap">
+				<text class="sg-cancel-text" :style="cancelStyle">取消</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import { themeColor, currentThemeIndex, textPrimary, textSecondary, cardBackground, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 设置选择弹层（源头：lib/pages/setting/widgets/select_dialog.dart 的 AlertDialog 单选）。
+ * 新端取底部弹层形态（与搜索筛选弹层同族），点选项即选中并回调（源 RadioListTile
+ * onChanged 选中即 pop 的同款节奏）。
+ *
+ * 浮层可见态由父页持有（visible prop + select/close 事件）：页面级 onBackPress
+ * 需在页面 .uvue 消费返回键关闭弹层（组件级钩子无效，search-filter-bar 同款先例）。
+ */
+export type SelectOption = {
+	value: string
+	label: string
+	checked: boolean
+}
+
+const props = defineProps({
+	visible: { type: Boolean, default: false },
+	title: { type: String, default: '' },
+	options: {
+		type: Array,
+		default() {
+			return [] as Array<SelectOption>
+		}
+	}
+})
+
+const emit = defineEmits(['select', 'close'])
+
+const primary: string = themeColor(currentThemeIndex())
+const maskStyle = computed((): string => props.visible ? '' : 'display:none;')
+const sheetStyle: string = 'background-color:' + cardBackground() + ';padding-bottom:' + safeAreaBottom().toString() + 'px;'
+const titleStyle: string = 'color:' + textPrimary() + ';font-weight:bold;'
+const cancelStyle: string = 'color:' + textSecondary() + ';'
+const dotStyle: string = 'background-color:' + primary + ';'
+
+function radioStyle(checked: boolean): string {
+	return 'border-color:' + (checked ? primary : withAlpha(textSecondary(), 0.6)) + ';'
+}
+
+function optTextStyle(checked: boolean): string {
+	return 'color:' + (checked ? primary : textPrimary()) + ';' + (checked ? 'font-weight:bold;' : '')
+}
+
+function noop() {}
+
+function onMaskTap() {
+	emit('close')
+}
+
+function onOptionTap(opt: SelectOption) {
+	emit('select', opt.value)
+	emit('close')
+}
+</script>
+
+<style>
+	.sg-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.4);
+		display: flex;
+		flex-direction: column;
+		justify-content: flex-end;
+	}
+	.sg-sheet {
+		border-top-left-radius: 14px;
+		border-top-right-radius: 14px;
+		padding-left: 16px;
+		padding-right: 16px;
+		padding-top: 16px;
+		display: flex;
+		flex-direction: column;
+	}
+	.sg-title {
+		font-size: 16px;
+		margin-bottom: 6px;
+	}
+	.sg-scroll {
+		max-height: 380px;
+	}
+	.sg-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.sg-opt {
+		min-height: 52px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.sg-radio {
+		width: 20px;
+		height: 20px;
+		border-radius: 10px;
+		border-width: 2px;
+		border-style: solid;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		margin-right: 12px;
+		flex-shrink: 0;
+	}
+	.sg-radio-dot {
+		width: 10px;
+		height: 10px;
+		border-radius: 5px;
+	}
+	.sg-opt-text {
+		font-size: 15px;
+		flex: 1;
+	}
+	.sg-cancel {
+		min-height: 52px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		border-top-width: 1px;
+		border-top-style: solid;
+		border-top-color: rgba(0, 0, 0, 0.06);
+		margin-top: 6px;
+	}
+	.sg-cancel-text {
+		font-size: 15px;
+	}
+</style>

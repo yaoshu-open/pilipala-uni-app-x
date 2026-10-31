@@ -1,0 +1,251 @@
+/**
+ * 最小 protobuf 解码器（不引第三方运行时）。
+ *
+ * 只做「按字段号读取一条消息」所需的能力：varint、长度前缀、嵌套消息、未知字段跳过。
+ * 用途：弹幕分段接口 GET /x/v2/dm/web/seg.so 的响应是 DmSegMobileReply（定义见
+ * lib/models/danmaku/dm.proto），按 wire format 逐字节解，不做 schema 绑定、不生成代码。
+ *
+ * 边界约定（解码器自身绝不抛异常，失败以 -1 / null / false 表达，由调用方落失败结果）：
+ *  - 每次读取都做越界与畸形检查：varint 超过 10 字节、长度前缀越界、组类型（wire 3/4，已废弃）
+ *    一律判定为畸形并中断，不继续猜测后续字节；
+ *  - varint 按 number 累加，精确到 2^53。弹幕取用的字段（progress/mode/fontsize 为 int32，
+ *    color 为 uint32 ≤ 4294967295）都落在精度内；int64 负数按 10 字节补码编码会超精度，
+ *    本工程不从弹幕响应取任何 int64 字段（dm.proto 的 id/ctime 未进模型），故不做 64 位拆分。
+ */
+
+/** wire type：变长整数 */
+export const WIRE_VARINT: number = 0
+/** wire type：固定 8 字节（double/fixed64），只跳过不解析 */
+export const WIRE_FIXED64: number = 1
+/** wire type：长度前缀（string/bytes/嵌套消息） */
+export const WIRE_LENGTH: number = 2
+/** wire type：固定 4 字节（float/fixed32），只跳过不解析 */
+export const WIRE_FIXED32: number = 5
+
+/** varint 最多 10 字节（64 位），超出即畸形 */
+const MAX_VARINT_BYTES: number = 10
+/** UTF-8 非法序列的替换码点 */
+const REPLACEMENT_CODE: number = 0xfffd
+
+/** 续字节判定（UTF-8 的 10xxxxxx） */
+function isContinuation(byte: number): boolean {
+	return byte >= 0x80 && byte < 0xc0
+}
+
+/**
+ * UTF-8 字节段转字符串。
+ *
+ * 不用 TextDecoder：各端可用性不一致（小程序端没有），手写解码只依赖 String.fromCharCode。
+ * 弹幕正文常含 emoji（4 字节码点），补齐平面按 UTF-16 代理对输出，否则 emoji 会变问号。
+ */
+function decodeUtf8(view: Uint8Array, from: number, to: number): string {
+	let text: string = ''
+	let i = from
+	while (i < to) {
+		const b0 = view[i]
+		if (b0 < 0x80) {
+			text = text + String.fromCharCode(b0)
+			i = i + 1
+			continue
+		}
+		if (b0 >= 0xc0 && b0 < 0xe0) {
+			if (i + 1 >= to || !isContinuation(view[i + 1])) {
+				text = text + String.fromCharCode(REPLACEMENT_CODE)
+				i = i + 1
+				continue
+			}
+			const cp = (b0 - 0xc0) * 64 + (view[i + 1] - 0x80)
+			text = text + String.fromCharCode(cp)
+			i = i + 2
+			continue
+		}
+		if (b0 >= 0xe0 && b0 < 0xf0) {
+			if (i + 2 >= to || !isContinuation(view[i + 1]) || !isContinuation(view[i + 2])) {
+				text = text + String.fromCharCode(REPLACEMENT_CODE)
+				i = i + 1
+				continue
+			}
+			const cp = (b0 - 0xe0) * 4096 + (view[i + 1] - 0x80) * 64 + (view[i + 2] - 0x80)
+			text = text + String.fromCharCode(cp)
+			i = i + 3
+			continue
+		}
+		if (b0 >= 0xf0 && b0 < 0xf8) {
+			if (i + 3 >= to || !isContinuation(view[i + 1]) || !isContinuation(view[i + 2]) || !isContinuation(view[i + 3])) {
+				text = text + String.fromCharCode(REPLACEMENT_CODE)
+				i = i + 1
+				continue
+			}
+			const cp = (b0 - 0xf0) * 262144 + (view[i + 1] - 0x80) * 4096 + (view[i + 2] - 0x80) * 64 + (view[i + 3] - 0x80)
+			if (cp > 0x10ffff) {
+				text = text + String.fromCharCode(REPLACEMENT_CODE)
+				i = i + 4
+				continue
+			}
+			const v = cp - 0x10000
+			text = text + String.fromCharCode(0xd800 + Math.floor(v / 1024))
+			text = text + String.fromCharCode(0xdc00 + (v - Math.floor(v / 1024) * 1024))
+			i = i + 4
+			continue
+		}
+		// 0x80~0xBF 的孤立续字节、0xF8 以上的非法首字节
+		text = text + String.fromCharCode(REPLACEMENT_CODE)
+		i = i + 1
+	}
+	return text
+}
+
+/**
+ * 一条 protobuf 消息的字节读取器。
+ *
+ * 既可以读整条响应（`new ProtoReader(bytes)`），也可以由 `readMessage()` 派生出一个
+ * 嵌套消息的子读取器（与父读取器共享底层字节，不拷贝，避免每段弹幕额外复制几十 KB）。
+ * 读取顺序只能前进：先 `nextField()` 取 tag，再按 `fieldNumber()` 分发读取或 `skip()`。
+ */
+export class ProtoReader {
+	private view: Uint8Array
+	private pos: number
+	private end: number
+	private lastField: number = 0
+	private lastWire: number = 0
+
+	/** end 传 -1 表示读到字节末尾；start/end 越界会被夹到 [0, view.length] */
+	constructor(view: Uint8Array, start: number = 0, end: number = -1) {
+		this.view = view
+		let safeStart = start < 0 ? 0 : start
+		if (safeStart > view.length) {
+			safeStart = view.length
+		}
+		let safeEnd = end < 0 ? view.length : end
+		if (safeEnd > view.length) {
+			safeEnd = view.length
+		}
+		if (safeEnd < safeStart) {
+			safeEnd = safeStart
+		}
+		this.pos = safeStart
+		this.end = safeEnd
+	}
+
+	/**
+	 * 读下一个字段的 tag。返回 false 表示已到末尾或数据畸形
+	 * （畸形后 `fieldNumber()`/`wireType()` 保持上一次的值，调用方应直接结束循环）。
+	 */
+	nextField(): boolean {
+		if (this.pos >= this.end) {
+			return false
+		}
+		const tag = this.readVarint()
+		if (tag < 0) {
+			return false
+		}
+		const field = Math.floor(tag / 8)
+		const wire = tag - field * 8
+		// 字段号 0 非法；wire 3/4 是已废弃的组类型（本解码器不支持，判定畸形而不是猜着跳过）
+		if (field <= 0 || wire == 3 || wire == 4) {
+			return false
+		}
+		this.lastField = field
+		this.lastWire = wire
+		return true
+	}
+
+	/** 最近一次 nextField 读到的字段号（未读到过则为 0） */
+	fieldNumber(): number {
+		return this.lastField
+	}
+
+	/** 最近一次 nextField 读到的 wire type（未读到过则为 0） */
+	wireType(): number {
+		return this.lastWire
+	}
+
+	/** 读 varint；返回 -1 表示数据畸形或已到末尾 */
+	readVarint(): number {
+		let result = 0
+		let mult = 1
+		let count = 0
+		while (this.pos < this.end) {
+			const byte = this.view[this.pos]
+			this.pos = this.pos + 1
+			result = result + (byte % 128) * mult
+			count = count + 1
+			if (byte < 128) {
+				return result
+			}
+			if (count >= MAX_VARINT_BYTES) {
+				break
+			}
+			mult = mult * 128
+		}
+		// 越界或超长：直接吞到末尾，避免调用方在畸形数据上继续读
+		this.pos = this.end
+		return -1
+	}
+
+	/** 读长度前缀的字符串字段（非法序列替换为 U+FFFD，不抛异常） */
+	readString(): string {
+		const length = this.readVarint()
+		if (length < 0) {
+			return ''
+		}
+		const from = this.pos
+		const to = from + length
+		if (to > this.end || to < from) {
+			this.pos = this.end
+			return ''
+		}
+		this.pos = to
+		return decodeUtf8(this.view, from, to)
+	}
+
+	/** 读长度前缀的嵌套消息；返回 null 表示长度非法（已吞到末尾） */
+	readMessage(): ProtoReader | null {
+		const length = this.readVarint()
+		if (length < 0) {
+			return null
+		}
+		const from = this.pos
+		const to = from + length
+		if (to > this.end || to < from) {
+			this.pos = this.end
+			return null
+		}
+		this.pos = to
+		return new ProtoReader(this.view, from, to)
+	}
+
+	/** 跳过一个未知字段；返回 false 表示 wire type 不可识别或长度越界 */
+	skip(wireType: number): boolean {
+		if (wireType == WIRE_VARINT) {
+			return this.readVarint() >= 0
+		}
+		if (wireType == WIRE_FIXED64) {
+			return this.advance(8)
+		}
+		if (wireType == WIRE_FIXED32) {
+			return this.advance(4)
+		}
+		if (wireType == WIRE_LENGTH) {
+			const length = this.readVarint()
+			if (length < 0) {
+				return false
+			}
+			return this.advance(length)
+		}
+		return false
+	}
+
+	private advance(count: number): boolean {
+		if (count < 0) {
+			return false
+		}
+		const next = this.pos + count
+		if (next > this.end) {
+			this.pos = this.end
+			return false
+		}
+		this.pos = next
+		return true
+	}
+}

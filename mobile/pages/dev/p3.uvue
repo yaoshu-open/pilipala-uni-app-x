@@ -1,0 +1,57 @@
+<template>
+	<view class="dev-p3">
+		<view v-if="needStatusSpacer" :style="spacerStyle"></view>
+		<view class="dev-p3-body">
+			<home-page v-if="view == 'home'"></home-page>
+			<rcmd-page v-if="view == 'rcmd'"></rcmd-page>
+			<hot-page v-if="view == 'hot'"></hot-page>
+			<rank-page v-if="view == 'rank'"></rank-page>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import HomePage from '../home/home.uvue'
+import RcmdPage from '../rcmd/rcmd.uvue'
+import HotPage from '../hot/hot.uvue'
+import RankPage from '../rank/rank.uvue'
+import { statusBarSpacerStyle } from '../../utils/safeArea.uts'
+
+/**
+ * P3 首页域单页验证宿主（仅开发验证用）。
+ *
+ * 真机取证缺口：本机（MIUI）禁止 adb 注入点击，无法在无人工干预下切换底部 tab / 频道，
+ * 因此提供本页按 `?view=home|rcmd|hot|rank` 直接挂载对应组件，配合
+ * `cli launch app-android --pagePath pages/dev/p3 --pageQuery "view=hot"` 逐屏截图。
+ * 组件本身保持与宿主内一致的挂载方式（同一份源码），差异只在没有底部导航栏。
+ */
+const view = ref<string>('home')
+
+// rank 自带状态栏占位，其余组件设计上位于 home 头部之下，这里补等高的占位
+const needStatusSpacer = computed((): boolean => view.value != 'rank')
+const spacerStyle = computed((): string => statusBarSpacerStyle())
+
+onLoad((query) => {
+	if (query != null) {
+		const v = query['view']
+		if (v != null && v.length > 0) {
+			view.value = v
+		}
+	}
+})
+</script>
+
+<style>
+	.dev-p3 {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.dev-p3-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+</style>

@@ -1,0 +1,99 @@
+/**
+ * 状态栏与安全区统一取值。
+ *
+ * 全线页面避让一律走本文件，禁止各页各写一份 try/catch：
+ *  - 首页头部等「沉浸式」区域：padding-top = statusBarHeight() + 呼吸间距（源为 top + 6）
+ *  - 无标题栏页面（排行榜）：顶部放一个高度 = statusBarHeight() 的占位 view
+ *  - 有导航栏页面：app-navbar 内部已按本函数留白，页面不再重复加
+ *  - 底部固定栏：高度含 safeAreaBottom()，并用同值做 padding-bottom
+ *  - 横屏页（全屏播放等）：左右避让一律用 safeAreaLeft() / safeAreaRight()
+ *
+ * 取值来源：uni.getSystemInfoSync().statusBarHeight（App 端真机实测可用；web 端为 0）。
+ * 结果缓存，避免每帧重复调用系统桥。
+ */
+
+let cachedStatusBar: number = -1
+let cachedSafeBottom: number = -1
+let cachedSafeLeft: number = -1
+let cachedSafeRight: number = -1
+
+export function statusBarHeight(): number {
+	if (cachedStatusBar >= 0) {
+		return cachedStatusBar
+	}
+	let height = 0
+	try {
+		const info = uni.getSystemInfoSync()
+		const raw = info.statusBarHeight
+		height = raw == null ? 0 : raw as number
+	} catch (e) {
+		height = 0
+	}
+	cachedStatusBar = height
+	return height
+}
+
+export function safeAreaBottom(): number {
+	if (cachedSafeBottom >= 0) {
+		return cachedSafeBottom
+	}
+	let bottom = 0
+	try {
+		const info = uni.getWindowInfo()
+		const area = info.safeAreaInsets
+		if (area != null) {
+			bottom = area.bottom as number
+		}
+	} catch (e) {
+		bottom = 0
+	}
+	cachedSafeBottom = bottom
+	return bottom
+}
+
+/** 横屏左右安全区（刘海/挖孔/圆角裁切）；取值口径同 safeAreaBottom，异常按 0 处理 */
+export function safeAreaLeft(): number {
+	if (cachedSafeLeft >= 0) {
+		return cachedSafeLeft
+	}
+	let left = 0
+	try {
+		const info = uni.getWindowInfo()
+		const area = info.safeAreaInsets
+		if (area != null) {
+			left = area.left as number
+		}
+	} catch (e) {
+		left = 0
+	}
+	cachedSafeLeft = left
+	return left
+}
+
+export function safeAreaRight(): number {
+	if (cachedSafeRight >= 0) {
+		return cachedSafeRight
+	}
+	let right = 0
+	try {
+		const info = uni.getWindowInfo()
+		const area = info.safeAreaInsets
+		if (area != null) {
+			right = area.right as number
+		}
+	} catch (e) {
+		right = 0
+	}
+	cachedSafeRight = right
+	return right
+}
+
+/** 状态栏等高占位（无标题栏页面用） */
+export function statusBarSpacerStyle(): string {
+	return 'height:' + statusBarHeight().toString() + 'px;'
+}
+
+/** 沉浸式区域的内边距：状态栏 + 额外呼吸间距 */
+export function statusBarPaddingTop(gap: number): string {
+	return 'padding-top:' + (statusBarHeight() + gap).toString() + 'px;'
+}

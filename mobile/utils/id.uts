@@ -1,0 +1,99 @@
+/**
+ * 稿件 id 互转与「展示型计数」解析。
+ *
+ * 源头：
+ *  - `lib/utils/id_utils.dart`（av2bv / bv2av）：App 端推荐接口只回 aid，
+ *    条目要能点进详情页必须换成 bvid；
+ *  - 同一模型的统计字段是「已格式化文案」（cover_left_text_1 = "12.3万"），
+ *    卡片按数值渲染，这里解析回数值再走 numFormat 还原展示。
+ *
+ * 说明：av2bv 的官方实现用 BigInt + 位运算；uts 的 `^` 按 32 位整数处理，
+ * 51 位掩码会被截断，因此这里用「除以 2 逐位异或」的等价实现（数值 ≤ 2^51，
+ * 双精度可精确表示）。
+ */
+
+const BV_TABLE: string = 'FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf'
+const MAX_AID: number = 2251799813685248 // 1 << 51
+const XOR_CODE: number = 23442827791579
+
+/** 51 位以内的逐位异或（规避 32 位位运算截断） */
+function xorBits(a: number, b: number): number {
+	let result = 0
+	let factor = 1
+	let x = a
+	let y = b
+	while (x > 0 || y > 0) {
+		const bitA = Math.floor(x) % 2
+		const bitB = Math.floor(y) % 2
+		if (bitA != bitB) {
+			result = result + factor
+		}
+		x = Math.floor(x / 2)
+		y = Math.floor(y / 2)
+		factor = factor * 2
+	}
+	return result
+}
+
+/** aid（数字）→ bvid（如 170001 → BV17x411w7KC） */
+export function av2bv(aid: number): string {
+	if (aid <= 0) {
+		return ''
+	}
+	const bytes: string[] = ['B', 'V', '1', '0', '0', '0', '0', '0', '0', '0', '0', '0']
+	let index = bytes.length - 1
+	let tmp = xorBits(MAX_AID + Math.floor(aid), XOR_CODE)
+	while (tmp > 0 && index >= 3) {
+		const digit = Math.floor(tmp) % 58
+		bytes[index] = BV_TABLE.substring(digit, digit + 1)
+		tmp = Math.floor(tmp / 58)
+		index = index - 1
+	}
+	const tmpByte = bytes[3]
+	bytes[3] = bytes[9]
+	bytes[9] = tmpByte
+	const tmpByte2 = bytes[4]
+	bytes[4] = bytes[7]
+	bytes[7] = tmpByte2
+	let bvid = ''
+	for (let i = 0; i < bytes.length; i++) {
+		bvid = bvid + bytes[i]
+	}
+	return bvid
+}
+
+/**
+ * 展示型计数 → 数值："12.3万" → 123000；"1.2亿" → 120000000；
+ * "1234" → 1234；无法解析返回 -1（调用方按「无数据」处理，不伪装成 0）。
+ */
+export function parseCountText(text: string): number {
+	if (text.length == 0) {
+		return -1
+	}
+	let numPart = ''
+	let unit = ''
+	for (let i = 0; i < text.length; i++) {
+		const ch = text.substring(i, i + 1)
+		if ((ch >= '0' && ch <= '9') || ch == '.') {
+			if (unit.length == 0) {
+				numPart = numPart + ch
+			}
+		} else if (ch == '万' || ch == '亿') {
+			unit = ch
+		}
+	}
+	if (numPart.length == 0) {
+		return -1
+	}
+	const value = parseFloat(numPart)
+	if (isNaN(value)) {
+		return -1
+	}
+	if (unit == '万') {
+		return Math.round(value * 10000)
+	}
+	if (unit == '亿') {
+		return Math.round(value * 100000000)
+	}
+	return Math.round(value)
+}

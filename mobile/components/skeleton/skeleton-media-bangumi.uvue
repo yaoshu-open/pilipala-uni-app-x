@@ -1,0 +1,66 @@
+<template>
+	<view class="sk-bangumi">
+		<skeleton>
+			<view class="sk-bangumi-body">
+				<skeleton-block width="111px" height="148px" radius="6px"></skeleton-block>
+				<view class="sk-bangumi-gap10"></view>
+				<view class="sk-bangumi-info">
+					<skeleton-block width="200px" height="20px"></skeleton-block>
+					<view class="sk-bangumi-gap15"></view>
+					<skeleton-block width="150px" height="13px"></skeleton-block>
+					<view class="sk-bangumi-gap5"></view>
+					<skeleton-block width="150px" height="13px"></skeleton-block>
+					<view class="sk-bangumi-gap5"></view>
+					<skeleton-block width="150px" height="13px"></skeleton-block>
+					<view class="sk-bangumi-spacer"></view>
+					<skeleton-block width="90px" height="35px" radius="20px"></skeleton-block>
+				</view>
+			</view>
+		</skeleton>
+	</view>
+</template>
+
+<script setup lang="uts">
+import Skeleton from './skeleton.uvue'
+import SkeletonBlock from './skeleton-block.uvue'
+
+/**
+ * 番剧（媒体库/搜索结果）横向卡骨架屏。视觉出处：`lib/common/skeleton/media_bangumi.dart`
+ *  - 外边距：safeSpace=12（左右）、上下 7；
+ *  - 封面 111×148、圆角 6；与信息区间隔 10；
+ *  - 信息区固定高 148，自上而下：标题条 200×20（下 15）、三条 150×13（间隔 5）、Spacer、胶囊 90×35（圆角 20）。
+ */
+</script>
+
+<style>
+	.sk-bangumi {
+		background-color: #FFFFFF;
+	}
+	.sk-bangumi-body {
+		display: flex;
+		flex-direction: row;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 7px;
+		padding-bottom: 7px;
+	}
+	.sk-bangumi-gap10 {
+		width: 10px;
+		height: 1px;
+	}
+	.sk-bangumi-gap5 {
+		height: 5px;
+	}
+	.sk-bangumi-gap15 {
+		height: 15px;
+	}
+	.sk-bangumi-info {
+		flex: 1;
+		height: 148px;
+		display: flex;
+		flex-direction: column;
+	}
+	.sk-bangumi-spacer {
+		flex: 1;
+	}
+</style>

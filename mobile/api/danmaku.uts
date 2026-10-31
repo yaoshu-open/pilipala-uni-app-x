@@ -1,0 +1,362 @@
+import { API_BASE, REFERER, UA_MOBILE, REQUEST_TIMEOUT } from '../utils/constants.uts'
+import { apiPost, getCsrf } from '../utils/request.uts'
+import { Params } from '../utils/params.uts'
+import { ProtoReader, WIRE_VARINT, WIRE_LENGTH } from '../utils/protobuf.uts'
+import { DanmakuItem, DanmakuSegmentResult, DanmakuSendResult } from '../models/danmaku.uts'
+
+/**
+ * 弹幕接口层（源头：`lib/http/danmaku.dart` 的 queryDanmaku / shootDanmaku）。
+ *
+ * 两个接口形态完全不同，故请求链路分开：
+ *  - 分段弹幕 `GET /x/v2/dm/web/seg.so` 返回 **protobuf 二进制**，走本文件的 `requestArrayBuffer`
+ *    （utils/request.uts 的 apiGet 是 JSON 链路，不能复用；那个文件是全局共享链路，不为弹幕改既有行为）；
+ *  - 发送弹幕 `POST /x/v2/dm/post` 返回 JSON，直接复用 apiPost。
+ *
+ * 约定与工程其它 api 文件一致：导出函数统一失败出口（返回失败结果 + console.log），
+ * 绝不把异常抛给调用方（渲染层按播放心跳调用，穿透会打断渲染循环）。
+ */
+
+const DM_SEG_PATH: string = '/x/v2/dm/web/seg.so'
+const DM_POST_PATH: string = '/x/v2/dm/post'
+
+/** 弹幕分段接口的 type（1 = 视频弹幕，2 = 漫画弹幕；源 queryDanmaku 固定传 1） */
+const DM_TYPE_VIDEO: number = 1
+/** 单条弹幕正文上限（源 shootDanmaku 的 assert(msg.length < 100)；超出直接失败，不发请求） */
+const DM_MAX_CONTENT_LENGTH: number = 100
+/** 单段响应体积上限：6 分钟一段正常在 1MB 内，超过按异常处理（防畸形/被劫持的响应把解码拖死） */
+const DM_MAX_SEGMENT_BYTES: number = 8 * 1024 * 1024
+
+// ---- 字段号（逐项核对 lib/models/danmaku/dm.proto，改协议先改这里） ----
+/** DmSegMobileReply.elems = 1，repeated DanmakuElem */
+const SEG_FIELD_ELEMS: number = 1
+/** DanmakuElem.progress = 2，int32，毫秒 */
+const ELEM_FIELD_PROGRESS: number = 2
+/** DanmakuElem.mode = 3，int32 */
+const ELEM_FIELD_MODE: number = 3
+/** DanmakuElem.fontsize = 4，int32 */
+const ELEM_FIELD_FONTSIZE: number = 4
+/** DanmakuElem.color = 5，uint32 */
+const ELEM_FIELD_COLOR: number = 5
+/** DanmakuElem.midHash = 6，string */
+const ELEM_FIELD_MID_HASH: number = 6
+/** DanmakuElem.content = 7，string */
+const ELEM_FIELD_CONTENT: number = 7
+/** DanmakuElem.pool = 11，int32 */
+const ELEM_FIELD_POOL: number = 11
+
+function queryOf(params: Params | null): string {
+	if (params == null || params.size() == 0) {
+		return ''
+	}
+	return '?' + params.toQuery()
+}
+
+/**
+ * res.data 归一化为 ArrayBuffer。
+ * 正常形态是 ArrayBuffer（responseType='arraybuffer'）；个别端返回类型化数组视图时按视图拷贝一份，
+ * 两种都接不住说明响应根本不是二进制（例如服务端回了 JSON 错误体），返回 null 由调用方落失败。
+ */
+function arrayBufferOf(data: any | null): ArrayBuffer | null {
+	if (data == null) {
+		return null
+	}
+	try {
+		if (data instanceof ArrayBuffer) {
+			return data as ArrayBuffer
+		}
+	} catch (e) {
+		// 该端没有 ArrayBuffer 的运行时类型判断：继续尝试类型化数组形态
+	}
+	try {
+		if (data instanceof Uint8Array) {
+			const source = data as Uint8Array
+			const copy = new ArrayBuffer(source.length)
+			const target = new Uint8Array(copy)
+			for (let i = 0; i < source.length; i++) {
+				target[i] = source[i]
+			}
+			return copy
+		}
+	} catch (e2) {
+		console.log('[danmaku] binary response type probe failed')
+	}
+	return null
+}
+
+/**
+ * 二进制 GET（返回 ArrayBuffer）。
+ *
+ * 与 utils/request.uts 的 JSON 链路保持同一组请求头（referer + 移动端 UA）、同一超时，
+ * 失败只打日志并 resolve(null)，不 reject——调用方按「空结果」处理，不额外写 catch。
+ * 不保存 Set-Cookie：seg.so 不会下发登录凭据，平台自身也自动管理 cookie（见 request.uts 文件头）。
+ *
+ * 缓存协商（真机实测）：App 端 HTTP 缓存层会对同一 URL 回 304（响应体为空），只判 200 会让
+ * 该段永久拉不到（长视频 6 分钟后整段没有弹幕，日志里 seg=2 连续 304 后放弃）。两道防线：
+ *  ① 每次请求都追加 `_t=<毫秒时间戳>`，URL 每次都不同 → 从源头绕开协商缓存；
+ *  ② 仍收到 304 时视为「需回源」：换新时间戳 + 显式 no-cache 头重发一次，第二次仍 304 才落失败并记日志。
+ * **304 绝不能当成功返回空数组**——那会把「没取到」伪装成「这段没有弹幕」。
+ */
+export function requestArrayBuffer(path: string, params: Params | null): Promise<ArrayBuffer | null> {
+	return requestArrayBufferAttempt(path, params, 0)
+}
+
+/** 取数的第 attempt 次尝试（0 = 首次，1 = 命中 304 后的回源重发） */
+function requestArrayBufferAttempt(path: string, params: Params | null, attempt: number): Promise<ArrayBuffer | null> {
+	const query = queryOf(params)
+	const url = API_BASE + path + (query.length == 0 ? '?' : query + '&') + '_t=' + Date.now().toString()
+	const header: UTSJSONObject = {}
+	header.set('referer', REFERER)
+	header.set('user-agent', UA_MOBILE)
+	if (attempt > 0) {
+		// 回源请求：除换 URL 外再显式要求不走端上缓存
+		header.set('cache-control', 'no-cache')
+		header.set('pragma', 'no-cache')
+	}
+	return new Promise((resolve) => {
+		// 泛型 <ArrayBuffer> + responseType='arraybuffer'：官方 demo 的二进制取数写法
+		// （hello-uni-app-x pages/API/request/request.uvue#sendArrayBuffer）
+		uni.request<ArrayBuffer>({
+			url: url,
+			method: 'GET',
+			header: header,
+			responseType: 'arraybuffer',
+			timeout: REQUEST_TIMEOUT,
+			success: (res) => {
+				if (res.statusCode == 304) {
+					if (attempt == 0) {
+						console.log('[danmaku] binary 304 cache hit, retry without cache url=' + url)
+						requestArrayBufferAttempt(path, params, 1).then((retryBuffer) => {
+							resolve(retryBuffer)
+						})
+						return
+					}
+					console.log('[danmaku] binary 304 again after retry url=' + url)
+					resolve(null)
+					return
+				}
+				if (res.statusCode != 200) {
+					console.log('[danmaku] binary status=' + res.statusCode.toString() + ' url=' + url)
+					resolve(null)
+					return
+				}
+				const buffer = arrayBufferOf(res.data)
+				if (buffer == null) {
+					// 不是二进制就明确失败：不能当「这段没有弹幕」，否则空列表会掩盖接口报错
+					console.log('[danmaku] binary response is not ArrayBuffer url=' + url)
+					resolve(null)
+					return
+				}
+				resolve(buffer)
+			},
+			fail: (err) => {
+				console.log('[danmaku] binary fail url=' + url + ' err=' + JSON.stringify(err))
+				resolve(null)
+			}
+		})
+	})
+}
+
+/** 解一条 DanmakuElem；正文为空的条目直接丢弃（渲染无意义，且多为服务端占位） */
+function decodeElem(reader: ProtoReader): DanmakuItem | null {
+	const item = new DanmakuItem()
+	let hasContent = false
+	while (reader.nextField()) {
+		const field = reader.fieldNumber()
+		const wire = reader.wireType()
+		if (field == ELEM_FIELD_PROGRESS && wire == WIRE_VARINT) {
+			const value = reader.readVarint()
+			item.progress = value < 0 ? 0 : value
+		} else if (field == ELEM_FIELD_MODE && wire == WIRE_VARINT) {
+			const value = reader.readVarint()
+			item.mode = value < 0 ? 0 : value
+		} else if (field == ELEM_FIELD_FONTSIZE && wire == WIRE_VARINT) {
+			const value = reader.readVarint()
+			item.fontsize = value < 0 ? 0 : value
+		} else if (field == ELEM_FIELD_COLOR && wire == WIRE_VARINT) {
+			const value = reader.readVarint()
+			item.color = value < 0 ? 0 : value
+		} else if (field == ELEM_FIELD_MID_HASH && wire == WIRE_LENGTH) {
+			item.midHash = reader.readString()
+		} else if (field == ELEM_FIELD_CONTENT && wire == WIRE_LENGTH) {
+			item.content = reader.readString()
+			hasContent = true
+		} else if (field == ELEM_FIELD_POOL && wire == WIRE_VARINT) {
+			const value = reader.readVarint()
+			item.pool = value < 0 ? 0 : value
+		} else if (!reader.skip(wire)) {
+			// 未知字段没法安全跳过：本条消息到此中断，已解出的字段丢弃（宁可少一条不猜）
+			return null
+		}
+	}
+	if (!hasContent || item.content.length == 0) {
+		return null
+	}
+	return item
+}
+
+/** 解 DmSegMobileReply，只取 elems（字段 1）；其余字段（state/ai_flag/colorfulSrc）跳过 */
+function decodeSegment(bytes: Uint8Array): Array<DanmakuItem> {
+	const items: Array<DanmakuItem> = []
+	const reader = new ProtoReader(bytes)
+	while (reader.nextField()) {
+		const field = reader.fieldNumber()
+		const wire = reader.wireType()
+		if (field == SEG_FIELD_ELEMS && wire == WIRE_LENGTH) {
+			const sub = reader.readMessage()
+			if (sub == null) {
+				break
+			}
+			const item = decodeElem(sub)
+			if (item != null) {
+				items.push(item)
+			}
+		} else if (!reader.skip(wire)) {
+			break
+		}
+	}
+	return items
+}
+
+/**
+ * 拉取一段弹幕（6 分钟一段）。
+ *
+ * @param cid 视频 cid（接口的 oid）
+ * @param segmentIndex 段号，**从 1 开始**（源 controller 传 calcSegment(...) + 1）
+ */
+export async function fetchDanmakuSegment(cid: number, segmentIndex: number): Promise<DanmakuSegmentResult> {
+	const result = new DanmakuSegmentResult()
+	if (cid <= 0) {
+		result.message = '弹幕参数缺失'
+		console.log('[danmaku] invalid cid=' + cid.toString())
+		return result
+	}
+	if (segmentIndex < 1) {
+		result.message = '弹幕分段号非法'
+		console.log('[danmaku] invalid segment=' + segmentIndex.toString() + ' cid=' + cid.toString())
+		return result
+	}
+	try {
+		const params = new Params()
+		params.setNum('type', DM_TYPE_VIDEO)
+		params.setNum('oid', cid)
+		params.setNum('segment_index', segmentIndex)
+		const buffer = await requestArrayBuffer(DM_SEG_PATH, params)
+		if (buffer == null) {
+			result.message = '弹幕加载失败，请稍后重试'
+			return result
+		}
+		const size = buffer.byteLength
+		if (size > DM_MAX_SEGMENT_BYTES) {
+			result.message = '弹幕数据异常'
+			console.log('[danmaku] segment too large cid=' + cid.toString() + ' seg=' + segmentIndex.toString() + ' size=' + size.toString())
+			return result
+		}
+		if (size == 0) {
+			// 空体 = 该 6 分钟没有弹幕，是正常业务态（不是失败）
+			result.status = true
+			return result
+		}
+		result.items = decodeSegment(new Uint8Array(buffer))
+		result.status = true
+		return result
+	} catch (e) {
+		result.status = false
+		result.message = '弹幕解析失败'
+		console.log('[danmaku] segment decode error cid=' + cid.toString() + ' seg=' + segmentIndex.toString())
+		console.log(e)
+		return result
+	}
+}
+
+/**
+ * 发送弹幕（源头：`lib/http/danmaku.dart#shootDanmaku`）。
+ *
+ * 参数逐项照搬源工程：type/oid/msg/mode/bvid/progress/color/fontsize/pool/rnd/csrf。
+ * 源工程里 colorful、checkbox_type 为可选（为 null 时从参数表剔除），本函数签名不含这两个，
+ * 即等价于「不传」。
+ *
+ * @param progressMs 弹幕出现在视频内的时间，毫秒
+ * @param mode 1/2/3 滚动、4 底部、5 顶部、6 逆向、7 高级、8 代码(pool=2)、9 BAS(pool=2)
+ * @param pool 0 普通池、1 字幕池、2 特殊池
+ */
+export async function sendDanmaku(
+	cid: number,
+	bvid: string,
+	msg: string,
+	progressMs: number,
+	mode: number,
+	color: number,
+	fontsize: number,
+	pool: number
+): Promise<DanmakuSendResult> {
+	const result = new DanmakuSendResult()
+	// 正文校验放在请求前：长度口径与源 assert 一致（UTF-16 码元，emoji 计 2），
+	// 源是「必须小于 100」而产品口径为「超过 100 才算超限」，此处按后者判，100 字整允许发送
+	if (msg.length > DM_MAX_CONTENT_LENGTH) {
+		result.message = '弹幕内容不能超过 ' + DM_MAX_CONTENT_LENGTH.toString() + ' 字'
+		console.log('[danmaku] msg too long cid=' + cid.toString() + ' len=' + msg.length.toString())
+		return result
+	}
+	if (msg.trim().length == 0) {
+		result.message = '弹幕内容不能为空'
+		return result
+	}
+	if (cid <= 0 || bvid.length == 0) {
+		result.message = '弹幕参数缺失'
+		console.log('[danmaku] post invalid cid=' + cid.toString() + ' bvid=' + bvid)
+		return result
+	}
+	const csrf = getCsrf()
+	if (csrf.length == 0) {
+		// 不静默当成成功：csrf 取数限制见 utils/request.uts#getCsrf
+		result.message = '登录凭据缺失，请重新登录后再试'
+		console.log('[danmaku] csrf empty cid=' + cid.toString())
+		return result
+	}
+	try {
+		const params = new Params()
+		params.setNum('type', DM_TYPE_VIDEO)
+		params.setNum('oid', cid)
+		params.set('msg', msg)
+		params.setNum('mode', mode)
+		params.set('bvid', bvid)
+		params.setNum('progress', progressMs < 0 ? 0 : Math.floor(progressMs))
+		params.setNum('color', color)
+		params.setNum('fontsize', fontsize)
+		params.setNum('pool', pool)
+		// rnd：源工程用 DateTime.now().microsecondsSinceEpoch（无此项则发送冷却 90s，有则 5s）
+		params.setNum('rnd', Math.floor(Date.now() * 1000))
+		params.set('csrf', csrf)
+		const res = await apiPost(DM_POST_PATH, params.toObject())
+		if (res == null) {
+			result.message = '弹幕发送失败，请稍后重试'
+			return result
+		}
+		const codeValue = res.getNumber('code')
+		const code = codeValue == null ? -1 : codeValue
+		if (code != 0) {
+			const message = res.getString('message')
+			const detail = message == null || message.length == 0 ? '发送失败' : message
+			result.message = code.toString() + ': ' + detail
+			console.log('[danmaku] post fail cid=' + cid.toString() + ' code=' + code.toString())
+			return result
+		}
+		const item = new DanmakuItem()
+		item.progress = progressMs < 0 ? 0 : Math.floor(progressMs)
+		item.mode = mode
+		item.fontsize = fontsize
+		item.color = color
+		item.content = msg
+		item.pool = pool
+		// 发送接口不回显 midHash（源同样不回填），留空供渲染层即时应答
+		result.item = item
+		result.status = true
+		return result
+	} catch (e) {
+		result.status = false
+		result.message = '弹幕发送失败，请稍后重试'
+		console.log('[danmaku] post error cid=' + cid.toString())
+		console.log(e)
+		return result
+	}
+}

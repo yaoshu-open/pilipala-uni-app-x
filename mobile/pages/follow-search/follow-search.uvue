@@ -1,0 +1,228 @@
+<template>
+	<view class="fs" :style="pageStyle">
+		<!-- 顶栏：← + 输入框（占位「搜索」）+ × + 🔍（基线 P5_follow_search；复用簇B search-bar） -->
+		<search-bar placeholder="搜索" :autofocus="true" @submit="onSubmit" @back="onBack"></search-bar>
+
+		<view v-if="state == 'loading'" class="fs-skeleton">
+			<view v-for="n in 6" :key="'sk-' + n.toString()" class="fs-sk-row">
+				<skeleton-block width="45px" height="45px" radius="22.5px"></skeleton-block>
+				<view class="fs-sk-lines">
+					<skeleton-block width="40%" height="14px" radius="4px"></skeleton-block>
+					<view class="fs-sk-gap"></view>
+					<skeleton-block width="70%" height="12px" radius="4px"></skeleton-block>
+				</view>
+			</view>
+		</view>
+
+		<view v-else-if="state == 'error'" class="fs-fill">
+			<p-http-error :message="errorText" @retry="resubmit"></p-http-error>
+		</view>
+
+		<list-view v-else-if="items.length > 0" class="fs-list" :lower-threshold="200" @scrolltolower="onLoadMore">
+			<list-item v-for="user in items" :key="user.mid" :type="1">
+				<user-row
+					:face="user.face"
+					:uname="user.uname"
+					:subtitle="user.sign"
+					:live="user.liveStatus == 1"
+					:verify-text="user.verifyType >= 0 ? user.verifyDesc : ''"
+					@tap="openMember(user.mid)"
+					@tap-live="onLiveBadge"
+				></user-row>
+			</list-item>
+			<list-item :key="'footer'" :type="2">
+				<view class="fs-footer">
+					<text class="fs-footer-text" :style="footerStyle">{{ footerText }}</text>
+				</view>
+			</list-item>
+		</list-view>
+
+		<view v-else class="fs-fill">
+			<!-- 空结果：插画 +「未搜索到结果」+「点击重试」胶囊（基线同款；初始进入即此形态——源同款） -->
+			<empty-illus text="未搜索到结果" :retry="true" @retry="resubmit"></empty-illus>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import SearchBar from '../../components/common/search-bar.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import UserRow from '../../components/relation/user-row.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchFollowSearch } from '../../api/relation.uts'
+import { FollowItem } from '../../models/relation.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground, textSecondary } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 关注搜索页（源头：lib/pages/follow_search/{view,controller}.dart）。
+ *
+ * 按 WBI 签名接口 /x/relation/followings/search 搜自己的关注；
+ * 空关键词 → 直接空结果态（源 searchFollow 返回空列表同款）；提交后才请求。
+ * 结果条目复用 user-row（源 FollowItem 无 ctr → 无右侧动作）。
+ */
+const PAGE_SIZE: number = 20
+
+const mid = ref<number>(0)
+const keyword = ref<string>('')
+const state = ref<string>('empty')
+const errorText = ref<string>('')
+const items = ref<Array<FollowItem>>([])
+const page = ref<number>(1)
+const total = ref<number>(0)
+const loading = ref<boolean>(false)
+const noMore = ref<boolean>(false)
+const footerText = ref<string>('加载中...')
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const footerStyle = computed((): string => 'color:' + textSecondary() + ';padding-bottom:' + (safeAreaBottom() + 16).toString() + 'px;')
+
+async function search(first: boolean) {
+	if (loading.value) {
+		return
+	}
+	const word = keyword.value.trim()
+	if (word.length == 0) {
+		// 源：空关键词不请求，渲染空结果态
+		items.value = []
+		state.value = 'empty'
+		return
+	}
+	if (first) {
+		page.value = 1
+		noMore.value = false
+		footerText.value = '加载中...'
+		state.value = 'loading'
+		errorText.value = ''
+	}
+	loading.value = true
+	const res = await fetchFollowSearch(mid.value, word, page.value, PAGE_SIZE)
+	loading.value = false
+	if (!res.status) {
+		if (first) {
+			state.value = 'error'
+			errorText.value = res.message
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	if (first) {
+		items.value = res.items
+		total.value = res.total
+	} else {
+		for (let i = 0; i < res.items.length; i++) {
+			items.value.push(res.items[i])
+		}
+	}
+	page.value = page.value + 1
+	if ((page.value == 2 && total.value < PAGE_SIZE) || res.items.length == 0) {
+		noMore.value = true
+		footerText.value = '没有更多了'
+	}
+	state.value = items.value.length > 0 ? 'ready' : 'empty'
+}
+
+function onSubmit(word: string) {
+	keyword.value = word
+	search(true)
+}
+
+function resubmit() {
+	search(true)
+}
+
+function onLoadMore() {
+	if (noMore.value || loading.value || state.value != 'ready') {
+		return
+	}
+	search(false)
+}
+
+function onBack() {
+	const stack = getCurrentPages()
+	if (stack.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+function openMember(targetMid: number) {
+	if (targetMid <= 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/member/member?mid=' + targetMid.toString() })
+}
+
+function onLiveBadge() {
+	uni.showToast({ title: '直播域接入后开放', icon: 'none' })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	const myMid = userState.info.mid
+	if (rawMid != null && (rawMid as string).length > 0) {
+		const parsed = parseInt(rawMid as string)
+		mid.value = isNaN(parsed) ? myMid : parsed
+	} else {
+		mid.value = myMid
+	}
+	// 初始即空结果态（源 initState 请求空关键词 → 空列表 → 未搜索到结果）
+	state.value = 'empty'
+})
+</script>
+
+<style>
+	.fs {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fs-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fs-list {
+		flex: 1;
+	}
+	.fs-skeleton {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-top: 8px;
+	}
+	.fs-sk-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-left: 16px;
+		margin-right: 16px;
+		padding-top: 10px;
+		padding-bottom: 10px;
+	}
+	.fs-sk-lines {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 12px;
+	}
+	.fs-sk-gap {
+		height: 8px;
+	}
+	.fs-footer {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		height: 60px;
+	}
+	.fs-footer-text {
+		font-size: 13px;
+	}
+</style>

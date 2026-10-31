@@ -1,0 +1,378 @@
+<template>
+	<!--
+		简介 Tab 内容（源头 `lib/pages/video/detail/introduction/view.dart`：IntroDetail + PagesPanel + SeasonPanel + Related）。
+		1:1 基线口径：没有「简介」「相关推荐」这类段标题——正文、分P/合集、相关推荐都直接排列，
+		相关推荐前只有一条浅分割线（源 view.dart 里 TabBarView 的 Divider：indent 12 / 6% 分割色）。
+	-->
+	<view class="ip">
+		<!-- 简介正文：超过 3 行折叠（源 ExpandablePanel 折叠态，行高 1.4） -->
+		<view class="ip-desc-box">
+			<text class="ip-desc" :style="descStyle" :max-lines="descExpanded ? 100 : 3">{{ descText }}</text>
+			<view v-if="descLong" class="ip-more" @click="toggleDesc">
+				<text class="ip-more-text" :style="primaryTextStyle">{{ descExpanded ? '收起' : '展开' }}</text>
+				<text class="ip-more-icon" :style="primaryIconStyle">{{ descExpanded ? expandLessGlyph : expandMoreGlyph }}</text>
+			</view>
+		</view>
+
+		<!-- 分P（仅多 P 时显示） -->
+		<view v-if="pageList.length > 1" class="ip-section">
+			<view class="ip-section-head">
+				<text class="ip-section-title" :style="titleStyle">分P</text>
+				<text class="ip-section-sub" :style="secondaryStyle">共 {{ pageList.length }} P</text>
+			</view>
+			<view
+				v-for="p in pageList"
+				:key="'p-' + p.cid.toString()"
+				class="ip-row"
+				:style="rowStyle(p.cid)"
+				@click="onPageTap(p.cid)"
+			>
+				<text class="ip-row-index" :style="rowIndexStyle(p.cid)">P{{ p.page }}</text>
+				<text class="ip-row-title" :style="rowTitleStyle(p.cid)" :max-lines="1">{{ p.part }}</text>
+				<text class="ip-row-duration" :style="secondaryStyle">{{ durationText(p.duration) }}</text>
+			</view>
+		</view>
+
+		<!-- 合集（ugc_season 存在时显示） -->
+		<view v-if="episodeList.length > 0" class="ip-section">
+			<view class="ip-section-head">
+				<text class="ip-section-title" :style="titleStyle" :max-lines="1">{{ seasonTitle }}</text>
+				<text class="ip-section-sub" :style="secondaryStyle">共 {{ episodeList.length }} 集</text>
+			</view>
+			<view
+				v-for="(e, index) in episodeList"
+				:key="'e-' + e.bvid + '-' + e.cid.toString()"
+				class="ip-row"
+				:style="rowStyle(e.cid)"
+				@click="onEpisodeTap(e)"
+			>
+				<text class="ip-row-index" :style="rowIndexStyle(e.cid)">{{ index + 1 }}</text>
+				<text class="ip-row-title" :style="rowTitleStyle(e.cid)" :max-lines="1">{{ e.title }}</text>
+				<text class="ip-row-duration" :style="secondaryStyle">{{ durationText(episodeDuration(e)) }}</text>
+			</view>
+		</view>
+
+		<!-- 分割线（源 Divider：左右 indent 12） -->
+		<view class="ip-divider" :style="relatedDividerStyle"></view>
+
+		<!-- 相关推荐（复用 P3 横向卡片；卡高与源 VideoCardH 同款：默认 106，封面 170×106，显示发布时间） -->
+		<view class="ip-related" :style="relatedHiddenStyle">
+			<view v-if="relatedState == 'loading'" class="ip-related-loading">
+				<view v-for="n in 3" :key="'sk-' + n.toString()" class="ip-sk-row">
+					<skeleton-block width="170px" height="106px" radius="10px"></skeleton-block>
+					<view class="ip-sk-body">
+						<skeleton-block width="100%" height="14px" radius="4px"></skeleton-block>
+						<view class="ip-sk-gap"></view>
+						<skeleton-block width="60%" height="12px" radius="4px"></skeleton-block>
+					</view>
+				</view>
+			</view>
+			<view v-else-if="relatedState == 'error'" class="ip-related-error" @click="onRetryRelated">
+				<text class="ip-related-error-text" :style="secondaryStyle">{{ relatedError }}</text>
+				<text class="ip-related-error-retry" :style="primaryTextStyle">点击重试</text>
+			</view>
+			<view v-else-if="relatedState == 'empty'" class="ip-related-empty">
+				<text class="ip-related-empty-text" :style="secondaryStyle">暂无相关推荐</text>
+			</view>
+			<view v-else class="ip-related-list">
+				<p-video-card-h
+					v-for="item in relatedList"
+					:key="item.bvid"
+					:pic="item.pic"
+					:title="item.title"
+					:duration="item.duration"
+					:view-count="item.stat.view"
+					:danmu-count="item.stat.danmaku"
+					:pubdate="item.pubdate"
+					:owner-name="item.owner.name"
+					:show-pubdate="true"
+					@tap="onRelatedTap(item.bvid, item.cid)"
+				></p-video-card-h>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import PVideoCardH from '../p-video-card-h/p-video-card-h.uvue'
+import SkeletonBlock from '../skeleton/skeleton-block.uvue'
+import { VideoPage, VideoSeasonEpisode } from '../../models/video-detail.uts'
+import { HotVideoItem } from '../../models/video.uts'
+import { timeFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary, themeColor, currentThemeIndex, withAlpha } from '../../utils/theme.uts'
+import { glyphOf, iconStyle } from '../../utils/icons.uts'
+
+/**
+ * 简介 Tab：简介正文 + 分P + 合集 + 分割线 + 相关推荐。
+ *
+ * 1:1 基线的三条硬口径（`lib/pages/video/detail/view.dart` + `introduction/view.dart`）：
+ *  ①「简介」「相关推荐」不是段标题，只是内容本身——不渲染标题（源里没有这两个 Text）；
+ *  ② UP 主行只出现一次且不在本组件内（顺序为 标题 → 元数据 → 互动栏 → UP 行 → 简介），见 `up-row.uvue`；
+ *  ③ 相关推荐与简介之间只有一条浅分割线（indent 12 / 分割色 6%），卡片用源 VideoCardH 尺寸（卡高 106）。
+ *
+ * 切分P / 切合集分集 / 点相关推荐都由页面处理（本组件只发事件），
+ * 保证「换源后重拉 playurl 与详情」集中在页面一处。
+ */
+const props = defineProps({
+	desc: { type: String, default: '' },
+	pages: { type: Array },
+	episodes: { type: Array },
+	seasonTitle: { type: String, default: '' },
+	related: { type: Array },
+	/** 相关视频推荐开关（SK.enableRelatedVideo，源 introduction/view.dart 按该键决定是否渲染相关推荐与分割线） */
+	showRelated: { type: Boolean, default: true },
+	currentCid: { type: Number, default: 0 },
+	/** loading / ready / empty / error */
+	relatedState: { type: String, default: 'loading' },
+	relatedError: { type: String, default: '' }
+})
+
+const emit = defineEmits(['switch-page', 'switch-episode', 'open-related', 'retry-related'])
+
+const primary = themeColor(currentThemeIndex())
+const expandMoreGlyph = glyphOf('expand-more')
+const expandLessGlyph = glyphOf('expand-less')
+
+const descExpanded = ref<boolean>(false)
+/** 折叠阈值：按 3 行正文的字符量估算（宽度相关的精确行数无法在样式层取到） */
+const DESC_FOLD_LENGTH = 90
+
+const pageList = computed((): Array<VideoPage> => {
+	const raw = props.pages
+	if (raw == null) {
+		return [] as Array<VideoPage>
+	}
+	return raw as Array<VideoPage>
+})
+
+const episodeList = computed((): Array<VideoSeasonEpisode> => {
+	const raw = props.episodes
+	if (raw == null) {
+		return [] as Array<VideoSeasonEpisode>
+	}
+	return raw as Array<VideoSeasonEpisode>
+})
+
+/** 相关推荐关闭时：整段（含分割线）不占位（源同款不渲染） */
+const relatedHiddenStyle = computed((): string => {
+	return props.showRelated ? '' : 'display:none;'
+})
+
+const relatedDividerStyle = computed((): string => {
+	const base = dividerStyle.value
+	return props.showRelated ? base : base + 'display:none;'
+})
+
+const relatedList = computed((): Array<HotVideoItem> => {
+	const raw = props.related
+	if (raw == null) {
+		return [] as Array<HotVideoItem>
+	}
+	return raw as Array<HotVideoItem>
+})
+
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const descStyle = computed((): string => 'color:' + textPrimary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const primaryIconStyle = computed((): string => iconStyle('expand-more', 16, primary))
+/** 分割线取分割色 6% 的等效浅灰（App 端 8 位 hex 不可靠，统一 rgba） */
+const dividerStyle = computed((): string => 'background-color:' + withAlpha(textSecondary(), 0.12) + ';')
+
+const descText = computed((): string => props.desc.length > 0 ? props.desc : '暂无简介')
+const descLong = computed((): boolean => props.desc.length > DESC_FOLD_LENGTH)
+
+function rowStyle(cid: number): string {
+	const selected = cid == props.currentCid
+	return selected ? 'background-color:' + withAlpha(primary, 0.08) + ';' : 'background-color:rgba(0,0,0,0);'
+}
+
+function rowIndexStyle(cid: number): string {
+	const selected = cid == props.currentCid
+	return 'color:' + (selected ? primary : textSecondary()) + ';'
+}
+
+function rowTitleStyle(cid: number): string {
+	const selected = cid == props.currentCid
+	return 'color:' + (selected ? primary : textPrimary()) + ';'
+}
+
+function durationText(seconds: number): string {
+	return seconds > 0 ? timeFormat(seconds) : ''
+}
+
+function episodeDuration(episode: VideoSeasonEpisode): number {
+	if (episode.page != null) {
+		return episode.page.duration
+	}
+	return 0
+}
+
+function toggleDesc() {
+	descExpanded.value = !descExpanded.value
+}
+
+function onPageTap(cid: number) {
+	if (cid <= 0 || cid == props.currentCid) {
+		return
+	}
+	emit('switch-page', cid)
+}
+
+function onEpisodeTap(episode: VideoSeasonEpisode) {
+	const cid = episode.cid > 0 ? episode.cid : (episode.page != null ? episode.page.cid : 0)
+	if (episode.bvid.length == 0 || cid <= 0) {
+		uni.showToast({ title: '该分集暂不支持播放', icon: 'none' })
+		return
+	}
+	emit('switch-episode', episode.bvid, cid)
+}
+
+function onRelatedTap(bvid: string, cid: number) {
+	if (bvid.length == 0) {
+		return
+	}
+	emit('open-related', bvid, cid)
+}
+
+function onRetryRelated() {
+	emit('retry-related')
+}
+</script>
+
+<style>
+	.ip {
+		display: flex;
+		flex-direction: column;
+	}
+	/* 简介正文：与信息区同一页边距（12），行高 1.4（源 IntroDetail 的 TextStyle(height: 1.4)） */
+	.ip-desc-box {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+		padding-top: 4px;
+	}
+	.ip-desc {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.ip-more {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+	}
+	.ip-more-text {
+		font-size: 12px;
+	}
+	.ip-more-icon {
+		font-family: MaterialIcons;
+		margin-left: 2px;
+	}
+	.ip-section {
+		display: flex;
+		flex-direction: column;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 14px;
+	}
+	.ip-section-head {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.ip-section-title {
+		flex: 1;
+		font-size: 13px;
+		font-weight: 500;
+	}
+	.ip-section-sub {
+		font-size: 11px;
+	}
+	.ip-row {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+		padding-left: 8px;
+		padding-right: 8px;
+		border-radius: 8px;
+	}
+	.ip-row-index {
+		width: 40px;
+		font-size: 12px;
+	}
+	.ip-row-title {
+		flex: 1;
+		font-size: 13px;
+	}
+	.ip-row-duration {
+		font-size: 11px;
+		margin-left: 8px;
+	}
+	/* 分割线：源 Divider 左右 indent 12，位于简介内容与相关推荐之间 */
+	.ip-divider {
+		height: 1px;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 10px;
+		margin-bottom: 2px;
+	}
+	.ip-related {
+		display: flex;
+		flex-direction: column;
+	}
+	.ip-related-loading {
+		display: flex;
+		flex-direction: column;
+		margin-top: 8px;
+	}
+	.ip-sk-row {
+		display: flex;
+		flex-direction: row;
+		margin-top: 6px;
+		margin-left: 12px;
+	}
+	.ip-sk-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-top: 4px;
+	}
+	.ip-sk-gap {
+		height: 8px;
+	}
+	.ip-related-error {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-top: 20px;
+		padding-bottom: 20px;
+	}
+	.ip-related-error-text {
+		font-size: 12px;
+	}
+	.ip-related-error-retry {
+		font-size: 12px;
+		margin-top: 6px;
+	}
+	.ip-related-empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-top: 20px;
+		padding-bottom: 20px;
+	}
+	.ip-related-empty-text {
+		font-size: 12px;
+	}
+	.ip-related-list {
+		display: flex;
+		flex-direction: column;
+		margin-top: 2px;
+	}
+</style>

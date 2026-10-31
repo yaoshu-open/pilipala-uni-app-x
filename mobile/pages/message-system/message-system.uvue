@@ -1,0 +1,221 @@
+<template>
+	<view class="msy" :style="pageStyle">
+		<app-navbar title="系统通知" :title-size="22"></app-navbar>
+
+		<!-- 错误态（含未登录 -101：重试按钮行为=去登录） -->
+		<view v-if="state == 'error'" class="msy-fill">
+			<p-http-error :message="errorText" @retry="onErrorAction"></p-http-error>
+		</view>
+
+		<scroll-view
+			v-else
+			class="msy-scroll"
+			:refresher-enabled="true"
+			:refresher-triggered="refreshing"
+			@refresherrefresh="onRefreshGesture"
+		>
+			<!-- 加载态：8 行骨架（标题 + 时间 + 正文两行） -->
+			<!-- 骨架：常驻渲染 + display 切换（实测蒸汽模式下该子树 v-if 转 false 后节点不卸载，
+				会与空态/列表叠在一起；同 P5 页「骨架与内容分容器」同源问题的可靠解） -->
+			<view class="msy-skeleton" :style="state == 'loading' ? '' : 'display:none;'">
+				<view v-for="n in 8" :key="'sk-' + n.toString()" class="msy-sk-row">
+					<skeleton-block width="55%" height="16px" radius="4px"></skeleton-block>
+					<view class="msy-sk-gap"></view>
+					<skeleton-block width="30%" height="12px" radius="4px"></skeleton-block>
+					<view class="msy-sk-gap"></view>
+					<skeleton-block width="100%" height="13px" radius="4px"></skeleton-block>
+					<view class="msy-sk-gap"></view>
+					<skeleton-block width="70%" height="13px" radius="4px"></skeleton-block>
+				</view>
+			</view>
+
+			<!-- 空态（独立 v-if，理由同 reply 页） -->
+			<view v-if="state == 'empty'" class="msy-empty">
+				<empty-illus text="没有数据"></empty-illus>
+			</view>
+
+			<!-- 列表（源无分页：一次 20 条，两源合并后一次渲染完） -->
+			<view v-if="state == 'ready'" class="msy-list">
+				<view v-for="(item, index) in items" :key="itemKey(item, index)">
+					<system-notice-item :item="item"></system-notice-item>
+					<view v-if="index < items.length - 1" class="msy-divider"></view>
+				</view>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, watch } from 'vue'
+import { onLoad, onShow } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import SystemNoticeItem from '../../components/message/system-notice-item.uvue'
+import { fetchSystemNotify, markSystemRead } from '../../api/message.uts'
+import { SystemNoticeItem as SystemNoticeModel } from '../../models/message.uts'
+import { refreshLoginState, ensureLoginState } from '../../composables/useLogin.uts'
+import { userState } from '../../stores/user.uts'
+import { pageBackground } from '../../utils/theme.uts'
+
+/**
+ * 系统通知（源头：`lib/pages/message/system/{view,controller}.dart`）。
+ *
+ *  - 双源：{messageBaseUrl}/x/sys-msg/query_unified_notify（系统）+ query_user_notify（个人），
+ *    page_size=20；两源合并后按 cursor 降序（源 controller.queryAndProcessMessages 同口径），
+ *    api 层 fetchSystemNotify 已做合并，单源失败用另一源展示；
+ *  - 无分页：源一次拉取 20 条、无 loadmore，本页同样不做触底加载（源无尾标，本页亦不渲染）；
+ *  - 已读上报：列表非空时用首条 cursor 调 update_cursor（写接口，csrf 缺失在接口层即失败）；
+ *    源对上报结果不做提示（失败静默，不影响展示），本页同口径，仅 console 留痕；
+ *  - 下拉刷新：重拉双源并重新上报已读；
+ *  - 条目：`system-notice-item`（标题 16 粗体 + 时间 + 正文），分割线 indent 14/14（源 Divider 参数）。
+ */
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const errorCode = ref<number>(0)
+const items = ref<Array<SystemNoticeModel>>([])
+const refreshing = ref<boolean>(false)
+
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+
+function itemKey(item: SystemNoticeModel, index: number): string {
+	return 'sys-' + (item.id > 0 ? item.id.toString() : item.cursor.toString()) + '-' + index.toString()
+}
+
+// ---------------------------------------------------------------- 数据加载
+
+async function reportRead() {
+	if (items.value.length == 0) {
+		return
+	}
+	const cursor = items.value[0].cursor
+	if (cursor <= 0) {
+		return
+	}
+	const res = await markSystemRead(cursor)
+	if (!res.status) {
+		// 源同口径：上报失败静默（不影响列表展示），留日志便于排查凭据问题
+		console.log('[system] mark read failed: ' + res.message)
+	}
+}
+
+async function loadFirst(retried: boolean = false) {
+	state.value = 'loading'
+	const res = await fetchSystemNotify()
+	if (!res.status) {
+		// -101：cookie 有效但内存登录态尚未恢复（冷启动 nav 未返回）→ 静默校正后重试一次
+		if (res.code == -101 && !retried) {
+			const ok = await refreshLoginState()
+			if (ok) {
+				return await loadFirst(true)
+			}
+		}
+		state.value = 'error'
+		errorCode.value = res.code
+		errorText.value = res.message
+		return
+	}
+	items.value = res.items
+	state.value = res.items.length == 0 ? 'empty' : 'ready'
+	reportRead()
+}
+
+async function onRefresh() {
+	if (state.value == 'loading') {
+		refreshing.value = false
+		return
+	}
+	refreshing.value = true
+	const res = await fetchSystemNotify()
+	if (res.status) {
+		items.value = res.items
+		state.value = res.items.length == 0 ? 'empty' : 'ready'
+		reportRead()
+	} else {
+		uni.showToast({ title: res.message, icon: 'none' })
+	}
+	refreshing.value = false
+}
+
+function onRefreshGesture() {
+	onRefresh()
+}
+
+function onErrorAction() {
+	if (errorCode.value == -101) {
+		uni.navigateTo({ url: '/pages/login/login' })
+	} else {
+		loadFirst()
+	}
+}
+
+// ---------------------------------------------------------------- 生命周期
+
+onLoad(() => {
+	// 冷启动先静默恢复登录态（cookie 有效但内存态未恢复时不再误判未登录）
+	ensureLoginState().then(() => {
+		loadFirst()
+	})
+})
+
+/** 登录态由 App 层静默校正到位后（冷启动 nav 晚于首屏），若当前是错误态则自动重载 */
+watch((): boolean => userState.isLogin, (value: boolean) => {
+	if (value && state.value == 'error') {
+		loadFirst()
+	}
+})
+
+onShow(() => {
+	if (state.value == 'error' && errorCode.value == -101) {
+		loadFirst()
+	}
+})
+</script>
+
+<style>
+	.msy {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* 源 HttpError = SizedBox(height: 400)，内容在 400 盒内居中（不是整屏居中） */
+	.msy-fill {
+		height: 400px;
+		display: flex;
+		flex-direction: column;
+	}
+	.msy-scroll {
+		flex: 1;
+	}
+	.msy-skeleton {
+		display: flex;
+		flex-direction: column;
+	}
+	.msy-sk-row {
+		display: flex;
+		flex-direction: column;
+		padding-top: 14px;
+		padding-left: 14px;
+		padding-right: 14px;
+		padding-bottom: 12px;
+	}
+	.msy-sk-gap {
+		height: 8px;
+	}
+	.msy-empty {
+		display: flex;
+		flex-direction: column;
+	}
+	.msy-list {
+		display: flex;
+		flex-direction: column;
+	}
+	/* 分割线：indent 14 / endIndent 14（源 system 页 Divider 参数） */
+	.msy-divider {
+		height: 1px;
+		background-color: rgba(128, 128, 128, 0.1);
+		margin-left: 14px;
+		margin-right: 14px;
+	}
+</style>

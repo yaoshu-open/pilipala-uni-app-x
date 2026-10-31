@@ -1,0 +1,22 @@
+/**
+ * 网络资源地址协议统一（图片链路专用出口）。
+ *
+ * 为什么需要：B 站接口返回的图片字段（视频封面 pic、用户头像 face、番剧封面 cover、
+ * 热词角标 icon、图文正文图 url）多处仍是 `http://` 明文地址。Android 9（API 28）起
+ * 系统默认禁止明文 HTTP，release 包未声明 usesCleartextTraffic 时原生 image 取图直接失败，
+ * logcat 原文：`UniImageImpl: loadImage error ... CLEARTEXT communication to i0.hdslb.com
+ * not permitted by network security policy`。调试基座由 HBuilderX 注入
+ * `usesCleartextTraffic=true`，因此该差异只在 release 包暴露（2026-10-28 实测）。
+ *
+ * 处置口径：B 站图床（hdslb / biliimg）与常规 CDN 均支持 https，消费前把协议升级为 https
+ * 即可根治；禁止用放开明文流量（usesCleartextTraffic）掩盖——那会让全 App 回退到不安全协议。
+ */
+export function toSecureUrl(raw: string): string {
+	if (raw.length == 0) {
+		return raw
+	}
+	if (raw.startsWith('http://')) {
+		return 'https://' + raw.substring(7)
+	}
+	return raw
+}

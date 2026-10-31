@@ -1,0 +1,26 @@
+<template>
+	<view class="sk-block" :style="blockStyle"></view>
+</template>
+
+<script setup lang="uts">
+import { skeletonBase } from '../../utils/theme.uts'
+
+/**
+ * 骨架屏占位块：矩形/圆形统一入口。
+ * 占位色口径见 theme.uts#skeletonBase（源 colorScheme.onInverseSurface）。
+ */
+const props = defineProps({
+	width: { type: String, default: '100%' },
+	height: { type: String, default: '13px' },
+	radius: { type: String, default: '0px' }
+})
+
+const blockStyle: string = 'width:' + props.width + ';height:' + props.height + ';border-radius:' + props.radius +
+	';background-color:' + skeletonBase()
+</script>
+
+<style>
+	.sk-block {
+		background-color: #F0EFF4;
+	}
+</style>

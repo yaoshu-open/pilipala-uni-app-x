@@ -1,0 +1,171 @@
+import { ref } from 'vue'
+import { SK, getNumber, getBool, setNumber, setBool } from './storage.uts'
+
+/**
+ * 主题变更信号（响应式）。
+ *
+ * 源头：`SettingController` 改主题后调 `Get.forceAppUpdate()` 触发全量重建。
+ * 目标端等价：所有 token 读取函数先读一次本 ref —— 模板/computed 里调用 token 即建立依赖，
+ * 主题写入后已挂载页面（含 v-show 保活的 main/home）当拍重算样式。
+ * 写入必须走 setThemeMode / setThemeIndex / setTextScale（它们会自增信号），页面不得直接 setNumber。
+ */
+export const themeTick = ref<number>(0)
+
+/** 主题变更信号自增（token 写入后调用） */
+export function notifyThemeChanged() {
+	themeTick.value = themeTick.value + 1
+}
+
+/**
+ * 主题色（源：lib/models/common/color_type.dart，19 项，顺序一致）。
+ * 品牌色默认取第 0 项；动态取色（Material You）无等价，降级为品牌色 + 手动选色。
+ */
+export const THEME_NAMES: string[] = [
+	'默认绿', '粉红色', '红色', '橙色', '琥珀色', '黄色', '酸橙色', '浅绿色', '绿色', '青色',
+	'蓝绿色', '浅蓝色', '蓝色', '靛蓝色', '紫色', '深紫色', '蓝灰色', '棕色', '灰色'
+]
+
+export const THEME_COLORS: string[] = [
+	'#5CB67B', '#E91E63', '#F44336', '#FF9800', '#FFC107', '#FFEB3B', '#CDDC39', '#8BC34A', '#4CAF50', '#009688',
+	'#00BCD4', '#03A9F4', '#2196F3', '#3F51B5', '#9C27B0', '#673AB7', '#607D8B', '#795548', '#9E9E9E'
+]
+
+export const THEME_MODE_LIGHT: number = 0
+export const THEME_MODE_DARK: number = 1
+export const THEME_MODE_SYSTEM: number = 2
+
+export function themeColor(index: number): string {
+	return index >= 0 && index < THEME_COLORS.length ? THEME_COLORS[index] : THEME_COLORS[0]
+}
+
+export function currentThemeIndex(): number {
+	// 读一次信号：让调用方（computed/模板）建立主题依赖
+	const signal = themeTick.value
+	return getNumber(SK.customColor, 0)
+}
+
+export function setThemeIndex(index: number) {
+	setNumber(SK.customColor, index)
+	notifyThemeChanged()
+}
+
+export function currentThemeMode(): number {
+	const signal = themeTick.value
+	return getNumber(SK.themeMode, THEME_MODE_SYSTEM)
+}
+
+export function setThemeMode(mode: number) {
+	setNumber(SK.themeMode, mode)
+	notifyThemeChanged()
+}
+
+export function textScale(): number {
+	const signal = themeTick.value
+	return getNumber(SK.defaultTextScale, 1.0)
+}
+
+/**
+ * 字体缩放（SK.defaultTextScale，源 MaterialApp 的 textScaler 等价）。
+ * 用法：把写死的字号改成 `scaledFont(16)`——读 textScale() 会建立主题依赖，
+ * 字号设置确定后已挂载页面即刻重算。
+ */
+export function scaledFont(px: number): string {
+	const scale = textScale()
+	const value = Math.round(px * scale * 10) / 10
+	return value.toString() + 'px'
+}
+
+export function setTextScale(value: number) {
+	setNumber(SK.defaultTextScale, value)
+	notifyThemeChanged()
+}
+
+export function dynamicColorEnabled(): boolean {
+	return getBool(SK.dynamicColor, true)
+}
+
+/** 系统当前是否为深色（App 端取系统主题，取不到按浅色处理） */
+export function systemIsDark(): boolean {
+	try {
+		const info = uni.getSystemInfoSync()
+		const theme = info.theme
+		if (theme != null) {
+			return theme == 'dark'
+		}
+	} catch (e) {
+		return false
+	}
+	return false
+}
+
+/** 当前是否深色模式 */
+export function isDarkMode(): boolean {
+	const signal = themeTick.value
+	const mode = currentThemeMode()
+	if (mode == THEME_MODE_DARK) {
+		return true
+	}
+	if (mode == THEME_MODE_LIGHT) {
+		return false
+	}
+	return systemIsDark()
+}
+
+/** 页面背景色（与 theme.json 保持一致） */
+export function pageBackground(): string {
+	return isDarkMode() ? '#101218' : '#F6F7F8'
+}
+
+/** 卡片背景色 */
+export function cardBackground(): string {
+	return isDarkMode() ? '#1A1D26' : '#FFFFFF'
+}
+
+/** 主文字色 */
+export function textPrimary(): string {
+	return isDarkMode() ? '#E6E8EC' : '#18191C'
+}
+
+/**
+ * 骨架屏占位色。
+ * 源：Material3 `colorScheme.onInverseSurface`（随动态配色变化，目标端无同名 token）
+ * → 取近似固定值（浅色 #F0EFF4 / 深色 #313033），归入「平台约束所致」差异。
+ */
+export function skeletonBase(): string {
+	return isDarkMode() ? '#313033' : '#F0EFF4'
+}
+
+/** 次文字色 */
+export function textSecondary(): string {
+	return isDarkMode() ? '#9BA1AC' : '#8A94A6'
+}
+
+/** 错误提示文字色（浅色底 / 深色底各一档，避免直接写死色值） */
+export function errorText(): string {
+	return isDarkMode() ? '#F08A8A' : '#D64545'
+}
+
+/** 错误提示条底色 */
+export function errorBackground(): string {
+	return isDarkMode() ? '#2A1C1C' : '#FDF0F0'
+}
+
+/** 主色底上的文字色（19 个主题色均为中高明度，统一白字） */
+export function onPrimaryText(): string {
+	return '#FFFFFF'
+}
+
+/**
+ * 主题色（或任意 #RRGGBB）加透明度。
+ * App 端 8 位 hex 与 color-mix 支持不可靠，统一转 rgba()。
+ */
+export function withAlpha(hex: string, alpha: number): string {
+	const text = hex.startsWith('#') ? hex.substring(1) : hex
+	if (text.length < 6) {
+		return hex
+	}
+	const r = parseInt(text.substring(0, 2), 16)
+	const g = parseInt(text.substring(2, 4), 16)
+	const b = parseInt(text.substring(4, 6), 16)
+	return 'rgba(' + r.toString() + ',' + g.toString() + ',' + b.toString() + ',' + alpha.toString() + ')'
+}

@@ -1,0 +1,96 @@
+import { strOf, numOf, objOf } from '../utils/json.uts'
+import { SubFolderItem, SubDetailMedia, FavDetailInfo } from './fav.uts'
+
+/**
+ * 用户中心域模型（源头：lib/models/user/info.dart 的 nav 部分、lib/models/user/stat.dart）。
+ *
+ * 分工（设计 §五/§十一）：nav/stat 与订阅族结果类归本文件（簇C）；
+ * 收藏夹/订阅条目等数据模型（FavFolderItem/SubFolderItem/SubDetailMedia/FavDetailInfo）
+ * 归 models/fav.uts（簇B 先落地），此处只引用不自建。
+ */
+
+/** 等级信息（nav 响应 data.level_info；mine 经验条消费 current_exp/next_exp） */
+export class LevelInfo {
+	currentLevel: number = 0
+	currentExp: number = 0
+	nextExp: number = 0
+
+	static from(obj: UTSJSONObject | null): LevelInfo {
+		const info = new LevelInfo()
+		if (obj == null) {
+			return info
+		}
+		info.currentLevel = numOf(obj, 'current_level')
+		info.currentExp = numOf(obj, 'current_exp')
+		info.nextExp = numOf(obj, 'next_exp')
+		return info
+	}
+}
+
+/** nav 用户信息（mine 资料卡：头像/昵称/等级/大会员/硬币/经验） */
+export class NavUserInfo {
+	isLogin: boolean = false
+	mid: number = 0
+	uname: string = ''
+	face: string = ''
+	money: number = 0
+	/** 大会员状态：1 有效（源 vipStatus） */
+	vipStatus: number = 0
+	/** 大会员类型：0 无 / 1 月度 / 2 年度（源 vipType；年度基线徽章为「超大会员」） */
+	vipType: number = 0
+	level: LevelInfo = new LevelInfo()
+
+	static from(data: UTSJSONObject): NavUserInfo {
+		const info = new NavUserInfo()
+		const loginRaw = data.getBoolean('isLogin')
+		info.isLogin = loginRaw == null ? false : loginRaw
+		info.mid = numOf(data, 'mid')
+		info.uname = strOf(data, 'uname')
+		info.face = strOf(data, 'face')
+		info.money = numOf(data, 'money')
+		info.vipStatus = numOf(data, 'vipStatus')
+		info.vipType = numOf(data, 'vipType')
+		info.level = LevelInfo.from(objOf(data, 'level_info'))
+		return info
+	}
+}
+
+/** nav/stat（mine 三列统计） */
+export class NavUserStat {
+	following: number = 0
+	follower: number = 0
+	dynamicCount: number = 0
+}
+
+/** nav 结果（isLogin=false 时 data 仍返回结构体） */
+export class NavUserResult {
+	status: boolean = false
+	message: string = ''
+	data: NavUserInfo | null = null
+}
+
+/** nav/stat 结果 */
+export class NavStatResult {
+	status: boolean = false
+	message: string = ''
+	stat: NavUserStat = new NavUserStat()
+}
+
+/** 订阅列表分页结果（-101 未登录时携带 code 供页面出「去登录」按钮） */
+export class SubFolderResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	count: number = 0
+	items: Array<SubFolderItem> = []
+}
+
+/** 订阅详情结果（info 复用 models/fav.uts 的 FavDetailInfo；play 为 info.cnt_info.play） */
+export class SubDetailResult {
+	status: boolean = false
+	message: string = ''
+	code: number = 0
+	info: FavDetailInfo | null = null
+	play: number = 0
+	items: Array<SubDetailMedia> = []
+}

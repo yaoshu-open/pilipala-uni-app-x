@@ -1,0 +1,498 @@
+import { strOf, numOf, objOf, strArrayOf } from '../utils/json.uts'
+import { durationToSeconds } from '../utils/format.uts'
+import { toSecureUrl } from '../utils/url.uts'
+
+/**
+ * 搜索域模型（源头：lib/models/search/{hot,suggest,result}.dart、lib/models/common/search_type.dart）。
+ *
+ * 高亮拆段：接口标题字段携带 `<em class="keyword">…</em>`（suggest 为 `suggest_high_light`）标记，
+ * 源头 Em.regTitle 用正则切成 [{type:'em'|'text', text}] 段数组——uts 端用等价的手写扫描器实现
+ * （parseTitleSegs），渲染层行内多 text 拼接（em 段主色加粗），与 P4 reply-rich-text 段模式同构。
+ */
+
+/** 标题段：type='em' 为命中高亮段，'text' 为普通段 */
+export class TitleSeg {
+	type: string = 'text'
+	text: string = ''
+	constructor(type: string, text: string) {
+		this.type = type
+		this.text = text
+	}
+}
+
+/** HTML 实体解码（源头 lib/utils/em.dart decodeHtmlEntities 同款替换链） */
+export function decodeHtmlEntities(title: string): string {
+	return title
+		.replaceAll('&lt;', '<')
+		.replaceAll('&gt;', '>')
+		.replaceAll('&#34;', '"')
+		.replaceAll('&#39;', "'")
+		.replaceAll('&quot;', '"')
+		.replaceAll('&apos;', "'")
+		.replaceAll('&nbsp;', ' ')
+		.replaceAll('&amp;', '&')
+		.replaceAll('&#x27;', "'")
+}
+
+/**
+ * `<开标签>内容</闭标签>` 段拆分（源头 Em.regTitle 等价）。
+ * 手写扫描器逐字符找配对标签：命中 → em 段（内容已解码）；标签之外 → text 段。
+ * 结构不完整（缺闭合/悬空 '<'）时按普通文本处理，不抛异常。
+ */
+export function parseTitleSegs(origin: string): TitleSeg[] {
+	const segs: TitleSeg[] = []
+	let plain = ''
+	let i = 0
+	const n = origin.length
+	while (i < n) {
+		const lt = origin.indexOf('<', i)
+		if (lt < 0) {
+			plain += origin.substring(i)
+			break
+		}
+		if (lt > i) {
+			plain += origin.substring(i, lt)
+		}
+		const gt = origin.indexOf('>', lt)
+		if (gt < 0) {
+			// 悬空 '<'：无完整开标签，剩余按普通文本
+			plain += origin.substring(lt)
+			break
+		}
+		const closeLt = origin.indexOf('<', gt + 1)
+		if (closeLt < 0) {
+			// 有开标签无后续 '<'：标签本身丢弃，剩余按普通文本
+			i = gt + 1
+			continue
+		}
+		const closeGt = origin.indexOf('>', closeLt)
+		if (closeGt < 0) {
+			plain += origin.substring(gt + 1)
+			break
+		}
+		const content = origin.substring(gt + 1, closeLt)
+		if (plain.length > 0) {
+			segs.push(new TitleSeg('text', decodeHtmlEntities(plain)))
+			plain = ''
+		}
+		segs.push(new TitleSeg('em', decodeHtmlEntities(content)))
+		i = closeGt + 1
+	}
+	if (plain.length > 0) {
+		segs.push(new TitleSeg('text', decodeHtmlEntities(plain)))
+	}
+	return segs
+}
+
+/** 段数组 → 纯文本标题（等价源 title.replaceAll(RegExp(r'<.*?>'), '')） */
+export function segsToPlain(segs: TitleSeg[]): string {
+	let text = ''
+	for (let i = 0; i < segs.length; i++) {
+		text += segs[i].text
+	}
+	return text
+}
+
+// ---------------------------------------------------------------- 搜索类型与筛选项常量
+
+/** 搜索类型（源头 SearchType 枚举 5 项 + 基线图新增「影视」media_ft，共 6 项；顺序=基线 tab 顺序） */
+export class SearchTypeDef {
+	type: string = ''
+	label: string = ''
+	constructor(type: string, label: string) {
+		this.type = type
+		this.label = label
+	}
+}
+
+export const SEARCH_TYPES: SearchTypeDef[] = [
+	new SearchTypeDef('video', '视频'),
+	new SearchTypeDef('media_bangumi', '番剧'),
+	new SearchTypeDef('media_ft', '影视'),
+	new SearchTypeDef('live_room', '直播间'),
+	new SearchTypeDef('bili_user', '用户'),
+	new SearchTypeDef('article', '专栏')
+]
+
+/** 排序档（源头 ArchiveFilterType：totalrank/click/pubdate/dm/stow/scores；'' 表示不传参=默认排序） */
+export class OrderOption {
+	value: string = ''
+	label: string = ''
+	constructor(value: string, label: string) {
+		this.value = value
+		this.label = label
+	}
+}
+
+/** 视频排序 6 档（源 video_panel.dart filterList） */
+export const VIDEO_ORDERS: OrderOption[] = [
+	new OrderOption('', '默认排序'),
+	new OrderOption('click', '播放多'),
+	new OrderOption('pubdate', '新发布'),
+	new OrderOption('dm', '弹幕多'),
+	new OrderOption('stow', '收藏多'),
+	new OrderOption('scores', '评论多')
+]
+
+/** 专栏排序 5 档（源 ArticleFilterType；面板初始化即取 totalrank） */
+export const ARTICLE_ORDERS: OrderOption[] = [
+	new OrderOption('totalrank', '综合排序'),
+	new OrderOption('pubdate', '最新发布'),
+	new OrderOption('click', '最多点击'),
+	new OrderOption('attention', '最多喜欢'),
+	new OrderOption('scores', '最多评论')
+]
+
+/** 筛选 chip（时长/分区共用 {label, value} 结构） */
+export class FilterOption {
+	label: string = ''
+	value: number = 0
+	constructor(label: string, value: number) {
+		this.label = label
+		this.value = value
+	}
+}
+
+/** 视频时长 5 档（源 timeFiltersList） */
+export const VIDEO_TIME_FILTERS: FilterOption[] = [
+	new FilterOption('全部时长', 0),
+	new FilterOption('0-10分钟', 1),
+	new FilterOption('10-30分钟', 2),
+	new FilterOption('30-60分钟', 3),
+	new FilterOption('60分钟+', 4)
+]
+
+/** 视频分区 22 项（源 partFiltersList，value 为分区 tid；-1 = 全部不传参） */
+export const VIDEO_PART_FILTERS: FilterOption[] = [
+	new FilterOption('全部', -1),
+	new FilterOption('动画', 1),
+	new FilterOption('番剧', 13),
+	new FilterOption('国创', 167),
+	new FilterOption('音乐', 3),
+	new FilterOption('舞蹈', 129),
+	new FilterOption('游戏', 4),
+	new FilterOption('知识', 36),
+	new FilterOption('科技', 188),
+	new FilterOption('运动', 234),
+	new FilterOption('汽车', 223),
+	new FilterOption('生活', 160),
+	new FilterOption('美食', 211),
+	new FilterOption('动物', 217),
+	new FilterOption('鬼畜', 119),
+	new FilterOption('时尚', 155),
+	new FilterOption('资讯', 202),
+	new FilterOption('娱乐', 5),
+	new FilterOption('影视', 181),
+	new FilterOption('记录', 177),
+	new FilterOption('电影', 23),
+	new FilterOption('电视', 11)
+]
+
+// ---------------------------------------------------------------- 热搜 / 建议
+
+/** 热搜词条（源 HotSearchItem；wordType：4/5 热 · 11 话题 · 8 普通 · 7 直播，角标图走 icon 字段 URL） */
+export class HotSearchItem {
+	keyword: string = ''
+	showName: string = ''
+	wordType: number = 0
+	icon: string = ''
+
+	static from(raw: UTSJSONObject): HotSearchItem {
+		const item = new HotSearchItem()
+		item.keyword = strOf(raw, 'keyword')
+		item.showName = strOf(raw, 'show_name')
+		item.wordType = numOf(raw, 'word_type')
+		// 角标图 URL 常为 http 明文，release 包原生 image 会拒载（详见 utils/url.uts）
+		item.icon = toSecureUrl(strOf(raw, 'icon'))
+		return item
+	}
+}
+
+/** 建议词条（源 SearchSuggestItem；name 含 suggest_high_light 标记 → nameSegs 段数组） */
+export class SuggestItem {
+	value: string = ''
+	term: string = ''
+	nameSegs: TitleSeg[] = []
+
+	static from(raw: UTSJSONObject): SuggestItem {
+		const item = new SuggestItem()
+		item.value = strOf(raw, 'value')
+		item.term = strOf(raw, 'term')
+		item.nameSegs = parseTitleSegs(strOf(raw, 'name'))
+		return item
+	}
+}
+
+// ---------------------------------------------------------------- 结果计数
+
+/** 各类结果计数（源 SearchAllModel.topTList；含 media_ft 供「影视」tab 使用） */
+export class SearchCounts {
+	video: number = 0
+	mediaBangumi: number = 0
+	mediaFt: number = 0
+	liveRoom: number = 0
+	biliUser: number = 0
+	article: number = 0
+
+	/** 按 search_type 取计数（未知类型返回 0） */
+	countOf(type: string): number {
+		if (type == 'video') { return this.video }
+		if (type == 'media_bangumi') { return this.mediaBangumi }
+		if (type == 'media_ft') { return this.mediaFt }
+		if (type == 'live_room') { return this.liveRoom }
+		if (type == 'bili_user') { return this.biliUser }
+		if (type == 'article') { return this.article }
+		return 0
+	}
+
+	static from(data: UTSJSONObject): SearchCounts {
+		const counts = new SearchCounts()
+		const top = objOf(data, 'top_tlist')
+		if (top == null) {
+			return counts
+		}
+		counts.video = numOf(top, 'video')
+		counts.mediaBangumi = numOf(top, 'media_bangumi')
+		counts.mediaFt = numOf(top, 'media_ft')
+		counts.liveRoom = numOf(top, 'live_room')
+		counts.biliUser = numOf(top, 'bili_user')
+		counts.article = numOf(top, 'article')
+		return counts
+	}
+}
+
+// ---------------------------------------------------------------- 视频（含 owner/stat 内嵌）
+
+/** UP 信息（源 Owner：mid/author/upic → mid/name/face） */
+export class SearchVideoOwner {
+	mid: number = 0
+	name: string = ''
+	face: string = ''
+}
+
+/** 视频计数（源 Stat：play→view、danmaku、favorite、review→reply、like） */
+export class SearchVideoStat {
+	view: number = 0
+	danmaku: number = 0
+	favorite: number = 0
+	reply: number = 0
+	like: number = 0
+}
+
+export class SearchVideoItem {
+	type: string = ''
+	aid: number = 0
+	bvid: string = ''
+	mid: number = 0
+	title: string = ''
+	titleSegs: TitleSeg[] = []
+	description: string = ''
+	pic: string = ''
+	/** 秒（源 Utils.duration 把 "hh:mm:ss" 转秒，本端 durationToSeconds 同构） */
+	duration: number = 0
+	pubdate: number = 0
+	senddate: number = 0
+	videoReview: number = 0
+	rcmdReason: string = ''
+	owner: SearchVideoOwner = new SearchVideoOwner()
+	stat: SearchVideoStat = new SearchVideoStat()
+
+	static from(raw: UTSJSONObject): SearchVideoItem {
+		const item = new SearchVideoItem()
+		item.type = strOf(raw, 'type')
+		item.aid = numOf(raw, 'aid')
+		item.bvid = strOf(raw, 'bvid')
+		item.mid = numOf(raw, 'mid')
+		item.titleSegs = parseTitleSegs(strOf(raw, 'title'))
+		item.title = segsToPlain(item.titleSegs)
+		item.description = strOf(raw, 'description')
+		const pic = strOf(raw, 'pic')
+		item.pic = pic.startsWith('//') ? 'https:' + pic : pic
+		item.duration = durationToSeconds(strOf(raw, 'duration'))
+		item.pubdate = numOf(raw, 'pubdate')
+		item.senddate = numOf(raw, 'senddate')
+		item.videoReview = numOf(raw, 'video_review')
+		item.owner.mid = numOf(raw, 'mid')
+		item.owner.name = strOf(raw, 'author')
+		const upic = strOf(raw, 'upic')
+		item.owner.face = upic.startsWith('//') ? 'https:' + upic : upic
+		item.stat.view = numOf(raw, 'play')
+		item.stat.danmaku = numOf(raw, 'danmaku')
+		item.stat.favorite = numOf(raw, 'favorite')
+		item.stat.reply = numOf(raw, 'review')
+		item.stat.like = numOf(raw, 'like')
+		return item
+	}
+}
+
+// ---------------------------------------------------------------- 用户
+
+export class SearchUserItem {
+	mid: number = 0
+	uname: string = ''
+	usign: string = ''
+	fans: number = 0
+	videos: number = 0
+	upic: string = ''
+	level: number = 0
+	/** 官方认证说明（源 official_verify.desc；空串不渲染） */
+	officialDesc: string = ''
+	isLive: number = 0
+	roomId: number = 0
+
+	static from(raw: UTSJSONObject): SearchUserItem {
+		const item = new SearchUserItem()
+		item.mid = numOf(raw, 'mid')
+		item.uname = strOf(raw, 'uname')
+		item.usign = strOf(raw, 'usign')
+		item.fans = numOf(raw, 'fans')
+		item.videos = numOf(raw, 'videos')
+		const upic = strOf(raw, 'upic')
+		item.upic = upic.startsWith('//') ? 'https:' + upic : upic
+		item.level = numOf(raw, 'level')
+		const verify = objOf(raw, 'official_verify')
+		if (verify != null) {
+			item.officialDesc = strOf(verify, 'desc')
+		}
+		item.isLive = numOf(raw, 'is_live')
+		item.roomId = numOf(raw, 'room_id')
+		return item
+	}
+}
+
+// ---------------------------------------------------------------- 直播间
+
+/** 直播「xx人看过」对象（源 watched_show{num,text}；空对象兜底不显示） */
+export class WatchedShow {
+	num: number = 0
+	text: string = ''
+}
+
+export class SearchLiveItem {
+	uid: number = 0
+	uname: string = ''
+	uface: string = ''
+	userCover: string = ''
+	title: string = ''
+	titleSegs: TitleSeg[] = []
+	cover: string = ''
+	online: number = 0
+	roomid: number = 0
+	/** 分区名（源 Em.regCate 去标签取文本） */
+	cateName: string = ''
+	liveTime: string = ''
+	watchedShow: WatchedShow = new WatchedShow()
+
+	static from(raw: UTSJSONObject): SearchLiveItem {
+		const item = new SearchLiveItem()
+		item.uid = numOf(raw, 'uid')
+		item.uname = strOf(raw, 'uname')
+		const uface = strOf(raw, 'uface')
+		item.uface = uface.startsWith('//') ? 'https:' + uface : uface
+		const userCover = strOf(raw, 'user_cover')
+		item.userCover = userCover.startsWith('//') ? 'https:' + userCover : userCover
+		item.titleSegs = parseTitleSegs(strOf(raw, 'title'))
+		item.title = segsToPlain(item.titleSegs)
+		const cover = strOf(raw, 'cover')
+		item.cover = cover.startsWith('//') ? 'https:' + cover : cover
+		item.online = numOf(raw, 'online')
+		item.roomid = numOf(raw, 'roomid')
+		// 源 regCate：`<标签>文本</标签>` 取最后一组标签内文本；无标签原样（去实体）
+		const cate = strOf(raw, 'cate_name')
+		if (cate.indexOf('<') >= 0) {
+			item.cateName = segsToPlain(parseTitleSegs(cate))
+		} else {
+			item.cateName = decodeHtmlEntities(cate)
+		}
+		item.liveTime = strOf(raw, 'live_time')
+		const watched = objOf(raw, 'watched_show')
+		if (watched != null) {
+			item.watchedShow.num = numOf(watched, 'num')
+			item.watchedShow.text = strOf(watched, 'text')
+		}
+		return item
+	}
+}
+
+// ---------------------------------------------------------------- 番剧 / 影视（media 结构共用）
+
+export class SearchMBangumiItem {
+	mediaId: number = 0
+	title: string = ''
+	titleSegs: TitleSeg[] = []
+	orgTitle: string = ''
+	/** 1 番剧 / 2 国创（源 badge 文案 ternary；影视 tab 由页面另行传标） */
+	mediaType: number = 0
+	cv: string = ''
+	staff: string = ''
+	seasonId: number = 0
+	seasonTypeName: string = ''
+	buttonText: string = ''
+	isFollow: number = 0
+	cover: string = ''
+	areas: string = ''
+	styles: string = ''
+	/** 评分（media_score.score；0 = 未开分） */
+	score: number = 0
+	indexShow: string = ''
+	pubtime: number = 0
+
+	static from(raw: UTSJSONObject): SearchMBangumiItem {
+		const item = new SearchMBangumiItem()
+		item.mediaId = numOf(raw, 'media_id')
+		item.titleSegs = parseTitleSegs(strOf(raw, 'title'))
+		item.title = segsToPlain(item.titleSegs)
+		item.orgTitle = strOf(raw, 'org_title')
+		item.mediaType = numOf(raw, 'media_type')
+		item.cv = strOf(raw, 'cv')
+		item.staff = strOf(raw, 'staff')
+		item.seasonId = numOf(raw, 'season_id')
+		item.seasonTypeName = strOf(raw, 'season_type_name')
+		item.buttonText = strOf(raw, 'button_text')
+		item.isFollow = numOf(raw, 'is_follow')
+		const cover = strOf(raw, 'cover')
+		item.cover = cover.startsWith('//') ? 'https:' + cover : cover
+		item.areas = strOf(raw, 'areas')
+		item.styles = strOf(raw, 'styles')
+		const scoreObj = objOf(raw, 'media_score')
+		if (scoreObj != null) {
+			item.score = numOf(scoreObj, 'score')
+		}
+		item.indexShow = strOf(raw, 'index_show')
+		item.pubtime = numOf(raw, 'pubtime')
+		return item
+	}
+}
+
+// ---------------------------------------------------------------- 专栏
+
+export class SearchArticleItem {
+	id: number = 0
+	mid: number = 0
+	pubTime: number = 0
+	like: number = 0
+	titleSegs: TitleSeg[] = []
+	/** 源 subTitle：title 去标签 + 实体解码 */
+	subTitle: string = ''
+	imageUrls: string[] = []
+	view: number = 0
+	reply: number = 0
+	desc: string = ''
+	categoryName: string = ''
+
+	static from(raw: UTSJSONObject): SearchArticleItem {
+		const item = new SearchArticleItem()
+		item.id = numOf(raw, 'id')
+		item.mid = numOf(raw, 'mid')
+		item.pubTime = numOf(raw, 'pub_time')
+		item.like = numOf(raw, 'like')
+		item.titleSegs = parseTitleSegs(strOf(raw, 'title'))
+		item.subTitle = segsToPlain(item.titleSegs)
+		item.imageUrls = strArrayOf(raw, 'image_urls')
+		item.view = numOf(raw, 'view')
+		item.reply = numOf(raw, 'reply')
+		item.desc = strOf(raw, 'desc')
+		item.categoryName = strOf(raw, 'category_name')
+		return item
+	}
+}

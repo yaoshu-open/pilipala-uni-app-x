@@ -1,0 +1,46 @@
+<template>
+	<view class="sk-card-v">
+		<skeleton>
+			<skeleton-block width="100%" :height="imgHeight" radius="10px"></skeleton-block>
+			<view class="sk-card-v-info">
+				<skeleton-block width="200px" height="13px"></skeleton-block>
+				<view class="sk-card-v-gap5"></view>
+				<skeleton-block width="150px" height="13px"></skeleton-block>
+			</view>
+		</skeleton>
+	</view>
+</template>
+
+<script setup lang="uts">
+import Skeleton from './skeleton.uvue'
+import SkeletonBlock from './skeleton-block.uvue'
+
+/**
+ * 竖向视频卡骨架屏。视觉出处：`lib/common/skeleton/video_card_v.dart`
+ *  - 封面：AspectRatio(StyleString.aspectRatio = 16/10)、圆角 imgRadius = 10；
+ *  - 信息区：fromLTRB(4, 5, 6, 6)；标题条 200×13（下 5）、副条 150×13（下 12）。
+ *
+ * 平台约束：源封面高度由父宽按 16:10 推导；目标端组件同步读不到父宽，
+ * 改由调用方按「列宽 / 1.6」传 imgHeight（默认 110px ≈ 176px 列宽）。
+ */
+const props = defineProps({
+	imgHeight: { type: String, default: '110px' }
+})
+</script>
+
+<style>
+	.sk-card-v {
+		background-color: #FFFFFF;
+	}
+	.sk-card-v-info {
+		display: flex;
+		flex-direction: column;
+		padding-left: 4px;
+		padding-right: 6px;
+		padding-top: 5px;
+		padding-bottom: 12px;
+	}
+	.sk-card-v-gap5 {
+		height: 5px;
+	}
+</style>

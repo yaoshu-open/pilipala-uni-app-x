@@ -1,0 +1,29 @@
+/**
+ * 正文富文本切片（link 类）的统一出口。
+ *
+ * 切片来源：models/reply.uts#buildSegments 与动态富文本渲染，三类内容共用 `link` 形态：
+ *  - http(s):// 链接 → 内置 webview（源头 lib/pages/dynamics/widgets/rich_node_panel.dart:95
+ *    RICH_TEXT_NODE_TYPE_WEB → Get.toNamed('/webview', {url, type:'url', pageTitle:''})）
+ *  - BV 号 → 视频详情（同源 BV 号处理）
+ *  - #话题# → 源工程话题节点 onTap 为空操作（rich_node_panel.dart:70-79）；本端不给假跳转，
+ *    以 toast 如实说明，避免点进「功能占位」死页
+ */
+export function openRichLink(text: string) {
+	const value = text.trim()
+	if (value.length == 0) {
+		return
+	}
+	if (value.startsWith('http://') || value.startsWith('https://')) {
+		uni.navigateTo({ url: '/pages/webview/webview?url=' + encodeURIComponent(value) + '&type=url' })
+		return
+	}
+	if (value.startsWith('BV') && value.length == 12) {
+		uni.navigateTo({ url: '/pages/video/video?bvid=' + value })
+		return
+	}
+	if (value.startsWith('#')) {
+		uni.showToast({ title: '话题页暂未接入', icon: 'none' })
+		return
+	}
+	uni.showToast({ title: '暂不支持跳转该内容', icon: 'none' })
+}

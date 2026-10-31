@@ -1,0 +1,142 @@
+<template>
+	<view class="pvch" :style="rootStyle" @click="onTap">
+		<view class="pvch-cover" :style="coverStyle">
+			<network-img :src="pic" width="100%" height="100%" radius="10px"></network-img>
+			<view v-if="duration > 0" class="pvch-duration">
+				<p-badge :text="durationText" type="gray" size="small" :font-size="11"></p-badge>
+			</view>
+			<view v-if="typeName.length > 0 && typeName != 'video'" class="pvch-type">
+				<p-badge :text="typeName" type="primary" size="small" :font-size="11"></p-badge>
+			</view>
+			<view v-if="cornerBadge.length > 0" class="pvch-corner">
+				<p-badge :text="cornerBadge" type="primary" size="small" :font-size="11"></p-badge>
+			</view>
+		</view>
+		<view class="pvch-body">
+			<text class="pvch-title" :style="titleStyle" :max-lines="2">{{ title }}</text>
+			<view class="pvch-spacer"></view>
+			<text v-if="showPubdate" class="pvch-time" :style="secondaryStyle">{{ pubdateText }}</text>
+			<text v-if="showOwner" class="pvch-owner" :style="secondaryStyle" :max-lines="1">{{ ownerName }}</text>
+			<view class="pvch-stat">
+				<p-stat icon="play-circle-outlined" :text="viewText" :icon-size="13"></p-stat>
+				<view class="pvch-gap8"></view>
+				<p-stat icon="subtitles-outlined" :text="danmuText" :icon-size="14"></p-stat>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import PBadge from '../p-badge/p-badge.uvue'
+import PStat from '../p-stat/p-stat.uvue'
+import { numFormat, timeFormat, dateFormat } from '../../utils/format.uts'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 横向视频卡（源头：`lib/common/widgets/video_card_h.dart` VideoCardH）。
+ *
+ * 结构：左侧封面（16:10、圆角 10、右下时长、左下类型角标、右上 cornerBadge 角标位[充电专属等]）
+ * + 右侧信息列（标题 2 行 w500 → 弹性空隙 → 发布时间 → UP 主 → 播放量/弹幕数；
+ * showOwner=false 隐藏 UP 行不残留空隙，源 VideoCardH showOwner 同款）。
+ * 卡片外边距左右 12 / 上下 5，卡高由调用方按「可用宽 / 2 / 1.6」计算传入（源同款公式）。
+ * 时长角标与类型角标在 VDOM 端也可点击——外层整块承接事件，不依赖子元素事件。
+ */
+const props = defineProps({
+	pic: { type: String, default: '' },
+	title: { type: String, default: '' },
+	duration: { type: Number, default: 0 },
+	viewCount: { type: Number, default: 0 },
+	danmuCount: { type: Number, default: 0 },
+	pubdate: { type: Number, default: 0 },
+	ownerName: { type: String, default: '' },
+	typeName: { type: String, default: '' },
+	showPubdate: { type: Boolean, default: false },
+	showOwner: { type: Boolean, default: true },
+	/** 封面右上角标（源 VideoCardH showCharge 充电专属位：right 6 / top 6 / primary）；空串 = 不显示 */
+	cornerBadge: { type: String, default: '' },
+	cardHeight: { type: Number, default: 106 }
+})
+
+const emit = defineEmits(['tap'])
+
+const rootStyle = computed((): string => 'height:' + props.cardHeight.toString() + 'px;')
+const coverStyle = computed((): string => {
+	const width = Math.round(props.cardHeight * 1.6)
+	return 'width:' + width.toString() + 'px;height:' + props.cardHeight.toString() + 'px;'
+})
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const durationText = computed((): string => timeFormat(props.duration))
+const viewText = computed((): string => numFormat(props.viewCount))
+const danmuText = computed((): string => numFormat(props.danmuCount))
+const pubdateText = computed((): string => dateFormat(props.pubdate, 'list'))
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	.pvch {
+		display: flex;
+		flex-direction: row;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 5px;
+		margin-bottom: 5px;
+	}
+	.pvch-cover {
+		position: relative;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.pvch-duration {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+	}
+	.pvch-type {
+		position: absolute;
+		left: 6px;
+		bottom: 6px;
+	}
+	.pvch-corner {
+		position: absolute;
+		right: 6px;
+		top: 6px;
+	}
+	.pvch-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-right: 6px;
+	}
+	.pvch-title {
+		font-size: 14px;
+		line-height: 20px;
+		font-weight: 500;
+	}
+	.pvch-spacer {
+		flex: 1;
+	}
+	.pvch-time {
+		font-size: 11px;
+	}
+	.pvch-owner {
+		font-size: 12px;
+		margin-top: 2px;
+	}
+	.pvch-stat {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+	}
+	.pvch-gap8 {
+		width: 8px;
+	}
+</style>

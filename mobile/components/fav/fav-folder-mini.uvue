@@ -1,0 +1,67 @@
+<template>
+	<view class="ffm" :style="cardStyle" @click="onTap">
+		<view class="ffm-cover" :style="coverStyle">
+			<network-img :src="cover" :width="coverWidth.toString() + 'px'" :height="coverHeight.toString() + 'px'" :radius="radiusPx"></network-img>
+		</view>
+		<text class="ffm-title" :style="titleStyle" :max-lines="1">{{ title }}</text>
+		<text class="ffm-count" :style="secondaryStyle">{{ countText }}</text>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { computed } from 'vue'
+import NetworkImg from '../network-img/network-img.uvue'
+import { textPrimary, textSecondary } from '../../utils/theme.uts'
+
+/**
+ * 收藏夹横滑小卡（源头：`lib/pages/media/view.dart` 收藏夹预览行）。
+ * 规格（设计 §九 关键取值）：封面 180×110、圆角 12、标题单行、「共 N 条视频」次要色。
+ * 消费方：pages/media/media.uvue（簇C 集成阶段挂载）；本组件由簇B 先行落地。
+ * 封面尺寸/圆角开放为 props（默认 180×110/12 保持 media 预览行原样）——mine 页为半宽
+ * 纵向卡形态（基线 P5_mine 实测：封面约 44% 屏宽、比例≈1.7、小圆角）。
+ */
+const props = defineProps({
+	cover: { type: String, default: '' },
+	title: { type: String, default: '' },
+	mediaCount: { type: Number, default: 0 },
+	coverWidth: { type: Number, default: 180 },
+	coverHeight: { type: Number, default: 110 },
+	radius: { type: Number, default: 12 }
+})
+
+const emit = defineEmits(['tap'])
+
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+
+const countText = computed((): string => '共' + props.mediaCount.toString() + '条视频')
+
+const cardStyle = computed((): string => 'width:' + props.coverWidth.toString() + 'px;')
+
+const coverStyle = computed((): string => 'border-radius:' + props.radius.toString() + 'px;')
+
+const radiusPx = computed((): string => props.radius.toString() + 'px')
+
+function onTap() {
+	emit('tap')
+}
+</script>
+
+<style>
+	.ffm {
+		display: flex;
+		flex-direction: column;
+	}
+	.ffm-cover {
+		overflow: hidden;
+	}
+	.ffm-title {
+		font-size: 13px;
+		line-height: 18px;
+		margin-top: 6px;
+	}
+	.ffm-count {
+		font-size: 11px;
+		margin-top: 2px;
+	}
+</style>

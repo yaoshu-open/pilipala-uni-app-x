@@ -1,0 +1,958 @@
+<template>
+	<view class="mbr" :style="pageStyle">
+		<!--
+			自绘导航栏（基线_P5_member：无标题、左返回、右搜索+更多；
+			滚动 > 100 时标题区淡入头像+昵称，源 AnimatedOpacity 的直切等价——动画过渡集成阶段实测后补）。
+		-->
+		<view class="mbr-nav" :style="navStyle">
+			<view class="mbr-nav-lead" @click="onBack">
+				<p-icon name="arrow-back" :size="24" :color="iconColor"></p-icon>
+			</view>
+			<view class="mbr-nav-title" :style="navTitleStyle">
+				<view v-if="state == 'ready'" class="mbr-nav-avatar">
+					<network-img :src="face" width="35px" height="35px" radius="17.5px"></network-img>
+				</view>
+				<text v-if="state == 'ready'" class="mbr-nav-name" :style="primaryTextStyle" :max-lines="1">{{ name }}</text>
+			</view>
+			<view class="mbr-nav-actions">
+				<view class="mbr-nav-btn" @click="onSearch">
+					<p-icon name="search-outlined" :size="24" :color="iconColor"></p-icon>
+				</view>
+				<view class="mbr-nav-btn" @click="onMore">
+					<p-icon name="more-vert" :size="24" :color="iconColor"></p-icon>
+				</view>
+			</view>
+		</view>
+
+		<view v-if="state == 'loading'" class="mbr-body" :style="bodyStyle">
+			<view class="mbr-profile">
+				<member-header :loading="true"></member-header>
+				<view class="mbr-sk-lines">
+					<skeleton-block width="55%" height="16px" radius="4px"></skeleton-block>
+					<view class="mbr-sk-gap"></view>
+					<skeleton-block width="80%" height="13px" radius="4px"></skeleton-block>
+				</view>
+			</view>
+		</view>
+
+		<view v-else-if="state == 'error'" class="mbr-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+
+		<scroll-view v-else class="mbr-scroll" @scroll="onNavScroll">
+			<view class="mbr-body" :style="bodyStyle">
+				<!-- 资料区（头像+三列统计+按钮） -->
+				<view class="mbr-profile">
+					<member-header
+						:face="face"
+						:live-status="liveStatus"
+						:following="following"
+						:follower="follower"
+						:likes="likes"
+						:attribute="attribute"
+						:special="special"
+						:is-owner="isOwner"
+						:is-login="isLogin"
+						:loading="false"
+						@openFollow="onOpenFollow"
+						@openFans="onOpenFans"
+						@follow="onFollowTap"
+						@whisper="onWhisper"
+						@editProfile="onEditProfile"
+						@needLogin="showLoginGuide"
+						@openLive="onLiveBadge"
+					></member-header>
+					<view class="mbr-name-row">
+						<text class="mbr-name" :style="nameStyle" :max-lines="1">{{ name }}</text>
+						<text v-if="sex == '女'" class="mbr-sex mbr-sex-female">♀</text>
+						<text v-else-if="sex == '男'" class="mbr-sex mbr-sex-male">♂</text>
+						<view class="mbr-level">
+							<text class="mbr-level-text">LV{{ levelText }}</text>
+						</view>
+						<image
+							v-if="vipStatus == 1 && vipLabel.length > 0"
+							class="mbr-vip-label"
+							:src="vipLabel"
+							mode="aspectFit"
+						></image>
+					</view>
+					<view v-if="officialTitle.length > 0" class="mbr-official">
+						<text class="mbr-official-prefix" :style="primaryTextStyle">{{ officialRole == 1 ? '个人认证：' : '企业认证：' }}</text>
+						<text class="mbr-official-title" :style="primaryTextStyle">{{ officialTitle }}</text>
+					</view>
+					<view class="mbr-sign" @longpress="onCopySign">
+						<text class="mbr-sign-text" :style="secondaryTextStyle">{{ sign }}</text>
+					</view>
+				</view>
+
+				<!-- 四入口行（前缀随 isOwner） -->
+				<member-panel-row :title="prefix + '的动态'" @tap="onOpenDynamics"></member-panel-row>
+				<member-panel-row :title="prefix + '的投稿'" @tap="onOpenArchives"></member-panel-row>
+				<member-panel-row :title="prefix + '的收藏'" @tap="onOpenFav"></member-panel-row>
+				<member-panel-row :title="prefix + '的专栏'" @tap="onOpenArticle"></member-panel-row>
+
+			<!-- 合集面板：标题行（无箭头）+ 每合集「数量标+名称+箭头」行 + 前 4 条视频网格 -->
+			<member-panel-row :title="prefix + '的合集'" :show-arrow="false"></member-panel-row>
+			<view v-if="seasons.length == 0" class="mbr-panel-empty">
+				<text class="mbr-panel-empty-text" :style="secondaryTextStyle">用户没有设置合集</text>
+			</view>
+			<view v-for="season in seasons" :key="'season-' + season.meta.seasonId.toString()" class="mbr-season">
+				<view class="mbr-season-head" @click="onOpenSeason(season)">
+					<p-badge :text="season.meta.total.toString()" type="primary" size="small" :font-size="11"></p-badge>
+					<text class="mbr-season-name" :style="primaryTextStyle" :max-lines="1">{{ season.meta.name }}</text>
+					<text class="mbr-season-arrow" :style="secondaryTextStyle">→</text>
+				</view>
+				<view class="mbr-grid">
+					<view v-for="row in panelRows(seasonCards(season))" :key="'sa-' + season.meta.seasonId.toString() + '-' + row.key" class="mbr-row">
+						<view class="mbr-cell" :style="cellStyle" @click="onOpenVideo(row.left)">
+							<view class="mbr-cell-cover" :style="coverSizeStyle">
+								<network-img :src="row.left.pic" width="100%" height="100%" radius="10px"></network-img>
+								<view v-if="row.left.duration > 0" class="mbr-cell-dur">
+									<p-badge :text="durationText(row.left.duration)" type="gray" size="small" :font-size="9"></p-badge>
+								</view>
+							</view>
+							<text class="mbr-cell-title" :style="primaryTextStyle" :max-lines="2">{{ row.left.title }}</text>
+							<view class="mbr-cell-meta">
+								<p-stat icon="play-circle-outlined" :text="playText(row.left.view)" :icon-size="13"></p-stat>
+								<view class="mbr-cell-meta-spacer"></view>
+								<text class="mbr-cell-date" :style="secondaryTextStyle">{{ row.left.date }}</text>
+							</view>
+						</view>
+						<view class="mbr-gap"></view>
+						<view v-if="row.hasRight" class="mbr-cell" :style="cellStyle" @click="onOpenVideo(row.right)">
+							<view class="mbr-cell-cover" :style="coverSizeStyle">
+								<network-img :src="row.right.pic" width="100%" height="100%" radius="10px"></network-img>
+								<view v-if="row.right.duration > 0" class="mbr-cell-dur">
+									<p-badge :text="durationText(row.right.duration)" type="gray" size="small" :font-size="9"></p-badge>
+								</view>
+							</view>
+							<text class="mbr-cell-title" :style="primaryTextStyle" :max-lines="2">{{ row.right.title }}</text>
+							<view class="mbr-cell-meta">
+								<p-stat icon="play-circle-outlined" :text="playText(row.right.view)" :icon-size="13"></p-stat>
+								<view class="mbr-cell-meta-spacer"></view>
+								<text class="mbr-cell-date" :style="secondaryTextStyle">{{ row.right.date }}</text>
+							</view>
+						</view>
+					</view>
+				</view>
+			</view>
+
+			<!-- 最近投币面板（仅登录且有数据） -->
+			<block v-if="coins.length > 0">
+				<member-panel-row title="最近投币的视频" :show-arrow="false"></member-panel-row>
+				<view class="mbr-grid">
+					<view v-for="row in panelRows(coinCards)" :key="'coin-' + row.key" class="mbr-row">
+						<view class="mbr-cell" :style="cellStyle" @click="onOpenVideo(row.left)">
+							<view class="mbr-cell-cover" :style="coverSizeStyle">
+								<network-img :src="row.left.pic" width="100%" height="100%" radius="10px"></network-img>
+								<view v-if="row.left.duration > 0" class="mbr-cell-dur">
+									<p-badge :text="durationText(row.left.duration)" type="gray" size="small" :font-size="9"></p-badge>
+								</view>
+							</view>
+							<text class="mbr-cell-title" :style="primaryTextStyle" :max-lines="2">{{ row.left.title }}</text>
+							<view class="mbr-cell-meta">
+								<p-stat icon="play-circle-outlined" :text="playText(row.left.view)" :icon-size="13"></p-stat>
+								<view class="mbr-cell-meta-spacer"></view>
+								<text class="mbr-cell-date" :style="secondaryTextStyle">{{ row.left.date }}</text>
+							</view>
+						</view>
+						<view class="mbr-gap"></view>
+						<view v-if="row.hasRight" class="mbr-cell" :style="cellStyle" @click="onOpenVideo(row.right)">
+							<view class="mbr-cell-cover" :style="coverSizeStyle">
+								<network-img :src="row.right.pic" width="100%" height="100%" radius="10px"></network-img>
+								<view v-if="row.right.duration > 0" class="mbr-cell-dur">
+									<p-badge :text="durationText(row.right.duration)" type="gray" size="small" :font-size="9"></p-badge>
+								</view>
+							</view>
+							<text class="mbr-cell-title" :style="primaryTextStyle" :max-lines="2">{{ row.right.title }}</text>
+							<view class="mbr-cell-meta">
+								<p-stat icon="play-circle-outlined" :text="playText(row.right.view)" :icon-size="13"></p-stat>
+								<view class="mbr-cell-meta-spacer"></view>
+								<text class="mbr-cell-date" :style="secondaryTextStyle">{{ row.right.date }}</text>
+							</view>
+						</view>
+					</view>
+				</view>
+			</block>
+
+			<!-- 最近点赞面板（仅登录且有数据） -->
+			<block v-if="likesList.length > 0">
+				<member-panel-row title="最近点赞的视频" :show-arrow="false"></member-panel-row>
+				<view class="mbr-grid">
+					<view v-for="row in panelRows(likeCards)" :key="'like-' + row.key" class="mbr-row">
+						<view class="mbr-cell" :style="cellStyle" @click="onOpenVideo(row.left)">
+							<view class="mbr-cell-cover" :style="coverSizeStyle">
+								<network-img :src="row.left.pic" width="100%" height="100%" radius="10px"></network-img>
+								<view v-if="row.left.duration > 0" class="mbr-cell-dur">
+									<p-badge :text="durationText(row.left.duration)" type="gray" size="small" :font-size="9"></p-badge>
+								</view>
+							</view>
+							<text class="mbr-cell-title" :style="primaryTextStyle" :max-lines="2">{{ row.left.title }}</text>
+							<view class="mbr-cell-meta">
+								<p-stat icon="play-circle-outlined" :text="playText(row.left.view)" :icon-size="13"></p-stat>
+								<view class="mbr-cell-meta-spacer"></view>
+								<text class="mbr-cell-date" :style="secondaryTextStyle">{{ row.left.date }}</text>
+							</view>
+						</view>
+						<view class="mbr-gap"></view>
+						<view v-if="row.hasRight" class="mbr-cell" :style="cellStyle" @click="onOpenVideo(row.right)">
+							<view class="mbr-cell-cover" :style="coverSizeStyle">
+								<network-img :src="row.right.pic" width="100%" height="100%" radius="10px"></network-img>
+								<view v-if="row.right.duration > 0" class="mbr-cell-dur">
+									<p-badge :text="durationText(row.right.duration)" type="gray" size="small" :font-size="9"></p-badge>
+								</view>
+							</view>
+							<text class="mbr-cell-title" :style="primaryTextStyle" :max-lines="2">{{ row.right.title }}</text>
+							<view class="mbr-cell-meta">
+								<p-stat icon="play-circle-outlined" :text="playText(row.right.view)" :icon-size="13"></p-stat>
+								<view class="mbr-cell-meta-spacer"></view>
+								<text class="mbr-cell-date" :style="secondaryTextStyle">{{ row.right.date }}</text>
+							</view>
+						</view>
+					</view>
+				</view>
+			</block>
+		</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import MemberHeader from '../../components/member/member-header.uvue'
+import MemberPanelRow from '../../components/member/member-panel-row.uvue'
+import PIcon from '../../components/p-icon/p-icon.uvue'
+import PBadge from '../../components/p-badge/p-badge.uvue'
+import PStat from '../../components/p-stat/p-stat.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import SkeletonBlock from '../../components/skeleton/skeleton-block.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import {
+	fetchMemberInfo, fetchRelationStat, fetchMemberUpstat, fetchRelation,
+	fetchMemberSeasons, fetchRecentCoinVideo, fetchRecentLikeVideo
+} from '../../api/member.uts'
+import { followMod } from '../../api/play.uts'
+import { MemberInfo, MemberSeasonsItem, MemberCoinsItem, MemberLikeItem } from '../../models/member.uts'
+import { userState } from '../../stores/user.uts'
+import { RT, navigateTo } from '../../utils/routes.uts'
+import { textPrimary, textSecondary, cardBackground, pageBackground, themeColor, currentThemeIndex } from '../../utils/theme.uts'
+import { statusBarPaddingTop, safeAreaBottom } from '../../utils/safeArea.uts'
+import { numFormat, timeFormat } from '../../utils/format.uts'
+
+/**
+ * 用户主页（源头：`lib/pages/member/view.dart` + `controller.dart`）。
+ *
+ * 结构：自绘导航栏（滚动 > 100 淡入头像+昵称；搜索/更多）→ 资料区（member-header：头像 90 +
+ * 直播角标 + 关注/粉丝/获赞 + 按钮三态）→ 昵称行（vip 色/性别/等级/大会员标）→ 认证行 → 签名
+ * （长按复制）→ 动态/投稿/收藏/专栏四入口 → 合集面板（无合集时空态文案）→ 最近投币/点赞面板
+ * （仅登录且有数据时渲染）。
+ *
+ * 数据装配照源 controller.getInfo：stat → upstat → acc/info（资料失败整页错误态，
+ * 统计失败列显示 '-' 不阻塞）；关系查询仅「已登录且他人」时发起。
+ * 关注/拉黑走 api/play.uts#followMod（/x/relation/modify，csrf 前置校验在彼处），
+ * 凭据缺失时接口层直接失败并 toast，UI 状态不假变。
+ */
+const mid = ref<number>(0)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const info = ref<MemberInfo | null>(null)
+const following = ref<number>(-1)
+const follower = ref<number>(-1)
+const likes = ref<number>(-1)
+const attribute = ref<number>(-1)
+const special = ref<number>(0)
+const seasons = ref<Array<MemberSeasonsItem>>([])
+const coins = ref<Array<MemberCoinsItem>>([])
+const likesList = ref<Array<MemberLikeItem>>([])
+/** 导航栏标题淡入：滚动 > 100 置 1（源 appbarStream 同款阈值） */
+const navTitleOpacity = ref<number>(0)
+/** 关注操作进行中（防连点） */
+const followPending = ref<boolean>(false)
+
+const isLogin = userState.isLogin
+const ownerMid = isLogin ? userState.info.mid : -1
+const isOwner = computed((): boolean => mid.value == ownerMid && ownerMid != -1)
+const prefix = computed((): string => isOwner.value ? '我' : 'Ta')
+
+const name = computed((): string => info.value == null ? '' : info.value.name)
+const face = computed((): string => info.value == null ? '' : info.value.face)
+const sex = computed((): string => info.value == null ? '' : info.value.sex)
+const sign = computed((): string => info.value == null ? '' : info.value.sign)
+const levelText = computed((): string => info.value == null ? '0' : info.value.level.toString())
+const liveStatus = computed((): number => {
+	const item = info.value
+	if (item == null) {
+		return 0
+	}
+	const room = item.liveRoom
+	return room == null ? 0 : room.liveStatus
+})
+const vipStatus = computed((): number => info.value == null ? 0 : info.value.vip.status)
+const vipLabel = computed((): string => {
+	const item = info.value
+	if (item == null) {
+		return ''
+	}
+	return item.vip.label.length > 0 ? item.vip.label : item.vip.labelStatic
+})
+const officialTitle = computed((): string => info.value == null ? '' : info.value.officialTitle)
+const officialRole = computed((): number => info.value == null ? -1 : info.value.officialRole)
+
+const primary = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const navStyle = computed((): string => 'background-color:' + cardBackground() + ';' + statusBarPaddingTop(0))
+const iconColor = textPrimary()
+const navTitleStyle = computed((): string => 'opacity:' + navTitleOpacity.value.toString() + ';')
+const primaryTextStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryTextStyle = computed((): string => 'color:' + textSecondary() + ';')
+/** 昵称色：大会员昵称色优先（源 vip.nickname_color），否则主文字色 */
+const nameStyle = computed((): string => {
+	const item = info.value
+	const vipColor = item == null ? '' : item.vip.nicknameColor
+	const color = vipColor.length > 0 ? vipColor : textPrimary()
+	return 'color:' + color + ';font-weight:700;'
+})
+/** 滚动内容底部留白：安全区 + 20（源 Padding(bottom: safeArea + 20)） */
+const bodyStyle = computed((): string => 'padding-bottom:' + (safeAreaBottom() + 20).toString() + 'px;')
+
+/** 网格单元宽：视口 − 面板左右 12×2 − 列间距 12，再对半 */
+const cellWidth = ((): number => {
+	try {
+		const win = uni.getWindowInfo()
+		return Math.floor((win.windowWidth - 24 - 12) / 2)
+	} catch (e) {
+		return 165
+	}
+})()
+const coverSizeStyle = 'height:' + Math.round(cellWidth / 1.6).toString() + 'px;'
+const cellStyle = 'width:' + cellWidth.toString() + 'px;'
+
+/** 面板网格双列行分组（App 蒸汽端 flex-wrap 不生效，按 rcmd 已验证模式：行内左 cell + gap + 右 cell） */
+class PanelRow {
+	left: PanelCard = new PanelCard()
+	right: PanelCard = new PanelCard()
+	hasRight: boolean = false
+	key: string = ''
+}
+
+function panelRows(cards: Array<PanelCard>): Array<PanelRow> {
+	const list: Array<PanelRow> = []
+	let index = 0
+	while (index < cards.length) {
+		const row = new PanelRow()
+		row.left = cards[index]
+		row.key = cards[index].aid.toString()
+		if (index + 1 < cards.length) {
+			row.right = cards[index + 1]
+			row.hasRight = true
+		}
+		list.push(row)
+		index = index + 2
+	}
+	return list
+}
+
+/** 面板网格统一卡（合集前 4 条 / 投币 / 点赞共用形态：16:10 封面 + 时长 + 标题 + 播放/日期） */
+class PanelCard {
+	aid: number = 0
+	bvid: string = ''
+	pic: string = ''
+	title: string = ''
+	duration: number = 0
+	view: number = 0
+	date: string = ''
+}
+
+function playText(value: number): string {
+	return numFormat(value)
+}
+
+function durationText(seconds: number): string {
+	return timeFormat(seconds)
+}
+
+/** M-D（源 coin/like item 的时间格式；基线日期为不补零形态） */
+function monthDayText(ts: number): string {
+	if (ts <= 0) {
+		return ''
+	}
+	const date = new Date(ts * 1000)
+	const month = date.getMonth() + 1
+	const day = date.getDate()
+	return month.toString() + '-' + day.toString()
+}
+
+/** 合集面板每条目只取前 4 条（源 sublist(0, 4)） */
+function seasonCards(season: MemberSeasonsItem): Array<PanelCard> {
+	const cards: Array<PanelCard> = []
+	for (let i = 0; i < season.archives.length && i < 4; i++) {
+		const arc = season.archives[i]
+		const card = new PanelCard()
+		card.aid = arc.aid
+		card.bvid = arc.bvid
+		card.pic = arc.cover
+		card.title = arc.title
+		card.duration = arc.duration
+		card.view = arc.view
+		card.date = monthDayText(arc.ctime > 0 ? arc.ctime : arc.pubdate)
+		cards.push(card)
+	}
+	return cards
+}
+
+const coinCards = computed((): Array<PanelCard> => {
+	const cards: Array<PanelCard> = []
+	for (let i = 0; i < coins.value.length; i++) {
+		const src = coins.value[i]
+		const card = new PanelCard()
+		card.aid = src.aid
+		card.bvid = src.bvid
+		card.pic = src.pic
+		card.title = src.title
+		card.duration = src.duration
+		card.view = src.view
+		card.date = monthDayText(src.ctime)
+		cards.push(card)
+	}
+	return cards
+})
+
+const likeCards = computed((): Array<PanelCard> => {
+	const cards: Array<PanelCard> = []
+	for (let i = 0; i < likesList.value.length; i++) {
+		const src = likesList.value[i]
+		const card = new PanelCard()
+		card.aid = src.aid
+		card.bvid = src.bvid
+		card.pic = src.pic
+		card.title = src.title
+		card.duration = src.duration
+		card.view = src.view
+		card.date = monthDayText(src.pubdate)
+		cards.push(card)
+	}
+	return cards
+})
+
+// ---------------------------------------------------------------- 数据装配
+
+async function loadProfile() {
+	state.value = 'loading'
+	errorText.value = ''
+	info.value = null
+	seasons.value = []
+	coins.value = []
+	likesList.value = []
+	// 源 getInfo：stat → upstat 顺序取，资料接口最后（这里并行发起资料与统计，缩短首屏）
+	const infoRes = fetchMemberInfo(mid.value)
+	const statRes = await fetchRelationStat(mid.value)
+	if (statRes.status) {
+		following.value = statRes.following
+		follower.value = statRes.follower
+	}
+	const upstatRes = await fetchMemberUpstat(mid.value)
+	if (upstatRes.status) {
+		likes.value = upstatRes.likes
+	}
+	const res = await infoRes
+	if (!res.status || res.info == null) {
+		state.value = 'error'
+		errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		return
+	}
+	info.value = res.info
+	state.value = 'ready'
+}
+
+/** 合集/投币/点赞三个登录态面板（源：userInfo == null 时直接 return） */
+async function loadPanels() {
+	if (!isLogin) {
+		return
+	}
+	const seasonsRes = await fetchMemberSeasons(mid.value)
+	if (seasonsRes.status) {
+		seasons.value = seasonsRes.items
+	} else if (seasonsRes.message.length > 0) {
+		uni.showToast({ title: '用户合集请求异常：' + seasonsRes.message, icon: 'none' })
+	}
+	const coinRes = await fetchRecentCoinVideo(mid.value)
+	if (coinRes.status) {
+		coins.value = coinRes.items
+	}
+	const likeRes = await fetchRecentLikeVideo(mid.value)
+	if (likeRes.status) {
+		likesList.value = likeRes.items
+	}
+}
+
+/** 关系查询（仅已登录且他人页；attribute 驱动关注按钮文案） */
+async function relationSearch() {
+	if (!isLogin || mid.value == ownerMid) {
+		return
+	}
+	const res = await fetchRelation(mid.value)
+	if (res.status) {
+		attribute.value = res.attribute
+		special.value = res.special
+	}
+}
+
+function reload() {
+	loadProfile()
+	relationSearch()
+	loadPanels()
+}
+
+// ---------------------------------------------------------------- 交互
+
+function onNavScroll(event: UniScrollViewEvent) {
+	const top = event.detail.scrollTop
+	navTitleOpacity.value = top > 100 ? 1 : 0
+}
+
+function onBack() {
+	const pages = getCurrentPages()
+	if (pages.length > 1) {
+		uni.navigateBack({ delta: 1 })
+	} else {
+		uni.reLaunch({ url: '/pages/main/main' })
+	}
+}
+
+function q(value: string): string {
+	return encodeURIComponent(value)
+}
+
+function onSearch() {
+	uni.navigateTo({ url: '/pages/member-search/member-search?mid=' + mid.value.toString() + '&uname=' + q(name.value) })
+}
+
+/** 更多菜单：他人=黑名单+分享、本人=分享（源 PopupMenuButton 项集） */
+function onMore() {
+	const items: Array<string> = []
+	if (!isOwner.value) {
+		items.push(attribute.value == 128 ? '移除黑名单' : '加入黑名单')
+	}
+	items.push(isOwner.value ? '分享我的主页' : '分享UP主')
+	uni.showActionSheet({
+		itemList: items,
+		success: (res) => {
+			const label = items[res.tapIndex]
+			if (label == '加入黑名单' || label == '移除黑名单') {
+				blockUser()
+			} else {
+				shareUser()
+			}
+		}
+	})
+}
+
+/** 分享：源 Share.share 文本；目标端以剪贴板等价（系统分享面板归后续） */
+function shareUser() {
+	const text = name.value + ' - https://space.bilibili.com/' + mid.value.toString()
+	uni.setClipboardData({
+		data: text,
+		success: () => {
+			uni.showToast({ title: '已复制主页链接', icon: 'none' })
+		}
+	})
+}
+
+/** 拉黑/解除拉黑（act 5/6；写接口 csrf 前置在 followMod 内，凭据缺失直接失败 toast） */
+function blockUser() {
+	const blocking = attribute.value != 128
+	uni.showModal({
+		title: '提示',
+		content: blocking ? '确定拉黑UP主?' : '从黑名单移除UP主',
+		cancelText: '点错了',
+		confirmText: '确认',
+		success: (res) => {
+			if (res.confirm == true) {
+				doBlockUser(blocking)
+			}
+		}
+	})
+}
+
+/** 拉黑/移除黑名单执行体（csrf 前置在 followMod 内；失败只 toast，状态不假变） */
+async function doBlockUser(blocking: boolean) {
+	if (followPending.value) {
+		return
+	}
+	followPending.value = true
+	const result = await followMod(mid.value, blocking ? 5 : 6)
+	followPending.value = false
+	if (!result.status) {
+		uni.showToast({ title: result.message, icon: 'none' })
+		return
+	}
+	attribute.value = blocking ? 128 : 0
+	uni.showToast({ title: blocking ? '已拉黑' : '已移除黑名单', icon: 'none' })
+	relationSearch()
+}
+
+/** 关注/取关：attribute==128 时转拉黑流程（源 actionRelationMod 同款分支） */
+function onFollowTap() {
+	if (attribute.value == 128) {
+		blockUser()
+		return
+	}
+	const followed = info.value == null ? false : info.value.isFollowed
+	uni.showModal({
+		title: '提示',
+		content: followed ? '取消关注UP主?' : '关注UP主?',
+		cancelText: '点错了',
+		confirmText: '确认',
+		success: (res) => {
+			if (res.confirm == true) {
+				doFollow(followed)
+			}
+		}
+	})
+}
+
+/** 关注/取关执行体（成功后 isFollowed 取反 + 关系重查驱动按钮文案） */
+async function doFollow(followed: boolean) {
+	if (followPending.value) {
+		return
+	}
+	followPending.value = true
+	const result = await followMod(mid.value, followed ? 2 : 1)
+	followPending.value = false
+	if (!result.status) {
+		uni.showToast({ title: result.message, icon: 'none' })
+		return
+	}
+	if (info.value != null) {
+		info.value.isFollowed = !followed
+	}
+	uni.showToast({ title: followed ? '已取消关注' : '关注成功', icon: 'none' })
+	relationSearch()
+}
+
+function onWhisper() {
+	// 发消息 → 私信详情（源 profile.dart 同口径：name/face/mid，talkerId 由 mid 兜底）
+	let url = '/pages/whisper-detail/whisper-detail?mid=' + mid.value.toString()
+	url = url + '&name=' + q(name.value) + '&face=' + q(face.value)
+	uni.navigateTo({ url: url })
+}
+
+function onEditProfile() {
+	uni.showToast({ title: '功能开发中', icon: 'none' })
+}
+
+function onLiveBadge() {
+	uni.showToast({ title: '直播域接入后开放', icon: 'none' })
+}
+
+function showLoginGuide() {
+	uni.showModal({
+		title: '未登录',
+		content: '登录后可查看他人主页的关注关系，是否前往登录？',
+		confirmText: '去登录',
+		cancelText: '取消',
+		success: (res) => {
+			if (res.confirm == true) {
+				navigateTo(RT.login)
+			}
+		}
+	})
+}
+
+function onCopySign() {
+	if (sign.value.length == 0) {
+		return
+	}
+	uni.setClipboardData({
+		data: sign.value,
+		success: () => {
+			uni.showToast({ title: '已复制签名', icon: 'none' })
+		}
+	})
+}
+
+function onOpenFollow() {
+	uni.navigateTo({ url: '/pages/follow/follow?mid=' + mid.value.toString() + '&name=' + q(name.value) })
+}
+
+function onOpenFans() {
+	uni.navigateTo({ url: '/pages/fan/fan?mid=' + mid.value.toString() + '&name=' + q(name.value) })
+}
+
+function onOpenDynamics() {
+	uni.navigateTo({ url: '/pages/member-dynamics/member-dynamics?mid=' + mid.value.toString() })
+}
+
+function onOpenArchives() {
+	uni.navigateTo({ url: '/pages/member-archive/member-archive?mid=' + mid.value.toString() })
+}
+
+function onOpenFav() {
+	uni.navigateTo({ url: '/pages/fav/fav?mid=' + mid.value.toString() })
+}
+
+function onOpenArticle() {
+	uni.navigateTo({ url: '/pages/member-article/member-article?mid=' + mid.value.toString() })
+}
+
+/** 合集/系列分流（源 seasons.dart 面板：category 0=合集、1/2=系列） */
+function onOpenSeason(season: MemberSeasonsItem) {
+	let url = ''
+	if (season.meta.category == 0) {
+		url = '/pages/member-seasons/member-seasons?category=0&mid=' + season.meta.mid.toString() +
+			'&seasonId=' + season.meta.seasonId.toString() + '&seasonName=' + q(season.meta.name)
+	} else {
+		url = '/pages/member-seasons/member-seasons?category=1&mid=' + season.meta.mid.toString() +
+			'&seriesId=' + season.meta.seriesId.toString() + '&seasonName=' + q(season.meta.name)
+	}
+	uni.navigateTo({ url: url })
+}
+
+function onOpenVideo(card: PanelCard) {
+	if (card.bvid.length == 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + card.bvid })
+}
+
+onLoad((options) => {
+	const rawMid = options != null ? options['mid'] : null
+	if (rawMid == null || (rawMid as string).length == 0) {
+		state.value = 'error'
+		errorText.value = '缺少用户参数（mid），请从列表页进入'
+		return
+	}
+	const parsed = parseInt(rawMid as string)
+	mid.value = isNaN(parsed) ? 0 : parsed
+	if (mid.value <= 0) {
+		state.value = 'error'
+		errorText.value = '用户参数不合法，请从列表页进入'
+		return
+	}
+	loadProfile()
+	relationSearch()
+	loadPanels()
+})
+</script>
+
+<style>
+	.mbr {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* 自绘导航栏：状态栏避让走 safeArea（navStyle），栏体 56 高（源 AppBar 默认） */
+	.mbr-nav {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		height: 56px;
+	}
+	.mbr-nav-lead {
+		width: 56px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mbr-nav-title {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 2px;
+	}
+	.mbr-nav-avatar {
+		width: 35px;
+		height: 35px;
+	}
+	.mbr-nav-name {
+		flex: 1;
+		font-size: 14px;
+		margin-left: 10px;
+		margin-right: 8px;
+	}
+	.mbr-nav-actions {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+	.mbr-nav-btn {
+		width: 44px;
+		height: 56px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.mbr-body {
+		display: flex;
+		flex-direction: column;
+	}
+	.mbr-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.mbr-scroll {
+		flex: 1;
+	}
+	.mbr-profile {
+		display: flex;
+		flex-direction: column;
+		padding-left: 18px;
+		padding-right: 18px;
+		padding-bottom: 20px;
+	}
+	.mbr-sk-lines {
+		display: flex;
+		flex-direction: column;
+		margin-top: 16px;
+	}
+	.mbr-sk-gap {
+		height: 10px;
+	}
+	/* 昵称行：vip 昵称色 + 性别符 + LV 徽章 + 大会员标（源 titleMedium bold 16） */
+	.mbr-name-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 20px;
+	}
+	.mbr-name {
+		font-size: 16px;
+		line-height: 24px;
+	}
+	.mbr-sex {
+		font-size: 14px;
+		margin-left: 6px;
+	}
+	.mbr-sex-female {
+		color: #FF6699;
+	}
+	.mbr-sex-male {
+		color: #2196F3;
+	}
+	.mbr-level {
+		margin-left: 6px;
+		padding-left: 5px;
+		padding-right: 5px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+		border-radius: 3px;
+		background-color: #F08A3C;
+	}
+	.mbr-level-text {
+		font-size: 10px;
+		color: #FFFFFF;
+	}
+	.mbr-vip-label {
+		width: 58px;
+		height: 20px;
+		margin-left: 6px;
+	}
+	.mbr-official {
+		display: flex;
+		flex-direction: row;
+		margin-top: 6px;
+	}
+	.mbr-official-prefix {
+		font-size: 13px;
+	}
+	.mbr-official-title {
+		flex: 1;
+		font-size: 13px;
+		line-height: 19px;
+	}
+	.mbr-sign {
+		margin-top: 6px;
+	}
+	.mbr-sign-text {
+		font-size: 13px;
+		line-height: 19px;
+	}
+	.mbr-panel-empty {
+		display: flex;
+		flex-direction: row;
+		justify-content: center;
+		padding-top: 20px;
+		padding-bottom: 30px;
+	}
+	.mbr-panel-empty-text {
+		font-size: 13px;
+	}
+	/* 合集面板条目：数量角标 + 名称 + 箭头（源 ListTile dense） */
+	.mbr-season {
+		display: flex;
+		flex-direction: column;
+		margin-bottom: 12px;
+	}
+	.mbr-season-head {
+		height: 44px;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		padding-left: 16px;
+		padding-right: 14px;
+	}
+	.mbr-season-name {
+		flex: 1;
+		font-size: 14px;
+		font-weight: 500;
+		margin-left: 10px;
+		margin-right: 8px;
+	}
+	.mbr-season-arrow {
+		font-size: 16px;
+	}
+	/* 双列网格：行分组模式（源 GridView crossAxisSpacing 12；蒸汽端 wrap 不生效） */
+	.mbr-grid {
+		display: flex;
+		flex-direction: column;
+		padding-left: 12px;
+		padding-right: 12px;
+	}
+	.mbr-row {
+		display: flex;
+		flex-direction: row;
+	}
+	.mbr-gap {
+		width: 12px;
+	}
+	.mbr-cell {
+		display: flex;
+		flex-direction: column;
+		padding-bottom: 12px;
+	}
+	.mbr-cell-cover {
+		position: relative;
+		width: 100%;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.mbr-cell-dur {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+	}
+	.mbr-cell-title {
+		font-size: 13px;
+		line-height: 19px;
+		margin-top: 6px;
+	}
+	.mbr-cell-meta {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 4px;
+		padding-right: 6px;
+	}
+	.mbr-cell-meta-spacer {
+		flex: 1;
+	}
+	.mbr-cell-date {
+		font-size: 11px;
+	}
+</style>

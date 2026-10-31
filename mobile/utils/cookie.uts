@@ -1,0 +1,265 @@
+/**
+ * Cookie 解析与镜像存储。
+ *
+ * 实测（Android 真机，uni-app x 5.26，httpbin 验证）：
+ *  1. `uni.request` 由**平台自管 cookie**：自动保存响应 Set-Cookie，并在后续同域请求自动携带；
+ *  2. force-stop 杀进程后重新启动，平台 jar 内的 cookie 仍在（存在系统 CookieManager，可持久登录态）；
+ *  3. 调用方显式传 `Cookie` 头时，平台**不再追加**自己的 cookie（实测 /headers 只回显显式值）。
+ *
+ * 结论：**平台 jar 是唯一权威**，请求层不注入 Cookie 头（否则用不完整的本地镜像覆盖平台 jar 会丢登录态）。
+ * 本模块负责：解析 Set-Cookie、按域镜像持久化（写接口凭据取值与登录态排查）、从平台 jar 回读同步、清空。
+ * 域名键统一经 `normalizeDomain` 规范化（小写、去 scheme/path/端口、去前导点），
+ * 读取时按域后缀双向匹配，保证 `.bilibili.com` 与 `api.bilibili.com` 之间不会错配。
+ *
+ * 平台 jar 回读：`uni.request` 只回传响应里的 Set-Cookie，web-view 登录写入的平台 jar 不经过响应，
+ * 因此镜像必须由 `syncFromPlatform()` 主动从系统 CookieManager 拉取（pl-cookie 插件，App-Android）；
+ * web / 小程序端无该能力，恒为空串，写接口按凭据缺失明确失败。
+ */
+
+import { getCookie, clearAllCookies as clearPlatformJar } from '../uni_modules/pl-cookie'
+import { API_BASE } from './constants.uts'
+
+const DOMAIN_INDEX_KEY: string = 'cookie_domains'
+const DOMAIN_PREFIX: string = 'cookie::'
+
+const ATTR_NAMES: string[] = ['path', 'domain', 'expires', 'max-age', 'samesite', 'secure', 'httponly', 'priority', 'version']
+
+function isAttr(name: string): boolean {
+	const lower = name.toLowerCase()
+	for (let i = 0; i < ATTR_NAMES.length; i++) {
+		if (ATTR_NAMES[i] == lower) {
+			return true
+		}
+	}
+	return false
+}
+
+/**
+ * 域名规范化：去 scheme / path / 端口参数，转小写，去前导点。
+ * `https://API.Bilibili.com:443/x?y=1` → `api.bilibili.com`；`.bilibili.com` → `bilibili.com`
+ */
+export function normalizeDomain(raw: string): string {
+	let value = raw.trim().toLowerCase()
+	const scheme = value.indexOf('://')
+	if (scheme >= 0) {
+		value = value.substring(scheme + 3)
+	}
+	const slash = value.indexOf('/')
+	if (slash >= 0) {
+		value = value.substring(0, slash)
+	}
+	const colon = value.indexOf(':')
+	if (colon >= 0) {
+		value = value.substring(0, colon)
+	}
+	while (value.startsWith('.')) {
+		value = value.substring(1)
+	}
+	return value
+}
+
+/** host 是否落在 domain 域内（== 自身，或以 `.domain` 结尾） */
+function domainContains(host: string, domain: string): boolean {
+	if (host.length == 0 || domain.length == 0) {
+		return false
+	}
+	return host == domain || host.endsWith('.' + domain)
+}
+
+function readIndex(): string[] {
+	const raw = uni.getStorageSync(DOMAIN_INDEX_KEY) as string | null
+	if (raw == null || raw.length == 0) {
+		return []
+	}
+	return raw.split(',')
+}
+
+function writeIndex(domains: string[]) {
+	uni.setStorageSync(DOMAIN_INDEX_KEY, domains.join(','))
+}
+
+function readCookie(domain: string): string {
+	const raw = uni.getStorageSync(DOMAIN_PREFIX + domain) as string | null
+	if (raw == null) {
+		return ''
+	}
+	return raw
+}
+
+/** 把多个 Set-Cookie 的合并字符串拆成 name=value 列表 */
+function parsePairs(raw: string): string[] {
+	const cleaned = raw.replace('[', '').replace(']', '')
+	// 平台把多个 cookie 用 ", " 连接；仅当逗号后紧跟 name= 时视为新 cookie（避开 Expires 里的日期逗号）
+	const mergePattern = new RegExp(',\\s*(?=[A-Za-z0-9_\\-]+=)', 'g')
+	const normalized = cleaned.replace(mergePattern, ';')
+	const parts = normalized.split(';')
+	const pairs: string[] = []
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i].trim()
+		const eq = part.indexOf('=')
+		if (eq <= 0) {
+			continue
+		}
+		const name = part.substring(0, eq).trim()
+		const value = part.substring(eq + 1).trim()
+		if (name.length == 0 || isAttr(name)) {
+			continue
+		}
+		pairs.push(name + '=' + value)
+	}
+	return pairs
+}
+
+function readDomainOf(raw: string, fallbackHost: string): string {
+	const cleaned = raw.replace('[', '').replace(']', '')
+	const mergePattern = new RegExp(',\\s*(?=[A-Za-z0-9_\\-]+=)', 'g')
+	const normalized = cleaned.replace(mergePattern, ';')
+	const parts = normalized.split(';')
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i].trim()
+		if (part.toLowerCase().startsWith('domain=')) {
+			return part.substring(7).trim()
+		}
+	}
+	return fallbackHost
+}
+
+/** 合并并持久化响应里的 Set-Cookie（域名键经 normalizeDomain 规范化） */
+export function saveSetCookie(raw: string | null, host: string) {
+	if (raw == null || raw.length == 0) {
+		return
+	}
+	const pairs = parsePairs(raw)
+	if (pairs.length == 0) {
+		return
+	}
+	const domain = normalizeDomain(readDomainOf(raw, host))
+	if (domain.length == 0) {
+		return
+	}
+	const existing = readCookie(domain)
+	const kept: string[] = []
+	if (existing.length > 0) {
+		const oldParts = existing.split(';')
+		for (let i = 0; i < oldParts.length; i++) {
+			const oldPart = oldParts[i].trim()
+			if (oldPart.length == 0) {
+				continue
+			}
+			const eq = oldPart.indexOf('=')
+			if (eq <= 0) {
+				continue
+			}
+			const oldName = oldPart.substring(0, eq).trim()
+			let replaced = false
+			for (let j = 0; j < pairs.length; j++) {
+				if (pairs[j].startsWith(oldName + '=')) {
+					replaced = true
+					break
+				}
+			}
+			if (!replaced) {
+				kept.push(oldPart)
+			}
+		}
+	}
+	for (let j = 0; j < pairs.length; j++) {
+		kept.push(pairs[j])
+	}
+	uni.setStorageSync(DOMAIN_PREFIX + domain, kept.join('; '))
+	const index = readIndex()
+	let exists = false
+	for (let k = 0; k < index.length; k++) {
+		if (index[k] == domain) {
+			exists = true
+			break
+		}
+	}
+	if (!exists) {
+		index.push(domain)
+		writeIndex(index)
+	}
+}
+
+/**
+ * 按目标域拼装 Cookie 请求头。
+ * 当前请求层**不调用**（平台自管 cookie，显式头会覆盖平台 jar）；
+ * 保留给 P2 登录桥：若 WebView 登录态无法自动进入平台 jar，由 pl-cookie 回读后经此注入。
+ */
+export function cookieHeaderFor(host: string): string {
+	const target = normalizeDomain(host)
+	if (target.length == 0) {
+		return ''
+	}
+	const index = readIndex()
+	const chunks: string[] = []
+	for (let i = 0; i < index.length; i++) {
+		const domain = index[i]
+		if (domainContains(target, domain)) {
+			const value = readCookie(domain)
+			if (value.length > 0) {
+				chunks.push(value)
+			}
+		}
+	}
+	return chunks.join('; ')
+}
+
+/** 清空全部 cookie 镜像（退出登录 / 调试用） */
+export function clearCookies() {
+	const index = readIndex()
+	for (let i = 0; i < index.length; i++) {
+		uni.removeStorageSync(DOMAIN_PREFIX + index[i])
+	}
+	uni.removeStorageSync(DOMAIN_INDEX_KEY)
+}
+
+/**
+ * 从平台 jar 回读 cookie 并合并进镜像；返回是否读到内容。
+ *
+ * 用途：web-view 登录只写平台 jar、不经过 `uni.request` 响应，写接口所需的 `bili_jct`
+ * 只能由这里拉进镜像（App-Android 经 pl-cookie 读系统 CookieManager）。
+ * 固定从 `api.bilibili.com` 取、按根域 `bilibili.com` 存一条，避免多子域重复条目。
+ */
+export function syncFromPlatform(): boolean {
+	const jar = getCookie(API_BASE)
+	if (jar.length == 0) {
+		return false
+	}
+	saveSetCookie(jar, 'bilibili.com')
+	return true
+}
+
+/**
+ * 清空全部 cookie：镜像 + 平台 jar（退出登录）。
+ * 返回平台 jar 是否清空成功（web / 小程序端无该能力，返回 false）。
+ */
+export function clearAllCookies(): boolean {
+	clearCookies()
+	return clearPlatformJar()
+}
+
+/**
+ * 读取某个域名下的 cookie 名值（调试用）。
+ * 按域后缀**双向**匹配：查 `www.bilibili.com` 可读到 `.bilibili.com`；
+ * 查 `bilibili.com` 可读到 `api.bilibili.com` 等子域条目。
+ */
+export function cookieDebug(domain: string): string {
+	const target = normalizeDomain(domain)
+	if (target.length == 0) {
+		return ''
+	}
+	const index = readIndex()
+	const chunks: string[] = []
+	for (let i = 0; i < index.length; i++) {
+		const stored = index[i]
+		const matched = domainContains(target, stored) || domainContains(stored, target)
+		if (matched) {
+			const value = readCookie(stored)
+			if (value.length > 0) {
+				chunks.push(value)
+			}
+		}
+	}
+	return chunks.join('; ')
+}

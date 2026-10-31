@@ -1,0 +1,412 @@
+<template>
+	<view class="sd" :style="pageStyle">
+		<!-- 顶栏：← + 标题（滚动 >160px 后淡入，源 StreamBuilder+AnimatedOpacity 的硬切等价）；
+			 源本页无 ⋮ 与「播放全部」（fav-detail 才有）——按任务口径「源码有则做」，不添加 -->
+		<app-navbar :title="titleFadeIn ? headerTitle : ''"></app-navbar>
+
+		<!-- 头部块：封面 180×110 + 名称 + UP（可点进主页）+ 播放数（源 SliverAppBar 展开区内容） -->
+		<view class="sd-header" :style="headerStyle">
+			<view class="sd-cover">
+				<network-img :src="headerCover" width="180px" height="110px" radius="10px"></network-img>
+			</view>
+			<view class="sd-info">
+				<text class="sd-title" :style="titleStyle" :max-lines="2">{{ headerTitle }}</text>
+				<view class="sd-upper" @click="openUpper">
+					<text class="sd-upper-text" :style="primaryTextStyle" :max-lines="1">{{ headerUpperName }}</text>
+				</view>
+				<text v-if="playCountText.length > 0" class="sd-play" :style="secondaryStyle">{{ playCountText }}</text>
+			</view>
+		</view>
+		<view class="sd-header-line" :style="lineStyle"></view>
+
+		<!-- 「共N条视频」行（源 labelMedium + letterSpacing 1） -->
+		<view class="sd-count-row">
+			<text class="sd-count-text" :style="secondaryStyle">共{{ mediaCount.toString() }}条视频</text>
+		</view>
+
+		<view v-if="state == 'loading'" class="sd-fill">
+			<view v-for="n in 6" :key="'sk-' + n.toString()">
+				<skeleton-video-card-h :cover-height="cardHeight"></skeleton-video-card-h>
+			</view>
+		</view>
+
+		<view v-else-if="state == 'error'" class="sd-fill">
+			<p-http-error :message="errorText" @retry="reload"></p-http-error>
+		</view>
+
+		<scroll-view
+			v-else-if="items.length > 0"
+			class="sd-list"
+			:lower-threshold="200"
+			@scrolltolower="onLoadMore"
+			@scroll="onScroll"
+		>
+			<!-- 内容卡（源 SubVideoCardH）：封面+时长角标 | 标题/发布时间/播放+弹幕 -->
+			<view v-for="media in items" :key="media.id" class="sd-card" :style="cardStyle" @click="openVideo(media)">
+				<view class="sd-card-cover" :style="coverStyle">
+					<network-img :src="media.pic" width="100%" height="100%" radius="10px"></network-img>
+					<view class="sd-duration">
+						<p-badge :text="durationText(media.duration)" type="gray" size="small" :font-size="11"></p-badge>
+					</view>
+				</view>
+				<view class="sd-card-body">
+					<text class="sd-card-title" :style="titleStyle" :max-lines="2">{{ media.title }}</text>
+					<view class="sd-card-spacer"></view>
+					<text class="sd-card-time" :style="secondaryStyle">{{ dateText(media.pubdate) }}</text>
+					<view class="sd-card-stat">
+						<p-stat icon="play-circle-outlined" :text="numText(media.play)" :icon-size="13"></p-stat>
+						<view class="sd-card-gap"></view>
+						<p-stat icon="subtitles-outlined" :text="numText(media.danmaku)" :icon-size="14"></p-stat>
+					</view>
+				</view>
+			</view>
+			<view class="sd-footer">
+				<text class="sd-footer-text" :style="footerStyle">{{ footerText }}</text>
+			</view>
+		</scroll-view>
+
+		<view v-else class="sd-fill">
+			<!-- 空态：mediaCount==0（源 NoData）；列表请求成功但空 → 同空态 -->
+			<empty-illus text="没有数据"></empty-illus>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import AppNavbar from '../../components/app-navbar/app-navbar.uvue'
+import NetworkImg from '../../components/network-img/network-img.uvue'
+import PHttpError from '../../components/p-http-error/p-http-error.uvue'
+import PBadge from '../../components/p-badge/p-badge.uvue'
+import PStat from '../../components/p-stat/p-stat.uvue'
+import SkeletonVideoCardH from '../../components/skeleton/skeleton-video-card-h.uvue'
+import EmptyIllus from '../../components/common/empty-illus.uvue'
+import { fetchSeasonList, fetchSubResource } from '../../api/user-center.uts'
+import { SubDetailMedia } from '../../models/fav.uts'
+import { numFormat, timeFormat, dateFormat } from '../../utils/format.uts'
+import { themeColor, currentThemeIndex, pageBackground, textPrimary, textSecondary, withAlpha } from '../../utils/theme.uts'
+import { safeAreaBottom } from '../../utils/safeArea.uts'
+
+/**
+ * 订阅详情（源头：lib/pages/subscription_detail/{view,controller}.dart + widget/sub_video_card.dart；
+ * 无基线图——账号无订阅数据，按源码 + 同构页 fav_detail 头部形态实现）。
+ *
+ * 深链：/pages/subscription-detail/subscription-detail?seasonId&type&title&cover&upperName&upperMid&mediaCount
+ * （源经 Get.arguments 传整对象，新端深链化；缺省字段由接口 info 回填）。
+ * type=21 → /x/space/fav/season/list；否则 → /x/v3/fav/resource/list（源同款分流）。
+ * 头部固定（源 SliverAppBar 260 的非滚动等价；滚动联动仅保留标题淡入，硬切，差异登记）。
+ * 源本页无 ⋮ /「播放全部」（fav-detail 才有），按任务口径不添加。
+ */
+const PAGE_SIZE: number = 20
+
+const seasonId = ref<number>(0)
+const channelType = ref<number>(0)
+const headerTitle = ref<string>('')
+const headerCover = ref<string>('')
+const headerUpperName = ref<string>('')
+const headerUpperMid = ref<number>(0)
+const mediaCount = ref<number>(0)
+const playCount = ref<number>(0)
+const titleFadeIn = ref<boolean>(false)
+const state = ref<string>('loading')
+const errorText = ref<string>('')
+const items = ref<Array<SubDetailMedia>>([])
+const page = ref<number>(1)
+const loading = ref<boolean>(false)
+const noMore = ref<boolean>(false)
+const footerText = ref<string>('加载中...')
+
+const primary = themeColor(currentThemeIndex())
+const pageStyle = computed((): string => 'background-color:' + pageBackground() + ';')
+const titleStyle = computed((): string => 'color:' + textPrimary() + ';')
+const secondaryStyle = computed((): string => 'color:' + textSecondary() + ';')
+const primaryTextStyle = computed((): string => 'color:' + primary + ';')
+const lineStyle = computed((): string => 'background-color:' + withAlpha(textSecondary(), 0.2) + ';')
+const footerStyle = computed((): string => 'color:' + textSecondary() + ';padding-bottom:' + (safeAreaBottom() + 16).toString() + 'px;')
+const playCountText = computed((): string => playCount.value > 0 ? numFormat(playCount.value) + '次播放' : '')
+
+/** 头部区：封面 180×110 上下留白（源 padding top 30 / bottom 折算为 30+14） */
+const headerStyle = computed((): string => 'padding-top:30px;padding-bottom:14px;')
+
+const cardHeight = ((): number => {
+	try {
+		const info = uni.getWindowInfo()
+		return Math.max(88, Math.round(((info.windowWidth - 24 - 48) / 2) / 1.6))
+	} catch (e) {
+		return 106
+	}
+})()
+
+const coverStyle = computed((): string => {
+	const width = Math.round(cardHeight * 1.6)
+	return 'width:' + width.toString() + 'px;height:' + cardHeight.toString() + 'px;'
+})
+
+const cardStyle = computed((): string => 'height:' + cardHeight.toString() + 'px;')
+
+function durationText(seconds: number): string {
+	return timeFormat(seconds)
+}
+
+function dateText(timestamp: number): string {
+	return dateFormat(timestamp, 'list')
+}
+
+function numText(value: number): string {
+	return numFormat(value)
+}
+
+function onScroll(event: UniScrollViewEvent) {
+	// 源：offset > 160 标题淡入（500ms AnimatedOpacity）；新端硬切，差异登记
+	titleFadeIn.value = event.detail.scrollTop > 160
+}
+
+async function loadPage(first: boolean) {
+	if (loading.value) {
+		return
+	}
+	if (first) {
+		page.value = 1
+		noMore.value = false
+		footerText.value = '加载中...'
+		if (state.value != 'ready') {
+			state.value = 'loading'
+		}
+	}
+	loading.value = true
+	const res = channelType.value == 21
+		? await fetchSeasonList(seasonId.value, page.value, PAGE_SIZE)
+		: await fetchSubResource(seasonId.value, page.value, PAGE_SIZE)
+	loading.value = false
+	if (!res.status) {
+		if (state.value != 'ready') {
+			state.value = 'error'
+			errorText.value = res.message.length > 0 ? res.message : '请求异常'
+		} else {
+			uni.showToast({ title: res.message, icon: 'none' })
+		}
+		return
+	}
+	// info 回填深链缺省字段（title/cover/upper/mediaCount/播放数）
+	const info = res.info
+	if (info != null) {
+		if (headerTitle.value.length == 0 && info.title.length > 0) {
+			headerTitle.value = info.title
+		}
+		if (headerCover.value.length == 0 && info.cover.length > 0) {
+			headerCover.value = info.cover
+		}
+		if (headerUpperName.value.length == 0 && info.upper.name.length > 0) {
+			headerUpperName.value = info.upper.name
+		}
+		if (headerUpperMid.value <= 0) {
+			headerUpperMid.value = info.upper.mid
+		}
+		if (mediaCount.value <= 0) {
+			mediaCount.value = info.mediaCount
+		}
+	}
+	if (res.play > 0) {
+		playCount.value = res.play
+	}
+	if (first) {
+		items.value = res.items
+	} else {
+		for (let i = 0; i < res.items.length; i++) {
+			items.value.push(res.items[i])
+		}
+	}
+	page.value = page.value + 1
+	if (items.value.length >= mediaCount.value || res.items.length == 0) {
+		noMore.value = true
+		footerText.value = '没有更多了'
+	}
+	if (state.value != 'ready') {
+		state.value = 'ready'
+	}
+}
+
+function onLoadMore() {
+	if (noMore.value || loading.value || state.value != 'ready') {
+		return
+	}
+	loadPage(false)
+}
+
+function reload() {
+	state.value = 'loading'
+	loadPage(true)
+}
+
+function openVideo(media: SubDetailMedia) {
+	if (media.bvid.length == 0) {
+		uni.showToast({ title: '该条目暂无视频地址', icon: 'none' })
+		return
+	}
+	// cid 由详情页自解析（pages[0].cid 兜底），与 fav-detail 跳转口径一致
+	uni.navigateTo({ url: '/pages/video/video?bvid=' + media.bvid })
+}
+
+/** 播放全部：源本页无此按钮，未实现（见文件头注释） */
+function openUpper() {
+	if (headerUpperMid.value <= 0) {
+		return
+	}
+	uni.navigateTo({ url: '/pages/member/member?mid=' + headerUpperMid.value.toString() })
+}
+
+onLoad((options) => {
+	const raw = options == null ? null : options
+	if (raw != null && raw['seasonId'] != null) {
+		const parsed = parseInt(raw['seasonId'] as string)
+		seasonId.value = isNaN(parsed) ? 0 : parsed
+	}
+	if (raw != null && raw['type'] != null) {
+		const parsed = parseInt(raw['type'] as string)
+		channelType.value = isNaN(parsed) ? 0 : parsed
+	}
+	if (raw != null && raw['title'] != null) {
+		headerTitle.value = decodeURIComponent(raw['title'] as string)
+	}
+	if (raw != null && raw['cover'] != null) {
+		headerCover.value = decodeURIComponent(raw['cover'] as string)
+	}
+	if (raw != null && raw['upperName'] != null) {
+		headerUpperName.value = decodeURIComponent(raw['upperName'] as string)
+	}
+	if (raw != null && raw['upperMid'] != null) {
+		const parsed = parseInt(raw['upperMid'] as string)
+		headerUpperMid.value = isNaN(parsed) ? 0 : parsed
+	}
+	if (raw != null && raw['mediaCount'] != null) {
+		const parsed = parseInt(raw['mediaCount'] as string)
+		mediaCount.value = isNaN(parsed) ? 0 : parsed
+	}
+	if (seasonId.value <= 0) {
+		state.value = 'error'
+		errorText.value = '缺少订阅参数（seasonId），请从订阅列表进入'
+		return
+	}
+	loadPage(true)
+})
+</script>
+
+<style>
+	.sd {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.sd-fill {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	/* 头部块：行内边距 LR 20（源 SliverAppBar flexibleSpace padding），封面左/信息右 */
+	.sd-header {
+		display: flex;
+		flex-direction: row;
+		padding-left: 20px;
+		padding-right: 20px;
+	}
+	.sd-cover {
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.sd-info {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 14px;
+		padding-top: 4px;
+	}
+	.sd-title {
+		font-size: 16px;
+		font-weight: 700;
+		line-height: 22px;
+	}
+	.sd-upper {
+		margin-top: 4px;
+	}
+	.sd-upper-text {
+		font-size: 14px;
+		line-height: 20px;
+	}
+	.sd-play {
+		font-size: 11px;
+		margin-top: 4px;
+	}
+	.sd-header-line {
+		height: 1px;
+		margin-top: 6px;
+	}
+	.sd-count-row {
+		padding-top: 15px;
+		padding-bottom: 8px;
+		padding-left: 14px;
+	}
+	.sd-count-text {
+		font-size: 12px;
+		letter-spacing: 1px;
+	}
+	.sd-list {
+		flex: 1;
+	}
+	.sd-card {
+		display: flex;
+		flex-direction: row;
+		margin-left: 12px;
+		margin-right: 12px;
+		margin-top: 5px;
+		margin-bottom: 5px;
+	}
+	.sd-card-cover {
+		position: relative;
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.sd-duration {
+		position: absolute;
+		right: 6px;
+		bottom: 6px;
+	}
+	.sd-card-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding-left: 10px;
+		padding-right: 6px;
+		padding-top: 2px;
+	}
+	.sd-card-title {
+		font-size: 14px;
+		font-weight: 500;
+		line-height: 20px;
+	}
+	.sd-card-spacer {
+		flex: 1;
+	}
+	.sd-card-time {
+		font-size: 11px;
+	}
+	.sd-card-stat {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		margin-top: 2px;
+	}
+	.sd-card-gap {
+		width: 8px;
+	}
+	.sd-footer {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		height: 60px;
+	}
+	.sd-footer-text {
+		font-size: 13px;
+	}
+</style>
