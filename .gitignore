@@ -147,3 +147,6 @@ app.*.symbols
 /uniAppX/dist/
 /uniAppX/unpackage/
 /uniAppX/node_modules/
+
+# 内部协作文档，不纳入版本控制
+ai-docs/
