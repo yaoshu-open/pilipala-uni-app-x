@@ -7,7 +7,7 @@
 把一款成熟的 Flutter 客户端（piliPala，近 7 万行 Dart 代码）整体翻译成 uni-app x 工程：一套代码，多端运行。
 
 ![brand](https://img.shields.io/badge/%E7%88%BB%E6%9E%A2%20code-pilipala%20uni--app%20x-0ea5e9)
-![stack](https://img.shields.io/badge/stack-uni--app%20x%20%2B%20%E7%88%BB%E6%9E%A2%20UI-42b883)
+![stack](https://img.shields.io/badge/stack-uni--app%20x%20%2B%20%E7%88%BB%E6%9E%A2%E8%87%AA%E7%A0%94%E7%BB%84%E4%BB%B6%E4%BD%93%E7%B3%BB-42b883)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 </div>
@@ -25,7 +25,7 @@
 | 维度 | 原工程 | 迁移后 |
 |------|--------|--------|
 | 语言 / 框架 | Dart · Flutter 3.19 | uts + uvue · uni-app x（蒸汽模式） |
-| UI 体系 | Flutter 自绘组件 | uvue 原生组件 + 自建业务组件，爻枢 UI（yaoshu-ui）按需接入 |
+| UI 体系 | Flutter 自绘组件 | 爻枢 code 自研 UI 组件体系：uvue 原生组件 + 自研 `p-*` 基础件与业务组件，源码全部在 `uniAppX/components/`，可直接查证与复用 |
 | 跨端形态 | 原生 App（Android / iOS） | 一套代码覆盖 App（Android / iOS / 鸿蒙）+ 小程序 + Web |
 | 工程结构 | `lib/` 单端 | `uniAppX/` 49 个页面迁移项、组件与 API 层分层 |
 | 迁移方式 | — | 逐页翻译 + 双端视觉对照 + 能力等价表逐项核对 |
@@ -44,6 +44,8 @@
 | 未验证端 | iOS / 鸿蒙 / 小程序尚未建立运行验证门禁，请勿按「已支持」理解 |
 
 已知边界（登录凭据、弹幕写入、部分写接口）在 `ai-docs/移动端设计/迁移/交付说明_pilipala.md` 中逐条列明。
+
+> 迁移对照截图（双端视觉证据）体积过大，不随仓库分发；仓库只保留源码与文档，文档中指向 `*-assets/` 的图片路径在本仓库不可达。
 
 ## 快速开始
 
