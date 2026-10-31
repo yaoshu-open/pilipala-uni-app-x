@@ -17,7 +17,7 @@
 这是一个 **fork 式迁移仓库**：保留原 piliPala 的全部 git 历史，并在其之上落地 uni-app x 迁移工程。
 
 - `lib/` —— 原 Flutter 工程，**事实源**。迁移期间的唯一行为基准，保持原样不改。
-- `mobile/` —— uni-app x 迁移产物，本仓库的主角。Flutter 的页面、状态、请求链路在此以 uts + uvue 重建。
+- `uniAppX/` —— uni-app x 迁移产物，本仓库的主角。Flutter 的页面、状态、请求链路在此以 uts + uvue 重建。
 - `ai-docs/` —— 迁移设计、需求、迁移清单、进度与交付说明（含双端视觉对照证据）。
 
 ## 迁移亮点
@@ -27,7 +27,7 @@
 | 语言 / 框架 | Dart · Flutter 3.19 | uts + uvue · uni-app x（蒸汽模式） |
 | UI 体系 | Flutter 自绘组件 | uvue 原生组件 + 自建业务组件，爻枢 UI（yaoshu-ui）按需接入 |
 | 跨端形态 | 原生 App（Android / iOS） | 一套代码覆盖 App（Android / iOS / 鸿蒙）+ 小程序 + Web |
-| 工程结构 | `lib/` 单端 | `mobile/` 49 个页面迁移项、组件与 API 层分层 |
+| 工程结构 | `lib/` 单端 | `uniAppX/` 49 个页面迁移项、组件与 API 层分层 |
 | 迁移方式 | — | 逐页翻译 + 双端视觉对照 + 能力等价表逐项核对 |
 
 迁移不是「重写一个相似的东西」：源工程的接口签名、状态流转、设置键默认值、页面跳转语义都被逐条对齐，差异项在 `ai-docs/移动端设计/迁移/` 里有据可查。
@@ -49,7 +49,7 @@
 
 需要 HBuilderX **5.26+**（uni-app x 蒸汽模式工具链随其分发）：
 
-1. 用 HBuilderX 打开 `mobile/` 目录
+1. 用 HBuilderX 打开 `uniAppX/` 目录
 2. 运行 → 运行到手机或模拟器（Android）
 3. 首次运行需下载对应调试基座
 
@@ -59,7 +59,7 @@
 
 ```
 pilipala-uni-app-x/
-├── mobile/          # uni-app x 迁移工程（主角）
+├── uniAppX/         # uni-app x 迁移工程（主角）
 │   ├── pages/       # 页面（49 条路由对应）
 │   ├── components/  # 业务组件
 │   ├── api/         # 接口层（签名、Cookie、状态码白名单）
